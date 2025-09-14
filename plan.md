@@ -1,321 +1,91 @@
-# Battle Royale Circle Simulation - Implementation Plan
+# BattleRoyale Circles - Implementation Plan (Vulkan C++ on macOS / MoltenVK)
 
-## Overview
-A Vulkan-based C++ application simulating a battle royale game where circular players bounce around an arena, collide with each other and walls, take damage, and ultimately declare a winner. The system must handle potentially 500,000+ players with optimized performance.
+## Goals
+- Vulkan + GLFW app on macOS (MoltenVK) rendering a simulation of image-backed circles (“players”).
+- Bouncing physics with circle-circle and circle-wall collisions; health bars; eliminations.
+- Winner sequence: last circle centers, scales up, shows filename as name.
+- Massive player counts (up to MAX_PLAYER, with fake circles) and lazy image loading using a visibility threshold.
+- Display HUD text: "Players left: X" top-left.
+- Robustness: avoid segfaults, races; handle edge cases and large N efficiently.
 
-## Core Requirements
-- **Players**: Circles with images from `/assets/` folder
-- **Physics**: Bouncing off walls and other circles
-- **Health System**: Health bars, damage on collision
-- **Dynamic Scaling**: Circles grow as fewer players remain
-- **Winner Declaration**: Last standing player scales up and shows name
-- **Performance**: Handle 500k+ circles with lazy loading and fake circles
-- **Bias System**: Player-specific win multipliers
-- **UI**: Player count display
+## macOS Vulkan specifics
+- Use loader + MoltenVK. Enable `VK_KHR_portability_enumeration` on instance and set `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`.
+- Enable device extension `VK_KHR_portability_subset` and `VK_KHR_swapchain`.
+- Validation layer `VK_LAYER_KHRONOS_validation` in debug builds.
 
-## Technical Architecture
+## High-level Architecture
+- App: window, Vulkan context (instance, device, queues, swapchain, render pass, frame sync, descriptor pools).
+- Renderer: draw pass for circles, health bars, and text (HUD). Prefer one pipeline for sprites/billboards, instanced.
+- Simulation: ECS-lite structs with SoA for hot loops (positions, velocities, radii, health, alive flags, imageId, bias).
+- Asset system: image manager with lazy load tiers (fake -> placeholder -> real). O(1) lookup by player index; avoid per-frame traversal costs.
+- Collision system: uniform spatial hash grid (or multi-level grids for varied radii). Broad-phase via grid buckets; narrow-phase exact tests. Deterministic resolution order to avoid races.
+- Scheduler: single-threaded simulation step; async I/O for image decode/loading. Thread-safe queues with double buffers to apply asset state updates.
 
-### 1. Build System & Dependencies
-```cmake
-# CMakeLists.txt requirements:
-- Vulkan SDK
-- GLFW (window management)
-- GLM (math library)
-- STB Image (texture loading)
-- Freetype (text rendering for player names/count)
-- Threading support (std::thread or TBB)
-```
+## Massive Scale Strategy (>500k files)
+- Do not load all images or create 500k Vulkan image views. Maintain metadata list of file paths and a small LRU cache of decoded + GPU-resident textures (e.g., few thousands max).
+- Use a texture atlas array (array of 2D layers) of fixed layer count (e.g., 2048) for visible, above-threshold players. Evict via LRU when layers are scarce. Index via `imageId -> layerIndex | placeholder`.
+- If descriptor indexing (bindless) is absent or limited on MoltenVK, prefer a small set of per-frame descriptor sets for the atlas array; use an indirection buffer mapping instance to atlas layer.
+- Lazy tiers:
+  - Tier 0 (fake): no file I/O; rendered as flat color in compute/fragment; guaranteed to die before threshold.
+  - Tier 1 (placeholder): tiny 1x1 or 4x4 texture (low memory) for small-but-visible sprites.
+  - Tier 2 (real): high-quality mipmapped texture uploaded on demand when radius > IMAGE_LOAD_THRESHOLD.
+- O(1) algorithmic constraint for image access: each entity holds stable index to metadata; atlas layer lookup is O(1) via a dense vector; LRU updates are O(1) amortized with linked-list + hashmap.
 
-### 2. Vulkan Pipeline Setup
-- **Swapchain**: Double/triple buffering for smooth rendering
-- **Render Pass**: Single pass with color and depth attachments
-- **Graphics Pipeline**:
-  - Vertex shader: Circle positions, sizes, health bars
-  - Fragment shader: Texture sampling, health bar rendering
-  - Instanced rendering for efficient circle drawing
-- **Descriptor Sets**: Texture arrays, uniform buffers for transforms
+## Rendering Approach
+- Instanced rendering of quads (two triangles) for circles; circle appearance via fragment shader signed distance function to avoid per-vertex circles. Image sampled using per-instance atlas layer; health bar drawn as a second instanced pass or in same shader via a screen-space overlay.
+- One command buffer per frame, one draw for circles (instanced), one draw for health bars, one draw for text.
+- Push constants or storage buffer for per-frame params (time, viewport, scaling factor, thresholds, counts).
 
-### 3. Data Structures
+## Scaling Visual Size Without Resizing Massive Counts
+- Global scale factor S derived from activeAliveCount; applied in vertex shader to instance radius. This avoids touching per-entity data for millions of circles. Clamp by MAX_CIRCLE_SIZE.
+- Only when an instance crosses IMAGE_LOAD_THRESHOLD do we request real texture; below threshold we render flat color/placeholder.
 
-#### Player/Circle Structure
-```cpp
-struct Player {
-    std::string name;           // From filename
-    float bias_multiplier;      // Win probability modifier (1.0-2.0)
-    glm::vec2 position;         // Current position
-    glm::vec2 velocity;         // Movement vector
-    float radius;               // Current size
-    float health;               // 0.0-100.0
-    bool is_real;               // Real player vs fake circle
-    int texture_index;          // Index in texture array
-    bool alive;                 // Still in game
-};
-```
+## Physics and Collisions
+- Time step: fixed dt (e.g., 1/120s) using accumulator; decouple from render rate.
+- Spatial hash grid with cell size ~= average diameter of common radius tier. For high variance, consider multi-grid (e.g., powers of two radii bins).
+- Insert alive circles into grid per frame (SoA helps). Broad-phase: only test against items in same and neighboring cells (9 cells).
+- Elastic collision response with damping; apply health damage based on impulse magnitude. Clamp minimum damage to ensure progress.
+- Wall collisions via AABB checks; invert velocity component and apply small damping.
+- Deterministic iteration order (by index) and atomic-free single-threaded physics step to avoid races. Optionally parallelize by tiling grid regions if needed later with careful conflict management.
 
-#### Constants Configuration
-```cpp
-const int MAX_CIRCLES = 500000;
-const int FAKE_CIRCLES = 400000;        // Fake circles for initial mass
-const float VISIBILITY_THRESHOLD = 2.0f; // Minimum pixels for visibility
-const float MAX_CIRCLE_SIZE = 50.0f;    // Maximum radius when few players
-const float BASE_HEALTH = 100.0f;
-const float COLLISION_DAMAGE = 10.0f;
-const float WALL_BOUNCE_DAMPING = 0.95f;
-const float ARENA_SIZE = 1000.0f;
-```
+## Elimination and Winner Flow
+- When health <= 0: mark dead, remove from grid, free/evict texture layer (decrement refcount), decrement alive count.
+- Winner: when alive count == 1, transition to "victory" state: interpolate position to center, scale up to WINNER_SCALE, display name (filename stem) in center. Freeze others.
 
-### 4. Physics Simulation
+## File/IO and Bias
+- Enumerate image filenames from `assets/` once; store stems as player names; maintain mapping for bias multipliers (config file `bias.json` or hardcoded map, modifiable at runtime).
+- MAX_PLAYER: if actual image files < MAX_PLAYER, spawn fake circles to reach MAX_PLAYER; fake circles have Tier 0 textures/colors.
 
-#### Collision Detection Strategy
-**Challenge**: O(n²) collision detection for 500k circles is impossible
-**Solution**: Spatial partitioning with grid-based approach
+## Constants (tunable)
+- MAX_PLAYER
+- IMAGE_LOAD_THRESHOLD_RADIUS
+- MAX_CIRCLE_SIZE
+- WINNER_SCALE
+- DAMAGE_MULTIPLIER, WALL_DAMPING, COLLISION_DAMPING
+- GRID_CELL_SIZE
 
-```cpp
-class SpatialGrid {
-    std::vector<std::vector<std::vector<Player*>>> grid;
-    float cell_size;
-    int grid_width, grid_height;
+## Robustness and Edge Cases
+- Validation layers in debug; check all Vk results; RAII wrappers to prevent leaks.
+- Guard zero devices/queues/swapchain formats; handle window resize.
+- Clamp velocities/radii; avoid NaNs; ensure no division by zero in collision math.
+- Thread safety: image loader thread communicates via lock-free MPMC queue or mutex-protected queue; main thread consumes at frame boundary.
+- Prevent thundering herd on texture loads: coalesce requests; deduplicate per imageId; cancel when entity dies.
 
-    // Methods:
-    void insert(Player* player);
-    void remove(Player* player);
-    std::vector<Player*> get_nearby(Player* player);
-    void update_all_positions();
-};
-```
+## Text Rendering (Players left)
+- Simple path: bake minimal bitmap font (e.g., stb_easy_font) to a dynamic vertex buffer, or integrate Dear ImGui for HUD (no heavy styling). Keep draw order last.
 
-**Threading**: Divide grid into chunks processed by worker threads
-- Use thread pool (8-16 threads based on CPU cores)
-- Each thread handles collision detection for its grid chunk
-- Atomic operations for position updates to prevent race conditions
+## Milestones
+1) Minimal Vulkan window (this repo). Verify presentation.
+2) Create swapchain, render pass, frame sync, render clear color.
+3) Instanced quad pipeline, draw N flat-color circles with SDF in shader.
+4) Spatial grid + collisions + health; eliminations.
+5) Texture atlas/array, placeholder + real mipmapped textures, lazy loading.
+6) HUD text, players left counter, winner flow.
+7) Bias configuration and tuning.
+8) Stress test & profiling; refine grid and resource limits.
 
-#### Physics Integration
-```cpp
-class PhysicsEngine {
-    SpatialGrid spatial_grid;
-    std::vector<std::unique_ptr<std::thread>> worker_threads;
-    std::atomic<bool> simulation_running;
+## Notes on MoltenVK capabilities
+- Descriptor indexing/bindless is limited; plan on atlas array + indirection buffer.
+- Avoid geometry shaders; use instancing + SDF.
+- Prefer fewer pipelines; Metal backend likes stable pipelines and small descriptor sets.
 
-    void update_physics(float delta_time);
-    void resolve_collisions(std::vector<Player*>& chunk);
-    void handle_wall_collisions(Player* player);
-};
-```
-
-### 5. Rendering System
-
-#### Instanced Rendering
-- Single vertex buffer for circle geometry (low-poly circle mesh)
-- Instance buffer with per-circle data (position, size, texture index, health)
-- Health bars rendered as separate instances or overlaid in fragment shader
-
-#### Texture Management
-```cpp
-class TextureManager {
-    std::vector<VkImage> textures;
-    std::unordered_map<std::string, int> texture_indices;
-    VkDescriptorSet texture_descriptor_set;
-
-    // Lazy loading system
-    void load_texture_async(const std::string& filename);
-    void unload_distant_textures(); // Based on camera/player positions
-};
-```
-
-**Memory Optimization**:
-- Texture atlas for frequently used images
-- Mipmapping for distance-based quality
-- Compressed texture formats (BC/ASTC)
-
-#### Dynamic Scaling Algorithm
-```cpp
-float calculate_circle_size(int alive_players) {
-    float scale_factor = std::max(0.1f,
-        std::min(1.0f, (float)MAX_CIRCLES / alive_players));
-    return BASE_CIRCLE_SIZE * scale_factor * MAX_CIRCLE_SIZE;
-}
-```
-
-### 6. Performance Optimizations
-
-#### Fake Circles System
-- Initial population: `real_players + FAKE_CIRCLES`
-- Fake circles have no textures, simple physics
-- All fake circles die before reaching `VISIBILITY_THRESHOLD`
-- Prevents loading 500k textures initially
-
-#### Lazy Loading Implementation
-```cpp
-class LazyLoader {
-    std::queue<std::string> load_queue;
-    std::vector<std::thread> loader_threads;
-    std::mutex queue_mutex;
-
-    void load_worker();
-    bool should_load_texture(Player* player); // Based on size/screen position
-};
-```
-
-#### Memory Management
-- Object pooling for Player objects
-- Texture streaming based on player proximity to camera
-- Circular buffer for position history (for interpolation)
-
-### 7. Threading and Synchronization
-
-#### Race Condition Prevention
-- **Collision Detection**: Use atomic operations for health updates
-- **Position Updates**: Double-buffering - read from old buffer, write to new
-- **Texture Loading**: Mutex-protected texture array
-- **Player Removal**: Mark as dead, clean up in main thread
-
-```cpp
-std::atomic<float> player_health;
-std::mutex texture_load_mutex;
-
-// Thread-safe health reduction
-void take_damage(Player* player, float damage) {
-    float current = player->health.load(std::memory_order_relaxed);
-    while (!player->health.compare_exchange_weak(current, current - damage));
-}
-```
-
-### 8. Game State Management
-
-#### State Machine
-```cpp
-enum class GameState {
-    LOADING,
-    SIMULATING,
-    WINNER_DECLARATION,
-    FINISHED
-};
-
-class GameManager {
-    GameState current_state;
-    std::vector<Player> players;
-    Player* winner;
-
-    void update_loading();
-    void update_simulation();
-    void update_winner_sequence();
-};
-```
-
-#### Winner Declaration Sequence
-1. Detect last alive player
-2. Smooth interpolation to center of screen
-3. Scale up over 2-3 seconds
-4. Display player name with animation
-5. Hold for 5 seconds then fade out
-
-### 9. Input and Camera System
-
-#### Camera Controls
-- Mouse drag to pan
-- Mouse wheel to zoom
-- Follow winner during declaration
-- Auto-zoom to fit all visible players
-
-#### UI Elements
-- Player count: Top-left text overlay
-- Winner name: Centered, large text
-- Health bars: Above each circle (scaled with circle size)
-
-### 10. Error Handling and Edge Cases
-
-#### Segfault Prevention
-- Bounds checking on all array accesses
-- Null pointer checks before dereference
-- Vulkan validation layers in debug mode
-- Exception handling for file I/O
-
-#### Edge Cases
-- **Zero Players**: Graceful shutdown
-- **Single Player**: Immediate winner declaration
-- **All Players Die Simultaneously**: Random winner selection
-- **Memory Exhaustion**: Fallback to lower quality textures
-- **Thread Crashes**: Thread monitoring and restart
-
-### 11. Development Phases
-
-#### Phase 1: Core Infrastructure
-1. Vulkan window setup
-2. Basic circle rendering (no textures)
-3. Simple physics (wall bouncing only)
-
-#### Phase 2: Collision System
-1. Grid-based collision detection
-2. Multi-threaded physics
-3. Health system implementation
-
-#### Phase 3: Visual Features
-1. Texture loading system
-2. Health bar rendering
-3. UI text overlays
-
-#### Phase 4: Performance Optimization
-1. Instanced rendering
-2. Lazy loading implementation
-3. Fake circles system
-
-#### Phase 5: Polish
-1. Winner declaration animation
-2. Dynamic scaling
-3. Bias system integration
-
-### 12. Testing Strategy
-
-#### Unit Tests
-- Physics calculations
-- Collision detection accuracy
-- Texture loading performance
-
-#### Performance Benchmarks
-- Frame time with varying player counts
-- Memory usage scaling
-- Thread utilization
-
-#### Stress Testing
-- 500k fake circles simulation
-- Texture loading under memory pressure
-- Long-running stability tests
-
-### 13. Potential Challenges & Solutions
-
-#### Challenge: Vulkan Instancing Limits
-**Solution**: Multiple draw calls or indirect drawing
-
-#### Challenge: Texture Memory
-**Solution**: Streaming system with LRU cache eviction
-
-#### Challenge: CPU Bottleneck in Physics
-**Solution**: GPU compute shaders for physics calculations
-
-#### Challenge: Floating Point Precision
-**Solution**: Use double precision for positions, single for rendering
-
-### 14. File Structure
-```
-src/
-├── main.cpp
-├── vulkan/
-│   ├── VulkanContext.h/cpp
-│   ├── Renderer.h/cpp
-│   └── ShaderManager.h/cpp
-├── game/
-│   ├── Player.h/cpp
-│   ├── PhysicsEngine.h/cpp
-│   ├── GameManager.h/cpp
-│   └── SpatialGrid.h/cpp
-├── rendering/
-│   ├── TextureManager.h/cpp
-│   ├── UIManager.h/cpp
-│   └── Camera.h/cpp
-└── utils/
-    ├── ThreadPool.h/cpp
-    ├── Timer.h/cpp
-    └── MathUtils.h/cpp
-```
-
-This plan provides a solid foundation for implementing the battle royale simulation with performance optimizations for handling massive player counts while maintaining visual fidelity and smooth gameplay.
