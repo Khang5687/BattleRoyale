@@ -37,7 +37,8 @@
 - Push constants or storage buffer for per-frame params (time, viewport, scaling factor, thresholds, counts).
 
 ## Scaling Visual Size Without Resizing Massive Counts
-- Global scale factor S derived from activeAliveCount; applied in vertex shader to instance radius. This avoids touching per-entity data for millions of circles. Clamp by MAX_CIRCLE_SIZE.
+- **DEPRECATED APPROACH**: Global scale factor applied to radius causes physics-rendering mismatch and collision issues.
+- **RECOMMENDED**: Camera/viewport scaling approach - adjust effective viewport dimensions rather than object sizes.
 - Only when an instance crosses IMAGE_LOAD_THRESHOLD do we request real texture; below threshold we render flat color/placeholder.
 
 ## Physics and Collisions
@@ -87,18 +88,19 @@
 7) ✅ Bias configuration and tuning.
 8) ❌ Stress test & profiling; refine grid and resource limits.
 
-## Current Status (✅ = COMPLETED)
+## Current Status (✅ = COMPLETED, 🔧 = NEEDS WORK)
 ✅ **Core Vulkan Setup**: MoltenVK initialization, swapchain, render pass, command buffers
 ✅ **Circle Rendering**: Instanced SDF-based circle rendering with smooth anti-aliased edges
 ✅ **Physics System**: Spatial hash grid collision detection, elastic collisions with damping
 ✅ **Health System**: Health-based eliminations with color-coded health visualization (green→red)
 ✅ **Winner Detection**: Victory state with winner centering, scaling, and name display
 ✅ **HUD Output**: Console-based "Players left: X" counter with winner announcement
-🔧 **Bias Configuration**: Text-based bias system (needs redesign - currently uses health/size multipliers, should use damage reduction)
+✅ **Bias Configuration**: Damage reduction-based bias system with small-game protection
 ✅ **Speed Control**: Configurable speed multiplier constant for faster/slower gameplay
 ✅ **Asset Integration**: File enumeration from assets/ directory with bias application
-✅ **Real Battle Simulation**: 256 players battling with eliminations progressing to single winner
+✅ **Real Battle Simulation**: Battle royale with eliminations progressing to single winner
 ✅ **Image Avatar Loading System**: Complete texture atlas array with LRU cache and lazy loading tiers
+🔧 **Dynamic Circle Scaling**: Global scale factor approach deprecated due to physics issues - needs camera/viewport scaling redesign
 
 ## ✅ **URGENT FIXES COMPLETED**
 ✅ **Circle Size Issues**: All circles now have uniform fixed radius (20.0px) - random size variation removed
@@ -137,6 +139,53 @@ The battle royale simulation now successfully runs with the new image avatar loa
 
 The system supports rendering image avatars for battle royale circles while maintaining high performance through lazy loading and efficient GPU memory usage. Circles start as flat colors and upgrade to real image textures when they become large enough to warrant the loading cost.
 
+## 🔄 Dynamic Circle Scaling System - NEEDS REDESIGN
+
+**PROBLEM ANALYSIS**: The initial global scale factor approach caused critical physics-rendering mismatches:
+
+### ❌ Issues with Global Scale Factor Approach
+- **Physics Teleporting**: Circles detected as colliding from much further distances than visually apparent
+- **Hitbox Mismatch**: Visual size scaled 3x but collision detection also scaled, creating confusing interactions  
+- **Spatial Grid Issues**: Required dynamic grid cell size adjustments, causing performance overhead
+- **Wall Collision Problems**: Circles bouncing off walls prematurely due to scaled collision radius
+
+### 🔍 Root Cause
+The fundamental issue: **separating visual representation from physics simulation space**. When rendering uses scale factor 3.0 but physics also scales collision detection, circles appear to collide when visually separated, causing unexpected "teleporting" behavior during collision resolution.
+
+### 🎯 Recommended Solutions (Research-Backed)
+
+**PRIMARY RECOMMENDATION: Camera/Viewport Scaling** ⭐
+- **Approach**: Decrease effective viewport dimensions instead of scaling circle radius
+- **Implementation**: `effectiveViewport = realViewport / scaleFactor` in push constants
+- **Physics**: Remains unchanged at original 40px radius - no collision issues
+- **Benefits**: 
+  - Zero physics complications
+  - Industry standard approach (used in most real-time games)
+  - O(1) performance, no per-entity updates
+  - Smooth scaling without hitbox mismatches
+
+**SECONDARY OPTIONS:**
+- **Discrete Entity Updates**: Update actual radius values only when scale changes >15%, with interpolation
+- **Visual-Only Scaling**: Scale in vertex shader only, accept visual ≠ collision size
+- **Hybrid Approach**: Camera scaling + discrete updates for extreme cases
+
+### 📚 Industry Research
+Research confirms camera/viewport scaling is the preferred method in real-time games because:
+- Maintains consistent physics interactions
+- Avoids hitbox alignment issues  
+- Simpler implementation with better performance
+- Used in battle royale games for "zoom effects" during endgame
+
+### 🎯 Implementation Priority
+
+**IMMEDIATE NEXT STEP**: Implement camera/viewport scaling approach
+1. **Simplest Fix**: Modify vertex shader to use `effectiveViewport = realViewport / scaleFactor`
+2. **Remove Physics Scaling**: Revert all collision detection back to original fixed radius
+3. **Test Behavior**: Verify no more teleporting, smooth visual scaling
+4. **Performance Check**: Confirm O(1) scaling performance maintained
+
+**Expected Outcome**: Circles appear larger as player count decreases, but physics remains consistent at 40px radius, eliminating all hitbox mismatch issues.
+
 ---
 
 ## DETAILED TODO LIST
@@ -170,11 +219,17 @@ The system supports rendering image avatars for battle royale circles while main
     - [x] Below threshold, all players take equal damage (no bias applied)
     - [x] Prevents bias from being obvious in small battles
 
-- [ ] **Dynamic Circle Scaling** (Global Scale Factor)
-  - [ ] Implement global scale factor based on alive count: `S = f(activeAliveCount)`
-  - [ ] Apply scaling in vertex shader to avoid per-entity data updates
-  - [ ] Add MAX_CIRCLE_SIZE clamping for visual bounds
-  - [ ] Scale circles up as player count decreases for better visibility
+- [ ] **🔄 Dynamic Circle Scaling** (Camera/Viewport Approach) **NEEDS REDESIGN**
+  - [x] ~~Global scale factor approach~~ **DEPRECATED** - causes physics-rendering mismatch
+  - [ ] **Implement camera/viewport scaling** (PRIMARY RECOMMENDATION)
+    - [ ] Calculate effective viewport dimensions: `effectiveViewport = realViewport / scaleFactor`
+    - [ ] Update vertex shader to use effective viewport instead of scaling radius
+    - [ ] Keep physics at original radius (40px) - no collision modifications needed
+    - [ ] Test scaling behavior without hitbox issues
+  - [ ] **Alternative approaches** (SECONDARY OPTIONS)
+    - [ ] Discrete entity updates with interpolation (if camera scaling insufficient)
+    - [ ] Visual-only scaling (accept visual ≠ collision size)
+  - [ ] Performance comparison between approaches
 
 - [ ] **Visual HUD Text Rendering**
   - [ ] Replace console output with on-screen text overlay
