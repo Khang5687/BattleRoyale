@@ -151,15 +151,17 @@ struct Simulation {
 	uint32_t maxPlayers = 12;
 	float minRadius = 12.0f;
 	float maxRadius = 28.0f;
+	float fixedRadius = 20.0f; // All circles have uniform size
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
 	float damageMultiplier = 0.5f;
 	float minDamage = 0.05f;
 	float gridCellSize = 64.0f;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
+	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
 
-	// Bias system
-	std::map<std::string, float> biasMultipliers;
+	// Bias system - now uses damage reduction instead of health multipliers
+	std::map<std::string, float> biasReductions; // 0.0 = no reduction, 0.5 = 50% damage reduction
 
 	// World
 	float worldWidth = 800.0f;
@@ -189,7 +191,7 @@ struct Simulation {
 	float victoryTime = 0.0f;
 
 	void loadBiasConfig(const std::string& biasFile) {
-		biasMultipliers.clear();
+		biasReductions.clear();
 		std::ifstream file(biasFile);
 		if (!file.is_open()) {
 			std::cout << "No bias config found, using defaults\n";
@@ -200,11 +202,13 @@ struct Simulation {
 			size_t pos = line.find(':');
 			if (pos != std::string::npos) {
 				std::string name = line.substr(0, pos);
-				float multiplier = std::stof(line.substr(pos + 1));
-				biasMultipliers[name] = multiplier;
+				float reduction = std::stof(line.substr(pos + 1));
+				// Clamp reduction to [0.0, 0.9] to prevent invincibility
+				reduction = std::clamp(reduction, 0.0f, 0.9f);
+				biasReductions[name] = reduction;
 			}
 		}
-		std::cout << "Loaded " << biasMultipliers.size() << " bias entries\n";
+		std::cout << "Loaded " << biasReductions.size() << " bias entries\n";
 	}
 
 	void initializeFromAssets(const std::string& assetsDir, uint32_t targetCount) {
@@ -238,26 +242,20 @@ struct Simulation {
 		std::uniform_real_distribution<float> distX(40.0f, worldWidth - 40.0f);
 		std::uniform_real_distribution<float> distY(40.0f, worldHeight - 40.0f);
 		std::uniform_real_distribution<float> distV(-140.0f * speedMultiplier, 140.0f * speedMultiplier);
-		std::uniform_real_distribution<float> distR(minRadius, maxRadius);
 
 		for (uint32_t i = 0; i < targetCount; ++i) {
 			posX[i] = distX(rng);
 			posY[i] = distY(rng);
 			velX[i] = distV(rng);
 			velY[i] = distV(rng);
-			radius[i] = distR(rng);
-			health[i] = 1.0f;
+			radius[i] = fixedRadius; // All circles have uniform size
+			health[i] = 1.0f; // All players start with same health
 			alive[i] = 1;
 			if (i < files.size()) {
 				imageId[i] = i;
 				imageTier[i] = 0; // Start with flat color, upgrade based on radius
 				names[i] = files[i].stem().string();
-				// Apply bias multiplier to health if configured
-				auto it = biasMultipliers.find(names[i]);
-				if (it != biasMultipliers.end()) {
-					health[i] *= it->second;
-					radius[i] *= std::sqrt(it->second); // Larger radius for higher health
-				}
+				// Note: Bias is now applied during damage calculation, not initialization
 			} else {
 				imageId[i] = UINT32_MAX; // fake
 				imageTier[i] = 0; // Fake always flat color
@@ -335,8 +333,28 @@ struct Simulation {
 									velX[j] *= collisionDamping; velY[j] *= collisionDamping;
 									// Damage based on impulse magnitude
 									float impulse = std::abs(dvI) + std::abs(dvJ);
-									float dmg = std::max(minDamage, impulse * damageMultiplier * 0.001f);
-									health[i] -= dmg; health[j] -= dmg;
+									float baseDamage = std::max(minDamage, impulse * damageMultiplier * 0.001f);
+									
+									// Apply bias damage reduction if bias is active (enough players)
+									float finalDamageI = baseDamage;
+									float finalDamageJ = baseDamage;
+									
+									if (aliveCount() >= BIAS_ACTIVE_THRESHOLD) {
+										// Apply bias reduction for player i
+										auto itI = biasReductions.find(names[i]);
+										if (itI != biasReductions.end()) {
+											finalDamageI = baseDamage * (1.0f - itI->second);
+										}
+										
+										// Apply bias reduction for player j
+										auto itJ = biasReductions.find(names[j]);
+										if (itJ != biasReductions.end()) {
+											finalDamageJ = baseDamage * (1.0f - itJ->second);
+										}
+									}
+									
+									health[i] -= finalDamageI; 
+									health[j] -= finalDamageJ;
 									if (health[i] <= 0.0f) { alive[i] = 0; }
 									if (health[j] <= 0.0f) { alive[j] = 0; }
 								}

@@ -100,10 +100,10 @@
 ✅ **Real Battle Simulation**: 256 players battling with eliminations progressing to single winner
 ✅ **Image Avatar Loading System**: Complete texture atlas array with LRU cache and lazy loading tiers
 
-## ⚠️ **URGENT FIXES NEEDED**
-🔧 **Circle Size Issues**: Circles currently have random sizes - need uniform fixed radius for all players
-🔧 **Bias System Problems**: Current health/radius multiplier system is too obvious - needs damage reduction approach
-🔧 **Small Game Bias**: Bias should be disabled in games with <50 players to prevent obvious advantages
+## ✅ **URGENT FIXES COMPLETED**
+✅ **Circle Size Issues**: All circles now have uniform fixed radius (20.0px) - random size variation removed
+✅ **Bias System Redesign**: Implemented damage reduction approach instead of health multipliers - bias is less visually obvious
+✅ **Small Game Bias Protection**: Bias now only activates when player count ≥ 50 to prevent obvious advantages in small battles
 
 ## 🎉 Image Avatar Loading System - IMPLEMENTATION COMPLETE
 
@@ -154,21 +154,21 @@ The system supports rendering image avatars for battle royale circles while main
   - [x] Hash-based image ID to atlas layer mapping for O(1) access
   - [x] Dynamic scaling to 256x256 atlas slots with staging buffers
 
-- [ ] **🔧 Circle Size & Bias System Fixes** ⚠️ **URGENT ISSUES**
-  - [ ] **Uniform Circle Sizes**: Remove random radius variation - all circles should have identical fixed radius
-    - [ ] Replace `std::uniform_real_distribution<float> distR(minRadius, maxRadius)` with fixed radius
-    - [ ] Use consistent radius calculation: `(minRadius + maxRadius) * 0.5f` for all players
-    - [ ] Remove bias-based radius scaling: `radius[i] *= std::sqrt(it->second)` should be disabled
-  - [ ] **Redesign Bias System**: Change from health multipliers to damage reduction system
-    - [ ] Replace current health-based bias with damage reduction multipliers
-    - [ ] When player takes damage, apply bias as: `finalDamage = baseDamage * (1.0f - biasReduction)`
-    - [ ] Keep health values uniform (1.0f) for all players, only vary damage taken
-    - [ ] This makes bias less visually obvious while still providing competitive advantage
-  - [ ] **Bias Player Count Threshold**: Add configurable threshold to disable bias in small games
-    - [ ] Add constant: `static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50;`
-    - [ ] Only apply bias when `aliveCount() >= BIAS_ACTIVE_THRESHOLD`
-    - [ ] When below threshold, all players have equal damage (no bias applied)
-    - [ ] This prevents bias from being too obvious in small battles
+- [x] **✅ Circle Size & Bias System Fixes** **COMPLETED**
+  - [x] **Uniform Circle Sizes**: Removed random radius variation - all circles now have identical fixed radius
+    - [x] Replaced `std::uniform_real_distribution<float> distR(minRadius, maxRadius)` with `fixedRadius = 20.0f`
+    - [x] All players now use consistent fixed radius for uniform visual appearance
+    - [x] Removed bias-based radius scaling that made advantages too obvious
+  - [x] **Redesigned Bias System**: Changed from health multipliers to damage reduction system
+    - [x] Replaced `biasMultipliers` with `biasReductions` map for damage reduction approach
+    - [x] Implemented damage reduction: `finalDamage = baseDamage * (1.0f - biasReduction)`
+    - [x] All players start with uniform health (1.0f), bias only affects damage taken
+    - [x] Bias is now less visually obvious while still providing competitive advantage
+  - [x] **Bias Player Count Threshold**: Added configurable threshold for small games
+    - [x] Added constant: `static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50;`
+    - [x] Bias only applies when `aliveCount() >= BIAS_ACTIVE_THRESHOLD`
+    - [x] Below threshold, all players take equal damage (no bias applied)
+    - [x] Prevents bias from being obvious in small battles
 
 - [ ] **Dynamic Circle Scaling** (Global Scale Factor)
   - [ ] Implement global scale factor based on alive count: `S = f(activeAliveCount)`
