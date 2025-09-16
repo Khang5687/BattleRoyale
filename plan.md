@@ -56,7 +56,7 @@
 - Enumerate image filenames from `assets/` once; store stems as player names; maintain mapping for bias multipliers (config file `bias.json` or hardcoded map, modifiable at runtime).
 - MAX_PLAYER: if actual image files < MAX_PLAYER, spawn fake circles to reach MAX_PLAYER; fake circles have Tier 0 textures/colors.
 
-## Constants (tunable)
+## ´s (tunable)
 - MAX_PLAYER
 - IMAGE_LOAD_THRESHOLD_RADIUS
 - MAX_CIRCLE_SIZE

@@ -15,6 +15,15 @@
 #include <random>
 #include <map>
 #include <sstream>
+#include <unordered_map>
+#include <list>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <atomic>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -47,6 +56,7 @@ struct BufferWithMemory {
 struct PipelineObjects {
 	VkPipelineLayout layout = VK_NULL_HANDLE;
 	VkPipeline pipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 };
 
 struct GeometryBuffers {
@@ -55,7 +65,82 @@ struct GeometryBuffers {
 	uint32_t instanceCount = 0;
 };
 
-struct InstanceLayoutCPU { float center[2]; float radius; float pad; float color[4]; };
+struct InstanceLayoutCPU {
+	float center[2];
+	float radius;
+	float pad;
+	float color[4];
+	float imageLayer; // Atlas layer index, -1 for flat color
+	float pad2[3];    // Alignment padding
+};
+
+// Image avatar loading system
+struct ImageWithMemory {
+	VkImage image = VK_NULL_HANDLE;
+	VkImageView view = VK_NULL_HANDLE;
+	VkDeviceMemory memory = VK_NULL_HANDLE;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	uint32_t mipLevels = 1;
+};
+
+struct LoadedTexture {
+	uint32_t width = 0;
+	uint32_t height = 0;
+	std::vector<uint8_t> data;
+	uint32_t refCount = 0;
+	int64_t lastUsed = 0; // For LRU
+};
+
+struct TextureAtlas {
+	static constexpr uint32_t MAX_LAYERS = 2048;
+	static constexpr uint32_t ATLAS_SIZE = 256; // Each layer is 256x256
+
+	ImageWithMemory atlasArray;
+	VkSampler sampler = VK_NULL_HANDLE;
+	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+
+	// LRU management
+	std::unordered_map<uint32_t, uint32_t> imageIdToLayer; // imageId -> layer index
+	std::vector<uint32_t> layerToImageId; // layer index -> imageId (UINT32_MAX = free)
+	std::list<uint32_t> lruOrder; // Most recently used first
+	std::unordered_map<uint32_t, std::list<uint32_t>::iterator> layerToLruIter;
+	std::queue<uint32_t> freeLayers;
+
+	// Texture cache
+	std::unordered_map<uint32_t, LoadedTexture> textureCache;
+	std::vector<std::filesystem::path> imageFiles;
+
+	uint32_t nextFreeLayer = 0;
+	int64_t frameCounter = 0;
+};
+
+struct ImageManager {
+	static constexpr float IMAGE_LOAD_THRESHOLD_RADIUS = 20.0f;
+	static constexpr uint32_t MAX_CACHE_SIZE = 4096;
+
+	TextureAtlas atlas;
+
+	// Background loading thread
+	std::thread loaderThread;
+	std::atomic<bool> stopLoading{false};
+	std::mutex requestMutex;
+	std::queue<uint32_t> loadRequests;
+	std::mutex uploadMutex;
+	std::queue<std::pair<uint32_t, LoadedTexture>> pendingUploads;
+
+	// Placeholder texture (small 4x4)
+	ImageWithMemory placeholderTexture;
+
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+	VkDevice device = VK_NULL_HANDLE;
+	VkCommandPool commandPool = VK_NULL_HANDLE;
+	VkQueue graphicsQueue = VK_NULL_HANDLE;
+};
+
+// Forward declarations
+static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId);
+static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer);
 
 struct Simulation {
 	// Constants
@@ -82,10 +167,14 @@ struct Simulation {
 	std::vector<float> radius;
 	std::vector<float> health; // 0..1
 	std::vector<uint8_t> alive; // 0/1
-	std::vector<uint32_t> imageId; // reserved for future texture use
+	std::vector<uint32_t> imageId; // Index into image files array
+	std::vector<uint8_t> imageTier; // 0=fake/flat color, 1=placeholder, 2=real image
 
 	// Names for winner display
 	std::vector<std::string> names;
+
+	// Image manager
+	ImageManager* imageManager = nullptr;
 
 	// Temp
 	std::mt19937 rng{std::random_device{}()};
@@ -123,6 +212,11 @@ struct Simulation {
 			for (auto& c : ext) c = static_cast<char>(std::tolower(c));
 			if (ext == ".jpg" || ext == ".jpeg" || ext == ".png") files.push_back(p);
 		}
+
+		// Populate image manager with file list
+		if (imageManager) {
+			imageManager->atlas.imageFiles = files;
+		}
 		uint32_t count = std::min<uint32_t>(targetCount, static_cast<uint32_t>(files.size()));
 		if (count == 0) count = targetCount; // fallback to fakes
 
@@ -134,6 +228,7 @@ struct Simulation {
 		health.resize(targetCount);
 		alive.resize(targetCount);
 		imageId.resize(targetCount);
+		imageTier.resize(targetCount);
 		names.resize(targetCount);
 
 		std::uniform_real_distribution<float> distX(40.0f, worldWidth - 40.0f);
@@ -151,6 +246,7 @@ struct Simulation {
 			alive[i] = 1;
 			if (i < files.size()) {
 				imageId[i] = i;
+				imageTier[i] = 0; // Start with flat color, upgrade based on radius
 				names[i] = files[i].stem().string();
 				// Apply bias multiplier to health if configured
 				auto it = biasMultipliers.find(names[i]);
@@ -160,6 +256,7 @@ struct Simulation {
 				}
 			} else {
 				imageId[i] = UINT32_MAX; // fake
+				imageTier[i] = 0; // Fake always flat color
 				names[i] = std::string("Fake_") + std::to_string(i);
 			}
 		}
@@ -272,6 +369,27 @@ struct Simulation {
 		}
 	}
 
+	void updateImageTiers() {
+		if (!imageManager) return;
+
+		for (size_t i = 0; i < posX.size(); ++i) {
+			if (!alive[i] || imageId[i] == UINT32_MAX) continue;
+
+			float currentRadius = radius[i];
+
+			// Upgrade tier based on radius threshold
+			if (currentRadius >= ImageManager::IMAGE_LOAD_THRESHOLD_RADIUS) {
+				if (imageTier[i] < 2) {
+					imageTier[i] = 2; // Request real image
+					// Queue for loading if not already loaded
+					// This will be handled by the image manager
+				}
+			} else if (currentRadius >= 8.0f && imageTier[i] < 1) {
+				imageTier[i] = 1; // Use placeholder
+			}
+		}
+	}
+
 	void writeInstances(std::vector<InstanceLayoutCPU>& out) const {
 		out.clear();
 		out.reserve(posX.size());
@@ -281,11 +399,43 @@ struct Simulation {
 			inst.center[0] = posX[i]; inst.center[1] = posY[i];
 			inst.radius = radius[i];
 			float h = std::clamp(health[i], 0.0f, 1.0f);
-			// Green to red gradient by health
-			inst.color[0] = 1.0f - h;
-			inst.color[1] = h;
-			inst.color[2] = 0.2f;
-			inst.color[3] = 1.0f;
+
+			// Set image layer based on tier
+			if (imageTier[i] == 0 || imageId[i] == UINT32_MAX) {
+				// Flat color
+				inst.imageLayer = -1.0f;
+				// Green to red gradient by health
+				inst.color[0] = 1.0f - h;
+				inst.color[1] = h;
+				inst.color[2] = 0.2f;
+				inst.color[3] = 1.0f;
+			} else if (imageTier[i] >= 2 && imageManager) {
+				// Try to get texture layer from image manager
+				int32_t layer = getAtlasLayerForImage(*imageManager, imageId[i]);
+				if (layer >= 0) {
+					inst.imageLayer = static_cast<float>(layer);
+					// Health tint for texture
+					inst.color[0] = 1.0f - h * 0.5f;
+					inst.color[1] = 1.0f - h * 0.5f;
+					inst.color[2] = 1.0f - h * 0.5f;
+					inst.color[3] = 1.0f;
+				} else {
+					// Fallback to flat color while loading
+					inst.imageLayer = -1.0f;
+					inst.color[0] = 1.0f - h;
+					inst.color[1] = h;
+					inst.color[2] = 0.2f;
+					inst.color[3] = 1.0f;
+				}
+			} else {
+				// Placeholder or other tiers
+				inst.imageLayer = -1.0f;
+				inst.color[0] = 1.0f - h;
+				inst.color[1] = h;
+				inst.color[2] = 0.2f;
+				inst.color[3] = 1.0f;
+			}
+
 			out.push_back(inst);
 		}
 	}
@@ -465,21 +615,21 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	VkPipelineShaderStageCreateInfo fs{}; fs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fs.module = frag; fs.pName = "main";
 	VkPipelineShaderStageCreateInfo stages[] = { vs, fs };
 
-	// Vertex bindings: 0 = quad vertices (vec2), 1 = instance data (center vec2, radius float, color vec4)
+	// Vertex bindings: 0 = quad vertices (vec2), 1 = instance data (center vec2, radius float, color vec4, imageLayer float)
 	VkVertexInputBindingDescription bindings[2]{};
 	bindings[0].binding = 0; bindings[0].stride = sizeof(float) * 2; bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-	struct InstanceLayout { float center[2]; float radius; float pad; float color[4]; };
-	bindings[1].binding = 1; bindings[1].stride = sizeof(InstanceLayout); bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+	bindings[1].binding = 1; bindings[1].stride = sizeof(InstanceLayoutCPU); bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-	VkVertexInputAttributeDescription attrs[4]{};
+	VkVertexInputAttributeDescription attrs[5]{};
 	attrs[0].location = 0; attrs[0].binding = 0; attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0; // inPos
-	attrs[1].location = 1; attrs[1].binding = 1; attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = offsetof(InstanceLayout, center); // inCenter
-	attrs[2].location = 2; attrs[2].binding = 1; attrs[2].format = VK_FORMAT_R32_SFLOAT; attrs[2].offset = offsetof(InstanceLayout, radius); // inRadius
-	attrs[3].location = 3; attrs[3].binding = 1; attrs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; attrs[3].offset = offsetof(InstanceLayout, color); // inColor
+	attrs[1].location = 1; attrs[1].binding = 1; attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = offsetof(InstanceLayoutCPU, center); // inCenter
+	attrs[2].location = 2; attrs[2].binding = 1; attrs[2].format = VK_FORMAT_R32_SFLOAT; attrs[2].offset = offsetof(InstanceLayoutCPU, radius); // inRadius
+	attrs[3].location = 3; attrs[3].binding = 1; attrs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; attrs[3].offset = offsetof(InstanceLayoutCPU, color); // inColor
+	attrs[4].location = 4; attrs[4].binding = 1; attrs[4].format = VK_FORMAT_R32_SFLOAT; attrs[4].offset = offsetof(InstanceLayoutCPU, imageLayer); // inImageLayer
 
 	VkPipelineVertexInputStateCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vi.vertexBindingDescriptionCount = 2; vi.pVertexBindingDescriptions = bindings;
-	vi.vertexAttributeDescriptionCount = 4; vi.pVertexAttributeDescriptions = attrs;
+	vi.vertexAttributeDescriptionCount = 5; vi.pVertexAttributeDescriptions = attrs;
 
 	VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
@@ -501,8 +651,27 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	// Push constants: vec2 viewport in vertex stage
 	VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; pcr.offset = 0; pcr.size = sizeof(float) * 2;
 
-	VkPipelineLayoutCreateInfo plci{}; plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+	// Create descriptor set layout for texture atlas
+	VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+	samplerLayoutBinding.binding = 0;
+	samplerLayoutBinding.descriptorCount = 1;
+	samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	samplerLayoutBinding.pImmutableSamplers = nullptr;
+	samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layoutInfo.bindingCount = 1;
+	layoutInfo.pBindings = &samplerLayoutBinding;
+
 	PipelineObjects po{};
+	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &po.descriptorSetLayout) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create descriptor set layout");
+	}
+
+	VkPipelineLayoutCreateInfo plci{}; plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	plci.setLayoutCount = 1; plci.pSetLayouts = &po.descriptorSetLayout;
+	plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
 	if (vkCreatePipelineLayout(device, &plci, nullptr, &po.layout) != VK_SUCCESS) {
 		vkDestroyShaderModule(device, frag, nullptr);
 		vkDestroyShaderModule(device, vert, nullptr);
@@ -547,6 +716,387 @@ static bool checkValidationLayerSupport(const std::vector<const char*>& layers) 
 		if (!found) return false;
 	}
 	return true;
+}
+
+// ImageManager implementation
+static void createImage(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, uint32_t arrayLayers, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, ImageWithMemory& image) {
+	VkImageCreateInfo imageInfo{};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.extent.width = width;
+	imageInfo.extent.height = height;
+	imageInfo.extent.depth = 1;
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = arrayLayers;
+	imageInfo.format = format;
+	imageInfo.tiling = tiling;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	imageInfo.usage = usage;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+	if (vkCreateImage(device, &imageInfo, nullptr, &image.image) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create image");
+	}
+
+	VkMemoryRequirements memRequirements;
+	vkGetImageMemoryRequirements(device, image.image, &memRequirements);
+
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memRequirements.size;
+	allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits, properties);
+
+	if (vkAllocateMemory(device, &allocInfo, nullptr, &image.memory) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to allocate image memory");
+	}
+
+	vkBindImageMemory(device, image.image, image.memory, 0);
+	image.width = width;
+	image.height = height;
+}
+
+static VkImageView createImageView2DArray(VkDevice device, VkImage image, VkFormat format, uint32_t layerCount) {
+	VkImageViewCreateInfo viewInfo{};
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.image = image;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	viewInfo.format = format;
+	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	viewInfo.subresourceRange.baseMipLevel = 0;
+	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.baseArrayLayer = 0;
+	viewInfo.subresourceRange.layerCount = layerCount;
+
+	VkImageView imageView;
+	if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create texture image view");
+	}
+
+	return imageView;
+}
+
+static VkSampler createTextureSampler(VkDevice device) {
+	VkSamplerCreateInfo samplerInfo{};
+	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	samplerInfo.magFilter = VK_FILTER_LINEAR;
+	samplerInfo.minFilter = VK_FILTER_LINEAR;
+	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.anisotropyEnable = VK_FALSE;
+	samplerInfo.maxAnisotropy = 1.0f;
+	samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+	samplerInfo.unnormalizedCoordinates = VK_FALSE;
+	samplerInfo.compareEnable = VK_FALSE;
+	samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+	samplerInfo.mipLodBias = 0.0f;
+	samplerInfo.minLod = 0.0f;
+	samplerInfo.maxLod = 0.0f;
+
+	VkSampler sampler;
+	if (vkCreateSampler(device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create texture sampler");
+	}
+
+	return sampler;
+}
+
+static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue) {
+	mgr.physicalDevice = physicalDevice;
+	mgr.device = device;
+	mgr.commandPool = commandPool;
+	mgr.graphicsQueue = graphicsQueue;
+
+	// Create texture atlas array
+	createImage(physicalDevice, device,
+		TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, TextureAtlas::MAX_LAYERS,
+		VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mgr.atlas.atlasArray);
+
+	mgr.atlas.atlasArray.view = createImageView2DArray(device, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, TextureAtlas::MAX_LAYERS);
+	mgr.atlas.sampler = createTextureSampler(device);
+
+	// Initialize LRU structures
+	mgr.atlas.layerToImageId.resize(TextureAtlas::MAX_LAYERS, UINT32_MAX);
+	for (uint32_t i = 0; i < TextureAtlas::MAX_LAYERS; ++i) {
+		mgr.atlas.freeLayers.push(i);
+	}
+
+	// Create placeholder texture (4x4 magenta)
+	createImage(physicalDevice, device, 4, 4, 1, VK_FORMAT_R8G8B8A8_UNORM,
+		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mgr.placeholderTexture);
+
+	mgr.placeholderTexture.view = createImageView(device, mgr.placeholderTexture.image, VK_FORMAT_R8G8B8A8_UNORM);
+
+	// Create background loading thread
+	mgr.loaderThread = std::thread([&mgr]() {
+		while (!mgr.stopLoading) {
+			uint32_t imageId = UINT32_MAX;
+
+			// Check for load requests
+			{
+				std::lock_guard<std::mutex> lock(mgr.requestMutex);
+				if (!mgr.loadRequests.empty()) {
+					imageId = mgr.loadRequests.front();
+					mgr.loadRequests.pop();
+				}
+			}
+
+			if (imageId == UINT32_MAX) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				continue;
+			}
+
+			// Load image using stb_image
+			if (imageId < mgr.atlas.imageFiles.size()) {
+				std::string path = mgr.atlas.imageFiles[imageId].string();
+				int width, height, channels;
+				unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4); // Force RGBA
+
+				if (data) {
+					LoadedTexture tex;
+					tex.width = static_cast<uint32_t>(width);
+					tex.height = static_cast<uint32_t>(height);
+					tex.data.resize(width * height * 4);
+					std::memcpy(tex.data.data(), data, tex.data.size());
+					tex.refCount = 1;
+					tex.lastUsed = mgr.atlas.frameCounter;
+
+					stbi_image_free(data);
+
+					// Queue for GPU upload
+					{
+						std::lock_guard<std::mutex> lock(mgr.uploadMutex);
+						mgr.pendingUploads.emplace(imageId, std::move(tex));
+					}
+				}
+			}
+		}
+	});
+}
+
+static void requestImageLoad(ImageManager& mgr, uint32_t imageId) {
+	std::lock_guard<std::mutex> lock(mgr.requestMutex);
+	mgr.loadRequests.push(imageId);
+}
+
+static VkCommandBuffer beginSingleTimeCommands(VkDevice device, VkCommandPool commandPool) {
+	VkCommandBufferAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocInfo.commandPool = commandPool;
+	allocInfo.commandBufferCount = 1;
+
+	VkCommandBuffer commandBuffer;
+	vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+	vkBeginCommandBuffer(commandBuffer, &beginInfo);
+	return commandBuffer;
+}
+
+static void endSingleTimeCommands(VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkCommandBuffer commandBuffer) {
+	vkEndCommandBuffer(commandBuffer);
+
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &commandBuffer;
+
+	vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+	vkQueueWaitIdle(graphicsQueue);
+
+	vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+}
+
+static void transitionImageLayout(VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t layerIndex) {
+	VkCommandBuffer commandBuffer = beginSingleTimeCommands(device, commandPool);
+
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = oldLayout;
+	barrier.newLayout = newLayout;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = image;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.baseArrayLayer = layerIndex;
+	barrier.subresourceRange.layerCount = 1;
+
+	VkPipelineStageFlags sourceStage;
+	VkPipelineStageFlags destinationStage;
+
+	if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+		barrier.srcAccessMask = 0;
+		barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+		sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+		destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	} else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	} else {
+		throw std::invalid_argument("Unsupported layout transition");
+	}
+
+	vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+	endSingleTimeCommands(device, commandPool, graphicsQueue, commandBuffer);
+}
+
+static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer) {
+	auto texIt = mgr.atlas.textureCache.find(imageId);
+	if (texIt == mgr.atlas.textureCache.end()) {
+		return; // Texture not loaded
+	}
+
+	const LoadedTexture& texture = texIt->second;
+
+	// Create staging buffer
+	BufferWithMemory stagingBuffer;
+	VkDeviceSize imageSize = texture.data.size();
+	createBuffer(mgr.physicalDevice, mgr.device, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer);
+
+	void* data = mapMemory(mgr.device, stagingBuffer.memory, imageSize);
+	memcpy(data, texture.data.data(), static_cast<size_t>(imageSize));
+	unmapMemory(mgr.device, stagingBuffer.memory);
+
+´	// Transition image layout for transfer
+	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layer);
+
+	// Copy buffer to image
+	VkCommandBuffer commandBuffer = beginSingleTimeCommands(mgr.device, mgr.commandPool);
+
+	VkBufferImageCopy region{};
+	region.bufferOffset = 0;
+	region.bufferRowLength = 0;
+	region.bufferImageHeight = 0;
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.mipLevel = 0;
+	region.imageSubresource.baseArrayLayer = layer;
+	region.imageSubresource.layerCount = 1;
+	region.imageOffset = {0, 0, 0};
+
+	// Scale image to atlas size if needed
+	uint32_t copyWidth = std::min(texture.width, TextureAtlas::ATLAS_SIZE);
+	uint32_t copyHeight = std::min(texture.height, TextureAtlas::ATLAS_SIZE);
+	region.imageExtent = {copyWidth, copyHeight, 1};
+
+	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, mgr.atlas.atlasArray.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+	endSingleTimeCommands(mgr.device, mgr.commandPool, mgr.graphicsQueue, commandBuffer);
+
+	// Transition image layout for shader reading
+	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer);
+
+	// Cleanup staging buffer
+	vkDestroyBuffer(mgr.device, stagingBuffer.buffer, nullptr);
+	vkFreeMemory(mgr.device, stagingBuffer.memory, nullptr);
+}
+
+static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
+	mgr.atlas.frameCounter++;
+
+	// Check if already in atlas
+	auto it = mgr.atlas.imageIdToLayer.find(imageId);
+	if (it != mgr.atlas.imageIdToLayer.end()) {
+		uint32_t layer = it->second;
+		// Update LRU
+		if (mgr.atlas.layerToLruIter.find(layer) != mgr.atlas.layerToLruIter.end()) {
+			mgr.atlas.lruOrder.erase(mgr.atlas.layerToLruIter[layer]);
+		}
+		mgr.atlas.lruOrder.push_front(layer);
+		mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
+		return static_cast<int32_t>(layer);
+	}
+
+	// Check if texture is loaded but not in atlas
+	auto texIt = mgr.atlas.textureCache.find(imageId);
+	if (texIt == mgr.atlas.textureCache.end()) {
+		// Request loading
+		requestImageLoad(mgr, imageId);
+		return -1; // Not available yet
+	}
+
+	// Find free layer or evict LRU
+	uint32_t layer;
+	if (!mgr.atlas.freeLayers.empty()) {
+		layer = mgr.atlas.freeLayers.front();
+		mgr.atlas.freeLayers.pop();
+	} else if (!mgr.atlas.lruOrder.empty()) {
+		// Evict LRU
+		layer = mgr.atlas.lruOrder.back();
+		uint32_t evictedImageId = mgr.atlas.layerToImageId[layer];
+		mgr.atlas.imageIdToLayer.erase(evictedImageId);
+		mgr.atlas.lruOrder.pop_back();
+		mgr.atlas.layerToLruIter.erase(layer);
+	} else {
+		return -1; // No space
+	}
+
+	// Assign layer
+	mgr.atlas.imageIdToLayer[imageId] = layer;
+	mgr.atlas.layerToImageId[layer] = imageId;
+	mgr.atlas.lruOrder.push_front(layer);
+	mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
+
+	// Upload texture data to atlas layer
+	uploadTextureToAtlasLayer(mgr, imageId, layer);
+	return static_cast<int32_t>(layer);
+}
+
+static void updateImageManager(ImageManager& mgr) {
+	// Process pending uploads
+	std::lock_guard<std::mutex> lock(mgr.uploadMutex);
+	while (!mgr.pendingUploads.empty()) {
+		auto& [imageId, texture] = mgr.pendingUploads.front();
+		mgr.atlas.textureCache[imageId] = std::move(texture);
+		mgr.pendingUploads.pop();
+	}
+}
+
+static void destroyImageManager(ImageManager& mgr) {
+	if (mgr.device == VK_NULL_HANDLE) return;
+
+	mgr.stopLoading = true;
+	if (mgr.loaderThread.joinable()) {
+		mgr.loaderThread.join();
+	}
+
+	if (mgr.atlas.sampler != VK_NULL_HANDLE) {
+		vkDestroySampler(mgr.device, mgr.atlas.sampler, nullptr);
+	}
+	if (mgr.atlas.atlasArray.view != VK_NULL_HANDLE) {
+		vkDestroyImageView(mgr.device, mgr.atlas.atlasArray.view, nullptr);
+	}
+	if (mgr.atlas.atlasArray.image != VK_NULL_HANDLE) {
+		vkDestroyImage(mgr.device, mgr.atlas.atlasArray.image, nullptr);
+	}
+	if (mgr.atlas.atlasArray.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(mgr.device, mgr.atlas.atlasArray.memory, nullptr);
+	}
+
+	if (mgr.placeholderTexture.view != VK_NULL_HANDLE) {
+		vkDestroyImageView(mgr.device, mgr.placeholderTexture.view, nullptr);
+	}
+	if (mgr.placeholderTexture.image != VK_NULL_HANDLE) {
+		vkDestroyImage(mgr.device, mgr.placeholderTexture.image, nullptr);
+	}
+	if (mgr.placeholderTexture.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(mgr.device, mgr.placeholderTexture.memory, nullptr);
+	}
 }
 
 int main() {
@@ -848,8 +1398,59 @@ int main() {
 		}
 	}
 
+	// Create descriptor pool for texture atlases
+	VkDescriptorPoolSize poolSize{};
+	poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSize.descriptorCount = 1;
+
+	VkDescriptorPoolCreateInfo poolInfo{};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.poolSizeCount = 1;
+	poolInfo.pPoolSizes = &poolSize;
+	poolInfo.maxSets = 1;
+
+	VkDescriptorPool descriptorPool;
+	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+		std::fprintf(stderr, "Failed to create descriptor pool\n");
+		return 10;
+	}
+
 	std::cout << "Vulkan initialized and swapchain created (MoltenVK)" << std::endl;
 	std::cout.flush();
+
+	// Initialize image manager
+	std::cout << "Initializing image manager..." << std::endl; std::cout.flush();
+	ImageManager imageManager{};
+	initImageManager(imageManager, physical, device, commandPool, graphicsQueue);
+
+	// Create descriptor set for texture atlas
+	VkDescriptorSetAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	allocInfo.descriptorPool = descriptorPool;
+	allocInfo.descriptorSetCount = 1;
+	allocInfo.pSetLayouts = &circlePipeline.descriptorSetLayout;
+
+	if (vkAllocateDescriptorSets(device, &allocInfo, &imageManager.atlas.descriptorSet) != VK_SUCCESS) {
+		std::fprintf(stderr, "Failed to allocate descriptor sets\n");
+		return 11;
+	}
+
+	// Update descriptor set
+	VkDescriptorImageInfo imageInfo{};
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	imageInfo.imageView = imageManager.atlas.atlasArray.view;
+	imageInfo.sampler = imageManager.atlas.sampler;
+
+	VkWriteDescriptorSet descriptorWrite{};
+	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrite.dstSet = imageManager.atlas.descriptorSet;
+	descriptorWrite.dstBinding = 0;
+	descriptorWrite.dstArrayElement = 0;
+	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorWrite.descriptorCount = 1;
+	descriptorWrite.pImageInfo = &imageInfo;
+
+	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 
 	// Initialize simulation
 	std::cout << "Creating simulation..." << std::endl; std::cout.flush();
@@ -857,6 +1458,7 @@ int main() {
 	// Use current swapchain extent as world size
 	sim.worldWidth = static_cast<float>(sc.extent.width);
 	sim.worldHeight = static_cast<float>(sc.extent.height);
+	sim.imageManager = &imageManager;
 	std::cout << "Loading bias config..." << std::endl; std::cout.flush();
 	sim.loadBiasConfig("bias.txt");
 	std::cout << "Initializing from assets..." << std::endl; std::cout.flush();
@@ -954,13 +1556,18 @@ int main() {
 
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.pipeline);
 
+		// Bind descriptor set for texture atlas
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
+
 		// Push constants: viewport size
 		float vp[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
 		vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), vp);
 
 		// Update simulation and instance buffer
 		const float dt = 1.0f / 120.0f; // fixed step
+		updateImageManager(imageManager); // Process pending texture uploads
 		sim.step(dt);
+		sim.updateImageTiers(); // Update image loading tiers based on radius
 		sim.writeInstances(cpuInstances);
 
 		// Print status updates periodically
@@ -1019,6 +1626,8 @@ int main() {
 	}
 
 	vkDeviceWaitIdle(device);
+	destroyImageManager(imageManager);
+	vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 	for (auto f : inFlightFences) vkDestroyFence(device, f, nullptr);
 	for (auto s : renderFinishedSemaphores) vkDestroySemaphore(device, s, nullptr);
 	for (auto s : imageAvailableSemaphores) vkDestroySemaphore(device, s, nullptr);
@@ -1028,6 +1637,7 @@ int main() {
 	vkFreeMemory(device, geom.quadVertexBuffer.memory, nullptr);
 	vkDestroyPipeline(device, circlePipeline.pipeline, nullptr);
 	vkDestroyPipelineLayout(device, circlePipeline.layout, nullptr);
+	vkDestroyDescriptorSetLayout(device, circlePipeline.descriptorSetLayout, nullptr);
 	vkDestroyCommandPool(device, commandPool, nullptr);
 	destroySwapchainObjects(sc);
 	vkDestroyRenderPass(device, renderPass, nullptr);

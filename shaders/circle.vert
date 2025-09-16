@@ -5,6 +5,7 @@ layout(location = 0) in vec2 inPos;       // quad corners in [-1, 1]
 layout(location = 1) in vec2 inCenter;    // pixel space center
 layout(location = 2) in float inRadius;   // pixel radius
 layout(location = 3) in vec4 inColor;     // RGBA
+layout(location = 4) in float inImageLayer; // Atlas layer index, -1 for flat color
 
 layout(push_constant) uniform Push {
     vec2 viewport; // framebuffer size in pixels
@@ -12,6 +13,8 @@ layout(push_constant) uniform Push {
 
 layout(location = 0) out vec2 vPos;   // pass the local quad pos for SDF
 layout(location = 1) out vec4 vColor; // pass color
+layout(location = 2) out float vImageLayer; // pass image layer
+layout(location = 3) out vec2 vTexCoord; // texture coordinates
 
 void main() {
     vec2 world = inCenter + inPos * inRadius;
@@ -19,6 +22,9 @@ void main() {
     gl_Position = vec4(ndc, 0.0, 1.0);
     vPos = inPos;
     vColor = inColor;
+    vImageLayer = inImageLayer;
+    // Convert from [-1,1] to [0,1] for texture sampling
+    vTexCoord = inPos * 0.5 + 0.5;
 }
 
 
