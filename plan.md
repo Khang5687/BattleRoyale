@@ -75,14 +75,93 @@
 - Simple path: bake minimal bitmap font (e.g., stb_easy_font) to a dynamic vertex buffer, or integrate Dear ImGui for HUD (no heavy styling). Keep draw order last.
 
 ## Milestones
-1) Minimal Vulkan window (this repo). Verify presentation.
-2) Create swapchain, render pass, frame sync, render clear color.
-3) Instanced quad pipeline, draw N flat-color circles with SDF in shader.
-4) Spatial grid + collisions + health; eliminations.
-5) Texture atlas/array, placeholder + real mipmapped textures, lazy loading.
-6) HUD text, players left counter, winner flow.
-7) Bias configuration and tuning.
-8) Stress test & profiling; refine grid and resource limits.
+1) ✅ Minimal Vulkan window (this repo). Verify presentation.
+2) ✅ Create swapchain, render pass, frame sync, render clear color.
+3) ✅ Instanced quad pipeline, draw N flat-color circles with SDF in shader.
+4) ✅ Spatial grid + collisions + health; eliminations.
+5) ❌ Texture atlas/array, placeholder + real mipmapped textures, lazy loading.
+6) ✅ HUD text, players left counter, winner flow.
+7) ✅ Bias configuration and tuning.
+8) ❌ Stress test & profiling; refine grid and resource limits.
+
+## Current Status (✅ = COMPLETED)
+✅ **Core Vulkan Setup**: MoltenVK initialization, swapchain, render pass, command buffers
+✅ **Circle Rendering**: Instanced SDF-based circle rendering with smooth anti-aliased edges
+✅ **Physics System**: Spatial hash grid collision detection, elastic collisions with damping
+✅ **Health System**: Health-based eliminations with color-coded health visualization (green→red)
+✅ **Winner Detection**: Victory state with winner centering, scaling, and name display
+✅ **HUD Output**: Console-based "Players left: X" counter with winner announcement
+✅ **Bias Configuration**: Text-based bias system allowing health/size multipliers per player
+✅ **Speed Control**: Configurable speed multiplier constant for faster/slower gameplay
+✅ **Asset Integration**: File enumeration from assets/ directory with bias application
+✅ **Real Battle Simulation**: 256 players battling with eliminations progressing to single winner
+
+---
+
+## DETAILED TODO LIST
+
+### HIGH PRIORITY - Core Features Missing
+- [ ] **Image Avatar Loading System** (Milestone 5)
+  - [ ] Implement texture atlas array for GPU image storage
+  - [ ] Create LRU cache system for texture management (max ~2048 textures)
+  - [ ] Add lazy loading tiers: Tier 0 (flat color) → Tier 1 (placeholder) → Tier 2 (real image)
+  - [ ] Implement IMAGE_LOAD_THRESHOLD_RADIUS system for dynamic loading
+  - [ ] Add image decoding pipeline (stb_image or similar)
+  - [ ] Create Vulkan texture upload system with proper memory management
+
+- [ ] **Dynamic Circle Scaling** (Global Scale Factor)
+  - [ ] Implement global scale factor based on alive count: `S = f(activeAliveCount)`
+  - [ ] Apply scaling in vertex shader to avoid per-entity data updates
+  - [ ] Add MAX_CIRCLE_SIZE clamping for visual bounds
+  - [ ] Scale circles up as player count decreases for better visibility
+
+- [ ] **Visual HUD Text Rendering**
+  - [ ] Replace console output with on-screen text overlay
+  - [ ] Implement simple bitmap font rendering or Dear ImGui integration
+  - [ ] Display "Players left: X" in top-left corner
+  - [ ] Add winner name display in center screen during victory
+
+### MEDIUM PRIORITY - Polish & Performance
+- [ ] **Health Bar Rendering**
+  - [ ] Add visual health bars above/below circles
+  - [ ] Implement second instanced rendering pass for health indicators
+  - [ ] Color-code health bars (green → yellow → red)
+
+- [ ] **Enhanced Winner Sequence**
+  - [ ] Improve winner animation with smooth scaling transition
+  - [ ] Add victory screen with player name (filename stem)
+  - [ ] Implement camera centering on winner
+  - [ ] Add confetti or celebration effects
+
+- [ ] **Performance Optimization** (Milestone 8)
+  - [ ] Profile rendering performance with large player counts
+  - [ ] Optimize collision detection for >1000 players
+  - [ ] Implement multi-level spatial grids for varied radii
+  - [ ] Add LOD system for distant/small circles
+
+### LOW PRIORITY - Advanced Features
+- [ ] **Massive Scale Support** (500k+ files)
+  - [ ] Implement efficient file enumeration system
+  - [ ] Add background texture loading thread
+  - [ ] Create texture streaming system for very large asset counts
+
+- [ ] **Enhanced Collision System**
+  - [ ] Add collision sound effects
+  - [ ] Implement particle effects for impacts
+  - [ ] Add circle trail/motion blur effects
+
+- [ ] **Configuration & Tuning**
+  - [ ] Create JSON-based configuration file for all constants
+  - [ ] Add runtime parameter adjustment (speed, damage, etc.)
+  - [ ] Implement save/load settings system
+
+- [ ] **Debug & Development Tools**
+  - [ ] Add debug visualization for spatial grid
+  - [ ] Implement performance profiling overlay
+  - [ ] Add collision count statistics
+  - [ ] Create replay system for battles
+
+---
 
 ## Notes on MoltenVK capabilities
 - Descriptor indexing/bindless is limited; plan on atlas array + indirection buffer.
