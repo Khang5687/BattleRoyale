@@ -150,20 +150,33 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 12;
+	uint32_t maxPlayers = 50000;
 	float minRadius = 12.0f;
 	float maxRadius = 28.0f;
-	float fixedRadius = 20.0f; // All circles have uniform size
+	float fixedRadius = 40.0f; // All circles have uniform size
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
-	float damageMultiplier = 0.5f;
+	float damageMultiplier = 0.2f;
 	float minDamage = 0.05f;
 	float gridCellSize = 64.0f;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
+	float constantSpeed = 140.0f * speedMultiplier; // Fixed speed magnitude for all circles
 	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
 
 	// Bias system - now uses damage reduction instead of health multipliers
 	std::map<std::string, float> biasReductions; // 0.0 = no reduction, 0.5 = 50% damage reduction
+
+	// Helper function to normalize velocity to constant speed
+	void normalizeVelocity(size_t i) {
+		if (!alive[i]) return;
+		float vx = velX[i];
+		float vy = velY[i];
+		float currentSpeed = std::sqrt(vx * vx + vy * vy);
+		if (currentSpeed > 0.0f) {
+			velX[i] = (vx / currentSpeed) * constantSpeed;
+			velY[i] = (vy / currentSpeed) * constantSpeed;
+		}
+	}
 
 	// World
 	float worldWidth = 800.0f;
@@ -243,13 +256,15 @@ struct Simulation {
 
 		std::uniform_real_distribution<float> distX(40.0f, worldWidth - 40.0f);
 		std::uniform_real_distribution<float> distY(40.0f, worldHeight - 40.0f);
-		std::uniform_real_distribution<float> distV(-140.0f * speedMultiplier, 140.0f * speedMultiplier);
+		std::uniform_real_distribution<float> distAngle(0.0f, 2.0f * 3.14159f); // Random angle for direction
 
 		for (uint32_t i = 0; i < targetCount; ++i) {
 			posX[i] = distX(rng);
 			posY[i] = distY(rng);
-			velX[i] = distV(rng);
-			velY[i] = distV(rng);
+			// Set velocity with constant speed and random direction
+			float angle = distAngle(rng);
+			velX[i] = std::cos(angle) * constantSpeed;
+			velY[i] = std::sin(angle) * constantSpeed;
 			radius[i] = fixedRadius; // All circles have uniform size
 			health[i] = 1.0f; // All players start with same health
 			alive[i] = 1;
@@ -277,10 +292,15 @@ struct Simulation {
 			posX[i] += velX[i] * dt;
 			posY[i] += velY[i] * dt;
 			float r = radius[i];
-			if (posX[i] - r < 0.0f) { posX[i] = r; velX[i] = -velX[i] * wallDamping; }
-			if (posX[i] + r > worldWidth) { posX[i] = worldWidth - r; velX[i] = -velX[i] * wallDamping; }
-			if (posY[i] - r < 0.0f) { posY[i] = r; velY[i] = -velY[i] * wallDamping; }
-			if (posY[i] + r > worldHeight) { posY[i] = worldHeight - r; velY[i] = -velY[i] * wallDamping; }
+			bool wallHit = false;
+			if (posX[i] - r < 0.0f) { posX[i] = r; velX[i] = -velX[i]; wallHit = true; }
+			if (posX[i] + r > worldWidth) { posX[i] = worldWidth - r; velX[i] = -velX[i]; wallHit = true; }
+			if (posY[i] - r < 0.0f) { posY[i] = r; velY[i] = -velY[i]; wallHit = true; }
+			if (posY[i] + r > worldHeight) { posY[i] = worldHeight - r; velY[i] = -velY[i]; wallHit = true; }
+			// Normalize velocity to maintain constant speed after wall collisions
+			if (wallHit) {
+				normalizeVelocity(i);
+			}
 		}
 
 		// Spatial grid dimensions
@@ -331,8 +351,9 @@ struct Simulation {
 									float dvJ = vj2 - vj;
 									velX[i] += nx2 * dvI; velY[i] += ny2 * dvI;
 									velX[j] += nx2 * dvJ; velY[j] += ny2 * dvJ;
-									velX[i] *= collisionDamping; velY[i] *= collisionDamping;
-									velX[j] *= collisionDamping; velY[j] *= collisionDamping;
+									// Normalize velocities to maintain constant speed instead of damping
+									normalizeVelocity(i);
+									normalizeVelocity(j);
 									// Damage based on impulse magnitude
 									float impulse = std::abs(dvI) + std::abs(dvJ);
 									float baseDamage = std::max(minDamage, impulse * damageMultiplier * 0.001f);
