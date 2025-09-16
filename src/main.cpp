@@ -24,6 +24,8 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "../stb/stb_image_resize2.h"
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -881,10 +883,36 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 
 				if (data) {
 					LoadedTexture tex;
-					tex.width = static_cast<uint32_t>(width);
-					tex.height = static_cast<uint32_t>(height);
-					tex.data.resize(width * height * 4);
-					std::memcpy(tex.data.data(), data, tex.data.size());
+					
+					// Resize image to atlas size if needed
+					if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
+						// Allocate buffer for resized image
+						tex.data.resize(TextureAtlas::ATLAS_SIZE * TextureAtlas::ATLAS_SIZE * 4);
+						
+						// Resize using stb_image_resize2
+						unsigned char* result = stbir_resize_uint8_linear(
+							data, width, height, 0,
+							tex.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
+							STBIR_RGBA
+						);
+						
+						if (result == nullptr) {
+							// Resize failed, skip this image
+							stbi_image_free(data);
+							mgr.loadFailCount++;
+							continue;
+						}
+						
+						tex.width = TextureAtlas::ATLAS_SIZE;
+						tex.height = TextureAtlas::ATLAS_SIZE;
+					} else {
+						// Image is already the right size
+						tex.width = static_cast<uint32_t>(width);
+						tex.height = static_cast<uint32_t>(height);
+						tex.data.resize(width * height * 4);
+						std::memcpy(tex.data.data(), data, tex.data.size());
+					}
+					
 					tex.refCount = 1;
 					tex.lastUsed = mgr.atlas.frameCounter;
 
@@ -1016,10 +1044,8 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 	region.imageSubresource.layerCount = 1;
 	region.imageOffset = {0, 0, 0};
 
-	// Scale image to atlas size if needed
-	uint32_t copyWidth = std::min(texture.width, TextureAtlas::ATLAS_SIZE);
-	uint32_t copyHeight = std::min(texture.height, TextureAtlas::ATLAS_SIZE);
-	region.imageExtent = {copyWidth, copyHeight, 1};
+	// Images are now pre-resized to atlas size
+	region.imageExtent = {texture.width, texture.height, 1};
 
 	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, mgr.atlas.atlasArray.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
