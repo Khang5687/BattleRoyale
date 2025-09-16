@@ -1,1 +1,1 @@
-/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/battleroyale5.dir/src/main.cpp.o -o battleroyale5  -Wl,-rpath,/opt/homebrew/lib /opt/homebrew/lib/libvulkan.dylib /opt/homebrew/Cellar/glfw/3.4/lib/libglfw.dylib
+/usr/bin/c++ -O2 -g -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/battleroyale5.dir/src/main.cpp.o -o battleroyale5  -Wl,-rpath,/opt/homebrew/lib /opt/homebrew/lib/libvulkan.dylib /opt/homebrew/Cellar/glfw/3.4/lib/libglfw.dylib

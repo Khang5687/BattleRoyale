@@ -129,6 +129,19 @@ battleroyale5/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5.dir/build.make CMakeFiles/battleroyale5.dir/build
 .PHONY : battleroyale5/fast
 
+#=============================================================================
+# Target rules for targets named battleroyale5_shaders
+
+# Build rule for target.
+battleroyale5_shaders: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 battleroyale5_shaders
+.PHONY : battleroyale5_shaders
+
+# fast build rule for target.
+battleroyale5_shaders/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5_shaders.dir/build.make CMakeFiles/battleroyale5_shaders.dir/build
+.PHONY : battleroyale5_shaders/fast
+
 src/main.o: src/main.cpp.o
 .PHONY : src/main.o
 
@@ -161,6 +174,7 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
+	@echo "... battleroyale5_shaders"
 	@echo "... battleroyale5"
 	@echo "... src/main.o"
 	@echo "... src/main.i"

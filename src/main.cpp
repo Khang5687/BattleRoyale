@@ -8,6 +8,13 @@
 #include <stdexcept>
 #include <optional>
 #include <iostream>
+#include <limits>
+#include <fstream>
+#include <cstring>
+#include <filesystem>
+#include <random>
+#include <map>
+#include <sstream>
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -21,6 +28,499 @@
 
 static void glfwErrorCallback(int code, const char* desc) {
 	std::fprintf(stderr, "GLFW error %d: %s\n", code, desc);
+}
+
+struct SwapchainObjects {
+	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+	VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+	VkExtent2D extent{};
+	std::vector<VkImage> images;
+	std::vector<VkImageView> imageViews;
+	std::vector<VkFramebuffer> framebuffers;
+};
+
+struct BufferWithMemory {
+	VkBuffer buffer = VK_NULL_HANDLE;
+	VkDeviceMemory memory = VK_NULL_HANDLE;
+};
+
+struct PipelineObjects {
+	VkPipelineLayout layout = VK_NULL_HANDLE;
+	VkPipeline pipeline = VK_NULL_HANDLE;
+};
+
+struct GeometryBuffers {
+	BufferWithMemory quadVertexBuffer;
+	BufferWithMemory instanceBuffer;
+	uint32_t instanceCount = 0;
+};
+
+struct InstanceLayoutCPU { float center[2]; float radius; float pad; float color[4]; };
+
+struct Simulation {
+	// Constants
+	uint32_t maxPlayers = 512;
+	float minRadius = 12.0f;
+	float maxRadius = 28.0f;
+	float wallDamping = 0.85f;
+	float collisionDamping = 0.98f;
+	float damageMultiplier = 0.5f;
+	float minDamage = 0.05f;
+	float gridCellSize = 64.0f;
+
+	// Bias system
+	std::map<std::string, float> biasMultipliers;
+
+	// World
+	float worldWidth = 800.0f;
+	float worldHeight = 600.0f;
+
+	// State arrays
+	std::vector<float> posX, posY;
+	std::vector<float> velX, velY;
+	std::vector<float> radius;
+	std::vector<float> health; // 0..1
+	std::vector<uint8_t> alive; // 0/1
+	std::vector<uint32_t> imageId; // reserved for future texture use
+
+	// Names for winner display
+	std::vector<std::string> names;
+
+	// Temp
+	std::mt19937 rng{std::random_device{}()};
+
+	// Winner/victory state
+	bool inVictory = false;
+	int winnerIndex = -1;
+	float victoryTime = 0.0f;
+
+	void loadBiasConfig(const std::string& biasFile) {
+		biasMultipliers.clear();
+		std::ifstream file(biasFile);
+		if (!file.is_open()) {
+			std::cout << "No bias config found, using defaults\n";
+			return;
+		}
+		std::string line;
+		while (std::getline(file, line)) {
+			size_t pos = line.find(':');
+			if (pos != std::string::npos) {
+				std::string name = line.substr(0, pos);
+				float multiplier = std::stof(line.substr(pos + 1));
+				biasMultipliers[name] = multiplier;
+			}
+		}
+		std::cout << "Loaded " << biasMultipliers.size() << " bias entries\n";
+	}
+
+	void initializeFromAssets(const std::string& assetsDir, uint32_t targetCount) {
+		std::vector<std::filesystem::path> files;
+		for (auto const& e : std::filesystem::directory_iterator(assetsDir)) {
+			if (!e.is_regular_file()) continue;
+			auto p = e.path();
+			auto ext = p.extension().string();
+			for (auto& c : ext) c = static_cast<char>(std::tolower(c));
+			if (ext == ".jpg" || ext == ".jpeg" || ext == ".png") files.push_back(p);
+		}
+		uint32_t count = std::min<uint32_t>(targetCount, static_cast<uint32_t>(files.size()));
+		if (count == 0) count = targetCount; // fallback to fakes
+
+		posX.resize(targetCount);
+		posY.resize(targetCount);
+		velX.resize(targetCount);
+		velY.resize(targetCount);
+		radius.resize(targetCount);
+		health.resize(targetCount);
+		alive.resize(targetCount);
+		imageId.resize(targetCount);
+		names.resize(targetCount);
+
+		std::uniform_real_distribution<float> distX(40.0f, worldWidth - 40.0f);
+		std::uniform_real_distribution<float> distY(40.0f, worldHeight - 40.0f);
+		std::uniform_real_distribution<float> distV(-140.0f, 140.0f);
+		std::uniform_real_distribution<float> distR(minRadius, maxRadius);
+
+		for (uint32_t i = 0; i < targetCount; ++i) {
+			posX[i] = distX(rng);
+			posY[i] = distY(rng);
+			velX[i] = distV(rng);
+			velY[i] = distV(rng);
+			radius[i] = distR(rng);
+			health[i] = 1.0f;
+			alive[i] = 1;
+			if (i < files.size()) {
+				imageId[i] = i;
+				names[i] = files[i].stem().string();
+				// Apply bias multiplier to health if configured
+				auto it = biasMultipliers.find(names[i]);
+				if (it != biasMultipliers.end()) {
+					health[i] *= it->second;
+					radius[i] *= std::sqrt(it->second); // Larger radius for higher health
+				}
+			} else {
+				imageId[i] = UINT32_MAX; // fake
+				names[i] = std::string("Fake_") + std::to_string(i);
+			}
+		}
+	}
+
+	uint32_t aliveCount() const {
+		uint32_t c = 0; for (auto a : alive) if (a) ++c; return c;
+	}
+
+	void step(float dt) {
+		// Integrate and wall collisions
+		for (size_t i = 0; i < posX.size(); ++i) {
+			if (!alive[i]) continue;
+			posX[i] += velX[i] * dt;
+			posY[i] += velY[i] * dt;
+			float r = radius[i];
+			if (posX[i] - r < 0.0f) { posX[i] = r; velX[i] = -velX[i] * wallDamping; }
+			if (posX[i] + r > worldWidth) { posX[i] = worldWidth - r; velX[i] = -velX[i] * wallDamping; }
+			if (posY[i] - r < 0.0f) { posY[i] = r; velY[i] = -velY[i] * wallDamping; }
+			if (posY[i] + r > worldHeight) { posY[i] = worldHeight - r; velY[i] = -velY[i] * wallDamping; }
+		}
+
+		// Spatial grid dimensions
+		const int cellsX = std::max(1, static_cast<int>(worldWidth / gridCellSize));
+		const int cellsY = std::max(1, static_cast<int>(worldHeight / gridCellSize));
+		std::vector<std::vector<int>> grid(static_cast<size_t>(cellsX * cellsY));
+		auto cellIndex = [&](float x, float y) {
+			int cx = std::clamp(static_cast<int>(x / gridCellSize), 0, cellsX - 1);
+			int cy = std::clamp(static_cast<int>(y / gridCellSize), 0, cellsY - 1);
+			return cy * cellsX + cx;
+		};
+		for (int i = 0; i < static_cast<int>(posX.size()); ++i) {
+			if (!alive[i]) continue;
+			grid[cellIndex(posX[i], posY[i])].push_back(i);
+		}
+
+		// Collisions
+		for (int cy = 0; cy < cellsY; ++cy) {
+			for (int cx = 0; cx < cellsX; ++cx) {
+				for (int ny = std::max(0, cy - 1); ny <= std::min(cellsY - 1, cy + 1); ++ny) {
+					for (int nx = std::max(0, cx - 1); nx <= std::min(cellsX - 1, cx + 1); ++nx) {
+						const auto& a = grid[cy * cellsX + cx];
+						const auto& b = grid[ny * cellsX + nx];
+						for (int i : a) {
+							if (!alive[i]) continue;
+							for (int j : b) {
+								if (j <= i || !alive[j]) continue;
+								float dx = posX[j] - posX[i];
+								float dy = posY[j] - posY[i];
+								float rr = radius[i] + radius[j];
+								float dist2 = dx*dx + dy*dy;
+								if (dist2 < rr*rr) {
+									float dist = std::sqrt(std::max(dist2, 1e-6f));
+									float nx2 = dx / dist;
+									float ny2 = dy / dist;
+									float penetration = rr - dist;
+									// Separate
+									posX[i] -= nx2 * (penetration * 0.5f);
+									posY[i] -= ny2 * (penetration * 0.5f);
+									posX[j] += nx2 * (penetration * 0.5f);
+									posY[j] += ny2 * (penetration * 0.5f);
+									// Velocities along normal
+									float vi = velX[i]*nx2 + velY[i]*ny2;
+									float vj = velX[j]*nx2 + velY[j]*ny2;
+									float vi2 = vj;
+									float vj2 = vi;
+									float dvI = vi2 - vi;
+									float dvJ = vj2 - vj;
+									velX[i] += nx2 * dvI; velY[i] += ny2 * dvI;
+									velX[j] += nx2 * dvJ; velY[j] += ny2 * dvJ;
+									velX[i] *= collisionDamping; velY[i] *= collisionDamping;
+									velX[j] *= collisionDamping; velY[j] *= collisionDamping;
+									// Damage based on impulse magnitude
+									float impulse = std::abs(dvI) + std::abs(dvJ);
+									float dmg = std::max(minDamage, impulse * damageMultiplier * 0.001f);
+									health[i] -= dmg; health[j] -= dmg;
+									if (health[i] <= 0.0f) { alive[i] = 0; }
+									if (health[j] <= 0.0f) { alive[j] = 0; }
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Winner check
+		if (!inVictory) {
+			int last = -1; int cnt = 0; for (int i = 0; i < static_cast<int>(alive.size()); ++i) { if (alive[i]) { last = i; ++cnt; } }
+			if (cnt <= 1 && last >= 0) {
+				inVictory = true;
+				winnerIndex = last;
+				victoryTime = 0.0f;
+			}
+		} else {
+			victoryTime += dt;
+			// Freeze others
+			for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
+				if (i == winnerIndex) continue;
+				velX[i] = 0.0f; velY[i] = 0.0f;
+			}
+			// Move winner to center and scale up
+			float targetX = worldWidth * 0.5f;
+			float targetY = worldHeight * 0.5f;
+			float t = std::min(1.0f, victoryTime * 0.5f);
+			posX[winnerIndex] = posX[winnerIndex] + (targetX - posX[winnerIndex]) * t;
+			posY[winnerIndex] = posY[winnerIndex] + (targetY - posY[winnerIndex]) * t;
+			float baseR = std::max(30.0f, radius[winnerIndex]);
+			radius[winnerIndex] = baseR * (1.0f + t * 2.5f);
+		}
+	}
+
+	void writeInstances(std::vector<InstanceLayoutCPU>& out) const {
+		out.clear();
+		out.reserve(posX.size());
+		for (size_t i = 0; i < posX.size(); ++i) {
+			if (!alive[i]) continue;
+			InstanceLayoutCPU inst{};
+			inst.center[0] = posX[i]; inst.center[1] = posY[i];
+			inst.radius = radius[i];
+			float h = std::clamp(health[i], 0.0f, 1.0f);
+			// Green to red gradient by health
+			inst.color[0] = 1.0f - h;
+			inst.color[1] = h;
+			inst.color[2] = 0.2f;
+			inst.color[3] = 1.0f;
+			out.push_back(inst);
+		}
+	}
+};
+
+static VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) {
+	for (const auto& f : formats) {
+		if ((f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_B8G8R8A8_SRGB)
+			&& f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+			return f;
+		}
+	}
+	return formats[0];
+}
+
+static VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& modes) {
+	for (const auto& m : modes) {
+		if (m == VK_PRESENT_MODE_MAILBOX_KHR) return m;
+	}
+	return VK_PRESENT_MODE_FIFO_KHR; // guaranteed available
+}
+
+static VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR& caps, GLFWwindow* window) {
+	if (caps.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+		return caps.currentExtent;
+	}
+	int width = 0, height = 0;
+	glfwGetFramebufferSize(window, &width, &height);
+	VkExtent2D actual{};
+	actual.width = static_cast<uint32_t>(width);
+	actual.height = static_cast<uint32_t>(height);
+	if (actual.width < caps.minImageExtent.width) actual.width = caps.minImageExtent.width;
+	if (actual.height < caps.minImageExtent.height) actual.height = caps.minImageExtent.height;
+	if (caps.maxImageExtent.width > 0 && actual.width > caps.maxImageExtent.width) actual.width = caps.maxImageExtent.width;
+	if (caps.maxImageExtent.height > 0 && actual.height > caps.maxImageExtent.height) actual.height = caps.maxImageExtent.height;
+	return actual;
+}
+
+static VkImageView createImageView(VkDevice device, VkImage image, VkFormat format) {
+	VkImageViewCreateInfo ci{};
+	ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	ci.image = image;
+	ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	ci.format = format;
+	ci.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+	ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	ci.subresourceRange.baseMipLevel = 0;
+	ci.subresourceRange.levelCount = 1;
+	ci.subresourceRange.baseArrayLayer = 0;
+	ci.subresourceRange.layerCount = 1;
+	VkImageView view = VK_NULL_HANDLE;
+	VkResult res = vkCreateImageView(device, &ci, nullptr, &view);
+	if (res != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create image view");
+	}
+	return view;
+}
+
+static VkRenderPass createRenderPass(VkDevice device, VkFormat colorFormat) {
+	VkAttachmentDescription color{};
+	color.format = colorFormat;
+	color.samples = VK_SAMPLE_COUNT_1_BIT;
+	color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+	VkAttachmentReference colorRef{};
+	colorRef.attachment = 0;
+	colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	VkSubpassDescription subpass{};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorRef;
+
+	VkSubpassDependency dep{};
+	dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+	dep.dstSubpass = 0;
+	dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dep.srcAccessMask = 0;
+	dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+	VkRenderPassCreateInfo rpci{};
+	rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	rpci.attachmentCount = 1;
+	rpci.pAttachments = &color;
+	rpci.subpassCount = 1;
+	rpci.pSubpasses = &subpass;
+	rpci.dependencyCount = 1;
+	rpci.pDependencies = &dep;
+
+	VkRenderPass renderPass = VK_NULL_HANDLE;
+	if (vkCreateRenderPass(device, &rpci, nullptr, &renderPass) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create render pass");
+	}
+	return renderPass;
+}
+
+static std::vector<char> readBinaryFile(const std::string& path) {
+	std::ifstream file(path, std::ios::ate | std::ios::binary);
+	if (!file) throw std::runtime_error("Failed to open file: " + path);
+	const size_t size = static_cast<size_t>(file.tellg());
+	std::vector<char> buffer(size);
+	file.seekg(0);
+	file.read(buffer.data(), size);
+	return buffer;
+}
+
+static VkShaderModule createShaderModule(VkDevice device, const std::vector<char>& code) {
+	VkShaderModuleCreateInfo ci{};
+	ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	ci.codeSize = code.size();
+	ci.pCode = reinterpret_cast<const uint32_t*>(code.data());
+	VkShaderModule module = VK_NULL_HANDLE;
+	if (vkCreateShaderModule(device, &ci, nullptr, &module) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create shader module");
+	}
+	return module;
+}
+
+static uint32_t findMemoryType(VkPhysicalDevice physical, uint32_t typeBits, VkMemoryPropertyFlags props) {
+	VkPhysicalDeviceMemoryProperties memProps{};
+	vkGetPhysicalDeviceMemoryProperties(physical, &memProps);
+	for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+		if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props) {
+			return i;
+		}
+	}
+	throw std::runtime_error("Suitable memory type not found");
+}
+
+static void createBuffer(VkPhysicalDevice physical, VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, BufferWithMemory& out) {
+	VkBufferCreateInfo bci{};
+	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bci.size = size;
+	bci.usage = usage;
+	bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	if (vkCreateBuffer(device, &bci, nullptr, &out.buffer) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create buffer");
+	}
+	VkMemoryRequirements req{};
+	vkGetBufferMemoryRequirements(device, out.buffer, &req);
+	VkMemoryAllocateInfo mai{};
+	mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	mai.allocationSize = req.size;
+	mai.memoryTypeIndex = findMemoryType(physical, req.memoryTypeBits, props);
+	if (vkAllocateMemory(device, &mai, nullptr, &out.memory) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to allocate buffer memory");
+	}
+	vkBindBufferMemory(device, out.buffer, out.memory, 0);
+}
+
+static void* mapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize size) {
+	void* data = nullptr;
+	vkMapMemory(device, memory, 0, size, 0, &data);
+	return data;
+}
+
+static void unmapMemory(VkDevice device, VkDeviceMemory memory) {
+	vkUnmapMemory(device, memory);
+}
+
+static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorFormat, VkRenderPass renderPass) {
+	std::string baseDir = std::string(BR5_SHADER_DIR);
+	std::string vertPath = baseDir + "/circle.vert.spv";
+	std::string fragPath = baseDir + "/circle.frag.spv";
+	auto vertCode = readBinaryFile(vertPath);
+	auto fragCode = readBinaryFile(fragPath);
+	VkShaderModule vert = createShaderModule(device, vertCode);
+	VkShaderModule frag = createShaderModule(device, fragCode);
+
+	VkPipelineShaderStageCreateInfo vs{}; vs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vs.stage = VK_SHADER_STAGE_VERTEX_BIT; vs.module = vert; vs.pName = "main";
+	VkPipelineShaderStageCreateInfo fs{}; fs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fs.module = frag; fs.pName = "main";
+	VkPipelineShaderStageCreateInfo stages[] = { vs, fs };
+
+	// Vertex bindings: 0 = quad vertices (vec2), 1 = instance data (center vec2, radius float, color vec4)
+	VkVertexInputBindingDescription bindings[2]{};
+	bindings[0].binding = 0; bindings[0].stride = sizeof(float) * 2; bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+	struct InstanceLayout { float center[2]; float radius; float pad; float color[4]; };
+	bindings[1].binding = 1; bindings[1].stride = sizeof(InstanceLayout); bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+	VkVertexInputAttributeDescription attrs[4]{};
+	attrs[0].location = 0; attrs[0].binding = 0; attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0; // inPos
+	attrs[1].location = 1; attrs[1].binding = 1; attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = offsetof(InstanceLayout, center); // inCenter
+	attrs[2].location = 2; attrs[2].binding = 1; attrs[2].format = VK_FORMAT_R32_SFLOAT; attrs[2].offset = offsetof(InstanceLayout, radius); // inRadius
+	attrs[3].location = 3; attrs[3].binding = 1; attrs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; attrs[3].offset = offsetof(InstanceLayout, color); // inColor
+
+	VkPipelineVertexInputStateCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vi.vertexBindingDescriptionCount = 2; vi.pVertexBindingDescriptions = bindings;
+	vi.vertexAttributeDescriptionCount = 4; vi.pVertexAttributeDescriptions = attrs;
+
+	VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkViewport vp{}; vp.x = 0.0f; vp.y = 0.0f; vp.width = 1.0f; vp.height = 1.0f; vp.minDepth = 0.0f; vp.maxDepth = 1.0f; // will be set by dynamic state or via scissor/viewport fixed? We'll set dynamic.
+	VkRect2D sc{}; sc.offset = {0,0}; sc.extent = {1,1};
+
+	VkPipelineViewportStateCreateInfo vps{}; vps.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO; vps.viewportCount = 1; vps.pViewports = &vp; vps.scissorCount = 1; vps.pScissors = &sc;
+
+	VkPipelineRasterizationStateCreateInfo rs{}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo ms{}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineColorBlendAttachmentState cba{}; cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT; cba.blendEnable = VK_TRUE; cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; cba.colorBlendOp = VK_BLEND_OP_ADD; cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; cba.alphaBlendOp = VK_BLEND_OP_ADD;
+	VkPipelineColorBlendStateCreateInfo cb{}; cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cb.attachmentCount = 1; cb.pAttachments = &cba;
+
+	VkDynamicState dynamics[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dyn{}; dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynamics;
+
+	// Push constants: vec2 viewport in vertex stage
+	VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; pcr.offset = 0; pcr.size = sizeof(float) * 2;
+
+	VkPipelineLayoutCreateInfo plci{}; plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+	PipelineObjects po{};
+	if (vkCreatePipelineLayout(device, &plci, nullptr, &po.layout) != VK_SUCCESS) {
+		vkDestroyShaderModule(device, frag, nullptr);
+		vkDestroyShaderModule(device, vert, nullptr);
+		throw std::runtime_error("Failed to create pipeline layout");
+	}
+
+	VkPipelineRenderingCreateInfoKHR rendering{}; // not used with render pass pipeline
+
+	VkGraphicsPipelineCreateInfo gpci{}; gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpci.stageCount = 2; gpci.pStages = stages; gpci.pVertexInputState = &vi; gpci.pInputAssemblyState = &ia; gpci.pViewportState = &vps; gpci.pRasterizationState = &rs; gpci.pMultisampleState = &ms; gpci.pDepthStencilState = nullptr; gpci.pColorBlendState = &cb; gpci.pDynamicState = &dyn; gpci.layout = po.layout; gpci.renderPass = renderPass; gpci.subpass = 0;
+	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &po.pipeline) != VK_SUCCESS) {
+		vkDestroyPipelineLayout(device, po.layout, nullptr);
+		vkDestroyShaderModule(device, frag, nullptr);
+		vkDestroyShaderModule(device, vert, nullptr);
+		throw std::runtime_error("Failed to create graphics pipeline");
+	}
+
+	vkDestroyShaderModule(device, frag, nullptr);
+	vkDestroyShaderModule(device, vert, nullptr);
+	return po;
 }
 
 static std::vector<const char*> getRequiredInstanceExtensions() {
@@ -187,14 +687,349 @@ int main() {
 
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 	vkGetDeviceQueue(device, graphicsQueueFamily, 0, &graphicsQueue);
+	VkQueue presentQueue = VK_NULL_HANDLE;
+	vkGetDeviceQueue(device, presentQueueFamily, 0, &presentQueue);
 
-	std::cout << "Vulkan initialized successfully (MoltenVK)" << std::endl;
+	// Swapchain creation
+	auto createSwapchainObjects = [&](SwapchainObjects& out, VkSwapchainKHR oldSwapchain) {
+		VkSurfaceCapabilitiesKHR caps{};
+		vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps);
 
+		uint32_t formatCount = 0;
+		vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &formatCount, nullptr);
+		std::vector<VkSurfaceFormatKHR> formats(formatCount);
+		vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &formatCount, formats.data());
+		VkSurfaceFormatKHR surfaceFormat = chooseSurfaceFormat(formats);
+
+		uint32_t presentModeCount = 0;
+		vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &presentModeCount, nullptr);
+		std::vector<VkPresentModeKHR> presentModes(presentModeCount);
+		vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &presentModeCount, presentModes.data());
+		VkPresentModeKHR presentMode = choosePresentMode(presentModes);
+
+		VkExtent2D extent = chooseExtent(caps, window);
+
+		uint32_t minImageCount = caps.minImageCount + 1;
+		if (caps.maxImageCount > 0 && minImageCount > caps.maxImageCount) {
+			minImageCount = caps.maxImageCount;
+		}
+
+		VkSwapchainCreateInfoKHR sci{};
+		sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+		sci.surface = surface;
+		sci.minImageCount = minImageCount;
+		sci.imageFormat = surfaceFormat.format;
+		sci.imageColorSpace = surfaceFormat.colorSpace;
+		sci.imageExtent = extent;
+		sci.imageArrayLayers = 1;
+		sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		sci.preTransform = caps.currentTransform;
+		sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+		sci.presentMode = presentMode;
+		sci.clipped = VK_TRUE;
+		sci.oldSwapchain = oldSwapchain;
+
+		VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+		VkResult scr = vkCreateSwapchainKHR(device, &sci, nullptr, &swapchain);
+		if (scr != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create swapchain");
+		}
+
+		uint32_t imageCount = 0;
+		vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr);
+		std::vector<VkImage> images(imageCount);
+		vkGetSwapchainImagesKHR(device, swapchain, &imageCount, images.data());
+
+		std::vector<VkImageView> views;
+		views.reserve(images.size());
+		for (auto img : images) {
+			views.push_back(createImageView(device, img, surfaceFormat.format));
+		}
+
+		out.swapchain = swapchain;
+		out.colorFormat = surfaceFormat.format;
+		out.extent = extent;
+		out.images = std::move(images);
+		out.imageViews = std::move(views);
+	};
+
+	auto destroySwapchainObjects = [&](SwapchainObjects& sc) {
+		for (auto fb : sc.framebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+		sc.framebuffers.clear();
+		for (auto v : sc.imageViews) vkDestroyImageView(device, v, nullptr);
+		sc.imageViews.clear();
+		if (sc.swapchain != VK_NULL_HANDLE) { vkDestroySwapchainKHR(device, sc.swapchain, nullptr); sc.swapchain = VK_NULL_HANDLE; }
+	};
+
+	SwapchainObjects sc{};
+	createSwapchainObjects(sc, VK_NULL_HANDLE);
+
+	VkRenderPass renderPass = createRenderPass(device, sc.colorFormat);
+	PipelineObjects circlePipeline = createCirclePipeline(device, sc.colorFormat, renderPass);
+
+	// Create geometry buffers (quad vertices) and instance buffer
+	GeometryBuffers geom{};
+	{
+		const float quadVertices[] = {
+			-1.0f, -1.0f,
+			 1.0f, -1.0f,
+			 1.0f,  1.0f,
+			-1.0f, -1.0f,
+			 1.0f,  1.0f,
+			-1.0f,  1.0f,
+		};
+		VkDeviceSize vbSize = sizeof(quadVertices);
+		createBuffer(physical, device, vbSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, geom.quadVertexBuffer);
+		std::memcpy(mapMemory(device, geom.quadVertexBuffer.memory, vbSize), quadVertices, vbSize);
+		unmapMemory(device, geom.quadVertexBuffer.memory);
+
+		// Instance buffer initial capacity; will update every frame
+		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * 2048;
+		createBuffer(physical, device, ibSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, geom.instanceBuffer);
+	}
+
+	// Framebuffers
+	sc.framebuffers.resize(sc.imageViews.size());
+	for (size_t i = 0; i < sc.imageViews.size(); ++i) {
+		VkImageView attachments[] = { sc.imageViews[i] };
+		VkFramebufferCreateInfo fci{};
+		fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fci.renderPass = renderPass;
+		fci.attachmentCount = 1;
+		fci.pAttachments = attachments;
+		fci.width = sc.extent.width;
+		fci.height = sc.extent.height;
+		fci.layers = 1;
+		if (vkCreateFramebuffer(device, &fci, nullptr, &sc.framebuffers[i]) != VK_SUCCESS) {
+			std::fprintf(stderr, "Failed to create framebuffer\n");
+			return 7;
+		}
+	}
+
+	// Command pool and buffers
+	VkCommandPool commandPool = VK_NULL_HANDLE;
+	{
+		VkCommandPoolCreateInfo cpci{};
+		cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		cpci.queueFamilyIndex = graphicsQueueFamily;
+		cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		if (vkCreateCommandPool(device, &cpci, nullptr, &commandPool) != VK_SUCCESS) {
+			std::fprintf(stderr, "Failed to create command pool\n");
+			return 8;
+		}
+	}
+
+	std::vector<VkCommandBuffer> commandBuffers(sc.framebuffers.size());
+	{
+		VkCommandBufferAllocateInfo cbai{};
+		cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cbai.commandPool = commandPool;
+		cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cbai.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
+		if (vkAllocateCommandBuffers(device, &cbai, commandBuffers.data()) != VK_SUCCESS) {
+			std::fprintf(stderr, "Failed to allocate command buffers\n");
+			return 9;
+		}
+	}
+
+	// Sync primitives per frame (use same count as swapchain images)
+	std::vector<VkSemaphore> imageAvailableSemaphores(commandBuffers.size());
+	std::vector<VkSemaphore> renderFinishedSemaphores(commandBuffers.size());
+	std::vector<VkFence> inFlightFences(commandBuffers.size());
+	{
+		VkSemaphoreCreateInfo sci{}; sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+		VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO; fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+		for (size_t i = 0; i < commandBuffers.size(); ++i) {
+			vkCreateSemaphore(device, &sci, nullptr, &imageAvailableSemaphores[i]);
+			vkCreateSemaphore(device, &sci, nullptr, &renderFinishedSemaphores[i]);
+			vkCreateFence(device, &fci, nullptr, &inFlightFences[i]);
+		}
+	}
+
+	std::cout << "Vulkan initialized and swapchain created (MoltenVK)" << std::endl;
+	std::cout.flush();
+
+	// Initialize simulation
+	std::cout << "Creating simulation..." << std::endl; std::cout.flush();
+	Simulation sim{};
+	// Use current swapchain extent as world size
+	sim.worldWidth = static_cast<float>(sc.extent.width);
+	sim.worldHeight = static_cast<float>(sc.extent.height);
+	std::cout << "Loading bias config..." << std::endl; std::cout.flush();
+	sim.loadBiasConfig("bias.txt");
+	std::cout << "Initializing from assets..." << std::endl; std::cout.flush();
+	sim.initializeFromAssets("assets", 256);
+	std::cout << "Simulation initialized!" << std::endl; std::cout.flush();
+
+	uint32_t frameCount = 0;
+	uint32_t lastAliveCount = sim.aliveCount();
+	std::cout << "Alive count: " << lastAliveCount << std::endl; std::cout.flush();
+	std::cout << "Starting battle royale with " << lastAliveCount << " players!\n";
+	std::cout.flush();
+
+	std::vector<InstanceLayoutCPU> cpuInstances;
+
+	uint32_t currentFrame = 0;
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
+
+		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
+		vkResetFences(device, 1, &inFlightFences[currentFrame]);
+
+		uint32_t imageIndex = 0;
+		VkResult acq = vkAcquireNextImageKHR(device, sc.swapchain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+		if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
+			vkDeviceWaitIdle(device);
+			destroySwapchainObjects(sc);
+			vkDestroyRenderPass(device, renderPass, nullptr);
+			createSwapchainObjects(sc, VK_NULL_HANDLE);
+			renderPass = createRenderPass(device, sc.colorFormat);
+			// Recreate framebuffers
+			sc.framebuffers.resize(sc.imageViews.size());
+			for (size_t i = 0; i < sc.imageViews.size(); ++i) {
+				VkImageView attachments[] = { sc.imageViews[i] };
+				VkFramebufferCreateInfo fci2{};
+				fci2.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+				fci2.renderPass = renderPass;
+				fci2.attachmentCount = 1;
+				fci2.pAttachments = attachments;
+				fci2.width = sc.extent.width;
+				fci2.height = sc.extent.height;
+				fci2.layers = 1;
+				vkCreateFramebuffer(device, &fci2, nullptr, &sc.framebuffers[i]);
+			}
+			// Reallocate command buffers if count changed
+			vkFreeCommandBuffers(device, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
+			commandBuffers.assign(sc.framebuffers.size(), VK_NULL_HANDLE);
+			VkCommandBufferAllocateInfo cbai2{};
+			cbai2.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			cbai2.commandPool = commandPool;
+			cbai2.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			cbai2.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
+			vkAllocateCommandBuffers(device, &cbai2, commandBuffers.data());
+			// Recreate sync objects to match count
+			for (auto s : imageAvailableSemaphores) vkDestroySemaphore(device, s, nullptr);
+			for (auto s : renderFinishedSemaphores) vkDestroySemaphore(device, s, nullptr);
+			for (auto f : inFlightFences) vkDestroyFence(device, f, nullptr);
+			imageAvailableSemaphores.assign(commandBuffers.size(), VK_NULL_HANDLE);
+			renderFinishedSemaphores.assign(commandBuffers.size(), VK_NULL_HANDLE);
+			inFlightFences.assign(commandBuffers.size(), VK_NULL_HANDLE);
+			VkSemaphoreCreateInfo sci2{}; sci2.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+			VkFenceCreateInfo fci3{}; fci3.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO; fci3.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+			for (size_t i = 0; i < commandBuffers.size(); ++i) {
+				vkCreateSemaphore(device, &sci2, nullptr, &imageAvailableSemaphores[i]);
+				vkCreateSemaphore(device, &sci2, nullptr, &renderFinishedSemaphores[i]);
+				vkCreateFence(device, &fci3, nullptr, &inFlightFences[i]);
+			}
+			currentFrame = 0;
+			continue;
+		}
+
+		// Record command buffer for this image
+		VkCommandBuffer cmd = commandBuffers[imageIndex];
+		vkResetCommandBuffer(cmd, 0);
+		VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		vkBeginCommandBuffer(cmd, &begin);
+
+		VkClearValue clearColor{};
+		clearColor.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+
+		VkRenderPassBeginInfo rpbi{};
+		rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		rpbi.renderPass = renderPass;
+		rpbi.framebuffer = sc.framebuffers[imageIndex];
+		rpbi.renderArea.offset = {0, 0};
+		rpbi.renderArea.extent = sc.extent;
+		rpbi.clearValueCount = 1;
+		rpbi.pClearValues = &clearColor;
+		vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+		// Set dynamic viewport/scissor
+		VkViewport viewport{}; viewport.x = 0.0f; viewport.y = 0.0f; viewport.width = static_cast<float>(sc.extent.width); viewport.height = static_cast<float>(sc.extent.height); viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+		VkRect2D scissor{}; scissor.offset = {0,0}; scissor.extent = sc.extent;
+		vkCmdSetViewport(cmd, 0, 1, &viewport);
+		vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.pipeline);
+
+		// Push constants: viewport size
+		float vp[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
+		vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), vp);
+
+		// Update simulation and instance buffer
+		const float dt = 1.0f / 120.0f; // fixed step
+		sim.step(dt);
+		sim.writeInstances(cpuInstances);
+
+		// Print status updates periodically
+		frameCount++;
+		uint32_t currentAlive = sim.aliveCount();
+		if (frameCount % 120 == 0 || currentAlive != lastAliveCount) { // Every second or when count changes
+			std::cout << "Players left: " << currentAlive;
+			if (sim.inVictory && sim.winnerIndex >= 0) {
+				std::cout << " | WINNER: " << sim.names[sim.winnerIndex];
+			}
+			std::cout << "\n";
+			lastAliveCount = currentAlive;
+		}
+		geom.instanceCount = static_cast<uint32_t>(cpuInstances.size());
+		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * cpuInstances.size();
+		if (ibSize > 0) {
+			void* ptr = mapMemory(device, geom.instanceBuffer.memory, ibSize);
+			std::memcpy(ptr, cpuInstances.data(), static_cast<size_t>(ibSize));
+			unmapMemory(device, geom.instanceBuffer.memory);
+		}
+
+		// Bind vertex buffers and draw instanced quads
+		VkBuffer vbs[] = { geom.quadVertexBuffer.buffer, geom.instanceBuffer.buffer };
+		VkDeviceSize offs[] = { 0, 0 };
+		vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
+		vkCmdDraw(cmd, 6, geom.instanceCount, 0, 0);
+
+		vkCmdEndRenderPass(cmd);
+		vkEndCommandBuffer(cmd);
+
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+		VkSubmitInfo submit{};
+		submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submit.waitSemaphoreCount = 1;
+		submit.pWaitSemaphores = &imageAvailableSemaphores[currentFrame];
+		submit.pWaitDstStageMask = waitStages;
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers = &cmd;
+		submit.signalSemaphoreCount = 1;
+		submit.pSignalSemaphores = &renderFinishedSemaphores[currentFrame];
+		vkQueueSubmit(graphicsQueue, 1, &submit, inFlightFences[currentFrame]);
+
+		VkPresentInfoKHR present{};
+		present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+		present.waitSemaphoreCount = 1;
+		present.pWaitSemaphores = &renderFinishedSemaphores[currentFrame];
+		present.swapchainCount = 1;
+		present.pSwapchains = &sc.swapchain;
+		present.pImageIndices = &imageIndex;
+		VkResult pres = vkQueuePresentKHR(presentQueue, &present);
+		if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) {
+			// Trigger recreation on next loop
+		}
+
+		currentFrame = (currentFrame + 1) % static_cast<uint32_t>(commandBuffers.size());
 	}
 
 	vkDeviceWaitIdle(device);
+	for (auto f : inFlightFences) vkDestroyFence(device, f, nullptr);
+	for (auto s : renderFinishedSemaphores) vkDestroySemaphore(device, s, nullptr);
+	for (auto s : imageAvailableSemaphores) vkDestroySemaphore(device, s, nullptr);
+	vkDestroyBuffer(device, geom.instanceBuffer.buffer, nullptr);
+	vkFreeMemory(device, geom.instanceBuffer.memory, nullptr);
+	vkDestroyBuffer(device, geom.quadVertexBuffer.buffer, nullptr);
+	vkFreeMemory(device, geom.quadVertexBuffer.memory, nullptr);
+	vkDestroyPipeline(device, circlePipeline.pipeline, nullptr);
+	vkDestroyPipelineLayout(device, circlePipeline.layout, nullptr);
+	vkDestroyCommandPool(device, commandPool, nullptr);
+	destroySwapchainObjects(sc);
+	vkDestroyRenderPass(device, renderPass, nullptr);
 	vkDestroyDevice(device, nullptr);
 	vkDestroySurfaceKHR(instance, surface, nullptr);
 	vkDestroyInstance(instance, nullptr);

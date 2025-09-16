@@ -1,3 +1,4 @@
 /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles/battleroyale5.dir
+/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles/battleroyale5_shaders.dir
 /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles/edit_cache.dir
 /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles/rebuild_cache.dir
