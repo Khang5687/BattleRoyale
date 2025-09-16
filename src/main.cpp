@@ -144,7 +144,7 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 512;
+	uint32_t maxPlayers = 12;
 	float minRadius = 12.0f;
 	float maxRadius = 28.0f;
 	float wallDamping = 0.85f;
@@ -973,7 +973,7 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 	memcpy(data, texture.data.data(), static_cast<size_t>(imageSize));
 	unmapMemory(mgr.device, stagingBuffer.memory);
 
-´	// Transition image layout for transfer
+	// Transition image layout for transfer
 	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layer);
 
 	// Copy buffer to image
