@@ -53,16 +53,19 @@
 - Winner: when alive count == 1, transition to "victory" state: interpolate position to center, scale up to WINNER_SCALE, display name (filename stem) in center. Freeze others.
 
 ## File/IO and Bias
-- Enumerate image filenames from `assets/` once; store stems as player names; maintain mapping for bias multipliers (config file `bias.json` or hardcoded map, modifiable at runtime).
+- Enumerate image filenames from `assets/` once; store stems as player names; maintain mapping for bias damage reduction values (config file `bias.txt` or hardcoded map, modifiable at runtime).
+- Bias system: players with bias values get damage reduction (not health/size changes). Applied as: `finalDamage = baseDamage * (1.0f - biasReduction)`.
+- Bias only active when player count >= BIAS_ACTIVE_THRESHOLD (default 50) to prevent obvious advantages in small battles.
 - MAX_PLAYER: if actual image files < MAX_PLAYER, spawn fake circles to reach MAX_PLAYER; fake circles have Tier 0 textures/colors.
 
-## ´s (tunable)
+## Constants (tunable)
 - MAX_PLAYER
 - IMAGE_LOAD_THRESHOLD_RADIUS
 - MAX_CIRCLE_SIZE
 - WINNER_SCALE
 - DAMAGE_MULTIPLIER, WALL_DAMPING, COLLISION_DAMPING
 - GRID_CELL_SIZE
+- BIAS_ACTIVE_THRESHOLD (default: 50 - minimum player count for bias to be active)
 
 ## Robustness and Edge Cases
 - Validation layers in debug; check all Vk results; RAII wrappers to prevent leaks.
@@ -91,11 +94,16 @@
 ✅ **Health System**: Health-based eliminations with color-coded health visualization (green→red)
 ✅ **Winner Detection**: Victory state with winner centering, scaling, and name display
 ✅ **HUD Output**: Console-based "Players left: X" counter with winner announcement
-✅ **Bias Configuration**: Text-based bias system allowing health/size multipliers per player
+🔧 **Bias Configuration**: Text-based bias system (needs redesign - currently uses health/size multipliers, should use damage reduction)
 ✅ **Speed Control**: Configurable speed multiplier constant for faster/slower gameplay
 ✅ **Asset Integration**: File enumeration from assets/ directory with bias application
 ✅ **Real Battle Simulation**: 256 players battling with eliminations progressing to single winner
 ✅ **Image Avatar Loading System**: Complete texture atlas array with LRU cache and lazy loading tiers
+
+## ⚠️ **URGENT FIXES NEEDED**
+🔧 **Circle Size Issues**: Circles currently have random sizes - need uniform fixed radius for all players
+🔧 **Bias System Problems**: Current health/radius multiplier system is too obvious - needs damage reduction approach
+🔧 **Small Game Bias**: Bias should be disabled in games with <50 players to prevent obvious advantages
 
 ## 🎉 Image Avatar Loading System - IMPLEMENTATION COMPLETE
 
@@ -145,6 +153,22 @@ The system supports rendering image avatars for battle royale circles while main
   - [x] Extended instance data with image layer indexing
   - [x] Hash-based image ID to atlas layer mapping for O(1) access
   - [x] Dynamic scaling to 256x256 atlas slots with staging buffers
+
+- [ ] **🔧 Circle Size & Bias System Fixes** ⚠️ **URGENT ISSUES**
+  - [ ] **Uniform Circle Sizes**: Remove random radius variation - all circles should have identical fixed radius
+    - [ ] Replace `std::uniform_real_distribution<float> distR(minRadius, maxRadius)` with fixed radius
+    - [ ] Use consistent radius calculation: `(minRadius + maxRadius) * 0.5f` for all players
+    - [ ] Remove bias-based radius scaling: `radius[i] *= std::sqrt(it->second)` should be disabled
+  - [ ] **Redesign Bias System**: Change from health multipliers to damage reduction system
+    - [ ] Replace current health-based bias with damage reduction multipliers
+    - [ ] When player takes damage, apply bias as: `finalDamage = baseDamage * (1.0f - biasReduction)`
+    - [ ] Keep health values uniform (1.0f) for all players, only vary damage taken
+    - [ ] This makes bias less visually obvious while still providing competitive advantage
+  - [ ] **Bias Player Count Threshold**: Add configurable threshold to disable bias in small games
+    - [ ] Add constant: `static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50;`
+    - [ ] Only apply bias when `aliveCount() >= BIAS_ACTIVE_THRESHOLD`
+    - [ ] When below threshold, all players have equal damage (no bias applied)
+    - [ ] This prevents bias from being too obvious in small battles
 
 - [ ] **Dynamic Circle Scaling** (Global Scale Factor)
   - [ ] Implement global scale factor based on alive count: `S = f(activeAliveCount)`
