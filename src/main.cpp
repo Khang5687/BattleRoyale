@@ -1462,7 +1462,7 @@ int main() {
 	std::cout << "Loading bias config..." << std::endl; std::cout.flush();
 	sim.loadBiasConfig("bias.txt");
 	std::cout << "Initializing from assets..." << std::endl; std::cout.flush();
-	sim.initializeFromAssets("assets", 256);
+	sim.initializeFromAssets("assets", sim.maxPlayers);
 	std::cout << "Simulation initialized!" << std::endl; std::cout.flush();
 
 	uint32_t frameCount = 0;
