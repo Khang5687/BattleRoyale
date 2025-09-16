@@ -67,6 +67,7 @@ struct Simulation {
 	float damageMultiplier = 0.5f;
 	float minDamage = 0.05f;
 	float gridCellSize = 64.0f;
+	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
 
 	// Bias system
 	std::map<std::string, float> biasMultipliers;
@@ -137,7 +138,7 @@ struct Simulation {
 
 		std::uniform_real_distribution<float> distX(40.0f, worldWidth - 40.0f);
 		std::uniform_real_distribution<float> distY(40.0f, worldHeight - 40.0f);
-		std::uniform_real_distribution<float> distV(-140.0f, 140.0f);
+		std::uniform_real_distribution<float> distV(-140.0f * speedMultiplier, 140.0f * speedMultiplier);
 		std::uniform_real_distribution<float> distR(minRadius, maxRadius);
 
 		for (uint32_t i = 0; i < targetCount; ++i) {
