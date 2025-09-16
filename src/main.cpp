@@ -135,6 +135,10 @@ struct ImageManager {
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 	VkDevice device = VK_NULL_HANDLE;
 	VkCommandPool commandPool = VK_NULL_HANDLE;
+
+	// Debug counters for file loading
+	std::atomic<uint32_t> loadSuccessCount{0};
+	std::atomic<uint32_t> loadFailCount{0};
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 };
 
@@ -873,6 +877,11 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 						std::lock_guard<std::mutex> lock(mgr.uploadMutex);
 						mgr.pendingUploads.emplace(imageId, std::move(tex));
 					}
+					mgr.loadSuccessCount++;
+				} else {
+					// Loading failed
+					mgr.loadFailCount++;
+					std::cout << "ERROR: Failed to load image ID " << imageId << std::endl;
 				}
 			}
 		}
@@ -1578,6 +1587,8 @@ int main() {
 			if (sim.inVictory && sim.winnerIndex >= 0) {
 				std::cout << " | WINNER: " << sim.names[sim.winnerIndex];
 			}
+			std::cout << " | Files loaded: " << imageManager.loadSuccessCount.load() 
+					  << " success, " << imageManager.loadFailCount.load() << " failed";
 			std::cout << "\n";
 			lastAliveCount = currentAlive;
 		}
