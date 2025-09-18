@@ -27,18 +27,29 @@ find_program(GLSLANG_VALIDATOR_EXECUTABLE NAMES glslangValidator HINTS ENV VULKA
 set(SHADER_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle.vert
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle.frag
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.frag
 )
 
 set(COMPILED_SHADERS)
 foreach(SRC ${SHADER_SOURCES})
   get_filename_component(FNAME ${SRC} NAME)
+  get_filename_component(EXT ${SRC} EXT)
+  string(TOLOWER ${EXT} EXT_LOWER)
+  if (EXT_LOWER STREQUAL ".vert")
+    set(SHADER_STAGE vert)
+  elseif (EXT_LOWER STREQUAL ".frag")
+    set(SHADER_STAGE frag)
+  else()
+    message(FATAL_ERROR "Unsupported shader extension: ${EXT}")
+  endif()
   set(SPIRV ${CMAKE_CURRENT_BINARY_DIR}/shaders/${FNAME}.spv)
   list(APPEND COMPILED_SHADERS ${SPIRV})
   if (GLSLC_EXECUTABLE)
     add_custom_command(
       OUTPUT ${SPIRV}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
-      COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=$<IF:$<STREQUAL:$<LOWER_CASE:${FNAME}>,circle.vert>,vert,frag> ${SRC} -o ${SPIRV}
+      COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=${SHADER_STAGE} ${SRC} -o ${SPIRV}
       DEPENDS ${SRC}
       VERBATIM
     )
@@ -70,4 +81,3 @@ if(APPLE)
     INSTALL_RPATH "/opt/homebrew/lib"
   )
 endif()
-

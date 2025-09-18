@@ -21,11 +21,14 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <array>
+#include <algorithm>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "../stb/stb_image_resize2.h"
+#include "../stb/stb_easy_font.h"
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -67,6 +70,13 @@ struct GeometryBuffers {
 	uint32_t instanceCount = 0;
 };
 
+struct HudGeometry {
+	BufferWithMemory vertexBuffer;
+	VkDeviceSize bufferSize = 0;
+};
+
+static constexpr size_t HUD_INITIAL_VERTEX_CAPACITY = 8192;
+
 struct InstanceLayoutCPU {
 	float center[2];
 	float radius;
@@ -74,6 +84,11 @@ struct InstanceLayoutCPU {
 	float color[4];
 	float imageLayer; // Atlas layer index, -1 for flat color
 	float pad2[3];    // Alignment padding
+};
+
+struct TextVertex {
+	float position[2];
+	float color[4];
 };
 
 // Image avatar loading system
@@ -738,6 +753,182 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	return po;
 }
 
+static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat, VkRenderPass renderPass) {
+	std::string baseDir = std::string(BR5_SHADER_DIR);
+	std::string vertPath = baseDir + "/text.vert.spv";
+	std::string fragPath = baseDir + "/text.frag.spv";
+	auto vertCode = readBinaryFile(vertPath);
+	auto fragCode = readBinaryFile(fragPath);
+	VkShaderModule vert = createShaderModule(device, vertCode);
+	VkShaderModule frag = createShaderModule(device, fragCode);
+
+	VkPipelineShaderStageCreateInfo vs{}; vs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vs.stage = VK_SHADER_STAGE_VERTEX_BIT; vs.module = vert; vs.pName = "main";
+	VkPipelineShaderStageCreateInfo fs{}; fs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fs.module = frag; fs.pName = "main";
+	VkPipelineShaderStageCreateInfo stages[] = { vs, fs };
+
+	VkVertexInputBindingDescription binding{};
+	binding.binding = 0;
+	binding.stride = sizeof(TextVertex);
+	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+	VkVertexInputAttributeDescription attrs[2]{};
+	attrs[0].location = 0;
+	attrs[0].binding = 0;
+	attrs[0].format = VK_FORMAT_R32G32_SFLOAT;
+	attrs[0].offset = offsetof(TextVertex, position);
+	attrs[1].location = 1;
+	attrs[1].binding = 0;
+	attrs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	attrs[1].offset = offsetof(TextVertex, color);
+
+	VkPipelineVertexInputStateCreateInfo vi{};
+	vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vi.vertexBindingDescriptionCount = 1;
+	vi.pVertexBindingDescriptions = &binding;
+	vi.vertexAttributeDescriptionCount = 2;
+	vi.pVertexAttributeDescriptions = attrs;
+
+	VkPipelineInputAssemblyStateCreateInfo ia{};
+	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	ia.primitiveRestartEnable = VK_FALSE;
+
+	VkPipelineViewportStateCreateInfo vps{};
+	vps.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	vps.viewportCount = 1;
+	vps.scissorCount = 1;
+
+	VkPipelineRasterizationStateCreateInfo rs{};
+	rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rs.depthClampEnable = VK_FALSE;
+	rs.rasterizerDiscardEnable = VK_FALSE;
+	rs.polygonMode = VK_POLYGON_MODE_FILL;
+	rs.cullMode = VK_CULL_MODE_NONE;
+	rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rs.depthBiasEnable = VK_FALSE;
+	rs.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo ms{};
+	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineColorBlendAttachmentState cbAttach{};
+	cbAttach.blendEnable = VK_TRUE;
+	cbAttach.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	cbAttach.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	cbAttach.colorBlendOp = VK_BLEND_OP_ADD;
+	cbAttach.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	cbAttach.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	cbAttach.alphaBlendOp = VK_BLEND_OP_ADD;
+	cbAttach.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+	VkPipelineColorBlendStateCreateInfo cb{};
+	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	cb.logicOpEnable = VK_FALSE;
+	cb.attachmentCount = 1;
+	cb.pAttachments = &cbAttach;
+
+	VkDynamicState dynamics[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dyn{};
+	dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dyn.dynamicStateCount = 2;
+	dyn.pDynamicStates = dynamics;
+
+	VkPushConstantRange pcr{};
+	pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	pcr.offset = 0;
+	pcr.size = sizeof(float) * 2;
+
+	VkPipelineLayoutCreateInfo plci{};
+	plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	plci.setLayoutCount = 0;
+	plci.pSetLayouts = nullptr;
+	plci.pushConstantRangeCount = 1;
+	plci.pPushConstantRanges = &pcr;
+
+	PipelineObjects po{};
+	if (vkCreatePipelineLayout(device, &plci, nullptr, &po.layout) != VK_SUCCESS) {
+		vkDestroyShaderModule(device, frag, nullptr);
+		vkDestroyShaderModule(device, vert, nullptr);
+		throw std::runtime_error("Failed to create text pipeline layout");
+	}
+
+	VkGraphicsPipelineCreateInfo gpci{};
+	gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	gpci.stageCount = 2;
+	gpci.pStages = stages;
+	gpci.pVertexInputState = &vi;
+	gpci.pInputAssemblyState = &ia;
+	gpci.pViewportState = &vps;
+	gpci.pRasterizationState = &rs;
+	gpci.pMultisampleState = &ms;
+	gpci.pDepthStencilState = nullptr;
+	gpci.pColorBlendState = &cb;
+	gpci.pDynamicState = &dyn;
+	gpci.layout = po.layout;
+	gpci.renderPass = renderPass;
+	gpci.subpass = 0;
+
+	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &po.pipeline) != VK_SUCCESS) {
+		vkDestroyPipelineLayout(device, po.layout, nullptr);
+		vkDestroyShaderModule(device, frag, nullptr);
+		vkDestroyShaderModule(device, vert, nullptr);
+		throw std::runtime_error("Failed to create text pipeline");
+	}
+
+	vkDestroyShaderModule(device, frag, nullptr);
+	vkDestroyShaderModule(device, vert, nullptr);
+	return po;
+}
+
+static int hudMeasureWidth(const std::string& text) {
+	if (text.empty()) return 0;
+	return stb_easy_font_width(const_cast<char*>(text.c_str()));
+}
+
+static int hudMeasureHeight(const std::string& text) {
+	if (text.empty()) return 0;
+	return stb_easy_font_height(const_cast<char*>(text.c_str()));
+}
+
+static void appendHudText(std::vector<TextVertex>& out, float x, float y, const std::string& text, float scale, const std::array<float, 4>& color) {
+	if (text.empty()) return;
+
+	static std::vector<char> scratch;
+	const size_t minBytes = std::max<size_t>(text.size() * 128, 4096);
+	if (scratch.size() < minBytes) {
+		scratch.resize(minBytes);
+	}
+
+	int quads = stb_easy_font_print(0.0f, 0.0f, const_cast<char*>(text.c_str()), nullptr, scratch.data(), static_cast<int>(scratch.size()));
+	const size_t quadStride = 4 * 16;
+	for (int qi = 0; qi < quads; ++qi) {
+		const char* quadPtr = scratch.data() + qi * quadStride;
+		float px[4];
+		float py[4];
+		for (int v = 0; v < 4; ++v) {
+			const float* pos = reinterpret_cast<const float*>(quadPtr + v * 16);
+			px[v] = x + pos[0] * scale;
+			py[v] = y + pos[1] * scale;
+		}
+
+		TextVertex v0{};
+		v0.position[0] = px[0];
+		v0.position[1] = py[0];
+		std::copy(color.begin(), color.end(), v0.color);
+		TextVertex v1 = v0; v1.position[0] = px[1]; v1.position[1] = py[1];
+		TextVertex v2 = v0; v2.position[0] = px[2]; v2.position[1] = py[2];
+		TextVertex v3 = v0; v3.position[0] = px[3]; v3.position[1] = py[3];
+
+		out.push_back(v0);
+		out.push_back(v1);
+		out.push_back(v2);
+		out.push_back(v0);
+		out.push_back(v2);
+		out.push_back(v3);
+	}
+}
+
 static std::vector<const char*> getRequiredInstanceExtensions() {
 	uint32_t count = 0;
 	const char** glfwExt = glfwGetRequiredInstanceExtensions(&count);
@@ -1392,6 +1583,7 @@ int main() {
 
 	VkRenderPass renderPass = createRenderPass(device, sc.colorFormat);
 	PipelineObjects circlePipeline = createCirclePipeline(device, sc.colorFormat, renderPass);
+	PipelineObjects textPipeline = createTextPipeline(device, sc.colorFormat, renderPass);
 
 	// Create geometry buffers (quad vertices) and instance buffer
 	GeometryBuffers geom{};
@@ -1412,6 +1604,13 @@ int main() {
 		// Instance buffer initial capacity; will update every frame
 		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * 2048;
 		createBuffer(physical, device, ibSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, geom.instanceBuffer);
+	}
+
+	HudGeometry hud{};
+	{
+		VkDeviceSize vbSize = sizeof(TextVertex) * HUD_INITIAL_VERTEX_CAPACITY;
+		createBuffer(physical, device, vbSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, hud.vertexBuffer);
+		hud.bufferSize = vbSize;
 	}
 
 	// Framebuffers
@@ -1546,6 +1745,8 @@ int main() {
 	std::cout.flush();
 
 	std::vector<InstanceLayoutCPU> cpuInstances;
+	std::vector<TextVertex> hudVertices;
+	hudVertices.reserve(1024);
 
 	uint32_t currentFrame = 0;
 	while (!glfwWindowShouldClose(window)) {
@@ -1647,6 +1848,45 @@ int main() {
 		// Print status updates periodically
 		frameCount++;
 		uint32_t currentAlive = sim.aliveCount();
+		hudVertices.clear();
+		const float hudScale = 2.0f;
+		const std::array<float, 4> hudShadowColor{0.0f, 0.0f, 0.0f, 0.6f};
+		const std::array<float, 4> hudMainColor{1.0f, 1.0f, 1.0f, 1.0f};
+		std::string playersLeftText = "Players left: " + std::to_string(currentAlive);
+		appendHudText(hudVertices, 24.0f + 2.0f, 32.0f + 2.0f, playersLeftText, hudScale, hudShadowColor);
+		appendHudText(hudVertices, 24.0f, 32.0f, playersLeftText, hudScale, hudMainColor);
+
+		if (sim.inVictory && sim.winnerIndex >= 0) {
+			std::string winnerText = "Winner: " + sim.names[sim.winnerIndex];
+			const float winnerScale = 3.0f;
+			float width = static_cast<float>(hudMeasureWidth(winnerText)) * winnerScale;
+			float height = static_cast<float>(hudMeasureHeight(winnerText)) * winnerScale;
+			float baseX = 0.5f * (static_cast<float>(sc.extent.width) - width);
+			float baseY = 0.5f * (static_cast<float>(sc.extent.height) - height);
+			const std::array<float, 4> winnerShadow{0.0f, 0.0f, 0.0f, 0.6f};
+			const std::array<float, 4> winnerColor{1.0f, 0.85f, 0.1f, 1.0f};
+			appendHudText(hudVertices, baseX + 3.0f, baseY + 3.0f, winnerText, winnerScale, winnerShadow);
+			appendHudText(hudVertices, baseX, baseY, winnerText, winnerScale, winnerColor);
+		}
+
+		VkDeviceSize hudDataSize = sizeof(TextVertex) * hudVertices.size();
+		if (hudDataSize > hud.bufferSize) {
+			if (hud.vertexBuffer.buffer != VK_NULL_HANDLE) {
+				vkDestroyBuffer(device, hud.vertexBuffer.buffer, nullptr);
+			}
+			if (hud.vertexBuffer.memory != VK_NULL_HANDLE) {
+				vkFreeMemory(device, hud.vertexBuffer.memory, nullptr);
+			}
+			VkDeviceSize newSize = std::max<VkDeviceSize>(hudDataSize, hud.bufferSize ? hud.bufferSize * 2 : sizeof(TextVertex) * HUD_INITIAL_VERTEX_CAPACITY);
+			createBuffer(physical, device, newSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, hud.vertexBuffer);
+			hud.bufferSize = newSize;
+		}
+		if (hudDataSize > 0) {
+			void* hudPtr = mapMemory(device, hud.vertexBuffer.memory, hudDataSize);
+			std::memcpy(hudPtr, hudVertices.data(), static_cast<size_t>(hudDataSize));
+			unmapMemory(device, hud.vertexBuffer.memory);
+		}
+
 		if (frameCount % 120 == 0 || currentAlive != lastAliveCount) { // Every second or when count changes
 			std::cout << "Players left: " << currentAlive;
 			if (sim.inVictory && sim.winnerIndex >= 0) {
@@ -1670,6 +1910,15 @@ int main() {
 		VkDeviceSize offs[] = { 0, 0 };
 		vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
 		vkCmdDraw(cmd, 6, geom.instanceCount, 0, 0);
+
+		if (!hudVertices.empty()) {
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline.pipeline);
+			vkCmdPushConstants(cmd, textPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), vp);
+			VkBuffer hudVbs[] = { hud.vertexBuffer.buffer };
+			VkDeviceSize hudOffs[] = { 0 };
+			vkCmdBindVertexBuffers(cmd, 0, 1, hudVbs, hudOffs);
+			vkCmdDraw(cmd, static_cast<uint32_t>(hudVertices.size()), 1, 0, 0);
+		}
 
 		vkCmdEndRenderPass(cmd);
 		vkEndCommandBuffer(cmd);
@@ -1714,6 +1963,11 @@ int main() {
 	vkDestroyPipeline(device, circlePipeline.pipeline, nullptr);
 	vkDestroyPipelineLayout(device, circlePipeline.layout, nullptr);
 	vkDestroyDescriptorSetLayout(device, circlePipeline.descriptorSetLayout, nullptr);
+	if (textPipeline.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, textPipeline.pipeline, nullptr);
+	if (textPipeline.layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, textPipeline.layout, nullptr);
+	if (textPipeline.descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, textPipeline.descriptorSetLayout, nullptr);
+	if (hud.vertexBuffer.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, hud.vertexBuffer.buffer, nullptr);
+	if (hud.vertexBuffer.memory != VK_NULL_HANDLE) vkFreeMemory(device, hud.vertexBuffer.memory, nullptr);
 	vkDestroyCommandPool(device, commandPool, nullptr);
 	destroySwapchainObjects(sc);
 	vkDestroyRenderPass(device, renderPass, nullptr);

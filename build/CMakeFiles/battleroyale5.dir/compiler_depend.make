@@ -1026,6 +1026,7 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stdarg.h \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stddef.h \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stdint.h \
+  /Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_easy_font.h \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_image_resize2.h \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h \
   /opt/homebrew/include/GLFW/glfw3.h \
@@ -1063,6 +1064,8 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
 /opt/homebrew/include/GLFW/glfw3.h:
 
 /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h:
+
+/Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_easy_font.h:
 
 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stdint.h:
 

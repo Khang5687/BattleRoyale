@@ -2,3 +2,5 @@
 a0486e84ac54d50f072d3323bc98ee55 CMakeFiles/battleroyale5_shaders
 a9931217c33bf4acf03fdbd68784529d shaders/circle.frag.spv
 56c9eca363ab531b7742d254c36fa67c shaders/circle.vert.spv
+2f6e4ce3b64cb2b820962cefc8e0761e shaders/text.frag.spv
+fa529b3f0517150954819cb3db824123 shaders/text.vert.spv
