@@ -502,172 +502,76 @@ struct PushConstants {
 
   ---
 
-## DETAILED TODO LIST
+## Remaining Work Roadmap
 
-### HIGH PRIORITY - Core Features Missing
-- [x] **Image Avatar Loading System** (Milestone 5) ✅ **COMPLETED**
-  - [x] Implement texture atlas array for GPU image storage (2048-layer 256x256 texture atlas)
-  - [x] Create LRU cache system for texture management (efficient O(1) lookup and eviction)
-  - [x] Add lazy loading tiers: Tier 0 (flat color/fake circles) → Tier 1 (placeholder) → Tier 2 (real images)
-  - [x] Implement IMAGE_LOAD_THRESHOLD_RADIUS system (radius ≥ 20px threshold for real image loading)
-  - [x] Add image decoding pipeline (STB Image integration with multi-threaded background loading)
-  - [x] Create Vulkan texture upload system with proper memory management and image transitions
-  - [x] Updated shaders with texture sampling and health color blending
-  - [x] Extended instance data with image layer indexing
-  - [x] Hash-based image ID to atlas layer mapping for O(1) access
-  - [x] Dynamic scaling to 256x256 atlas slots with staging buffers
+### Stage 1 – Spatial Foundations (start first)
+- [ ] **Advanced Spatial Partitioning**
+  - [ ] Replace the simple hash grid with a hybrid quadtree + hash grid system
+  - [ ] Implement dynamic rebalancing for moving entities
+  - [ ] Optimize collision detection from O(n²) to O(n) for clustered objects
+  - [ ] Expose spatial bounds APIs that the deferred camera zoom feature can consume
+- [ ] **Data-Oriented Memory Optimization**
+  - [ ] Verify the current SoA layout is SIMD-friendly for vectorized operations
+  - [ ] Add memory-coherence profiling to catch cache-miss hotspots
+  - [ ] Implement batch processing paths for position/velocity updates
 
-- [x] **✅ Circle Size & Bias System Fixes** **COMPLETED**
-  - [x] **Uniform Circle Sizes**: Removed random radius variation - all circles now have identical fixed radius
-    - [x] Replaced `std::uniform_real_distribution<float> distR(minRadius, maxRadius)` with `fixedRadius = 20.0f`
-    - [x] All players now use consistent fixed radius for uniform visual appearance
-    - [x] Removed bias-based radius scaling that made advantages too obvious
-  - [x] **Redesigned Bias System**: Changed from health multipliers to damage reduction system
-    - [x] Replaced `biasMultipliers` with `biasReductions` map for damage reduction approach
-    - [x] Implemented damage reduction: `finalDamage = baseDamage * (1.0f - biasReduction)`
-    - [x] All players start with uniform health (1.0f), bias only affects damage taken
-    - [x] Bias is now less visually obvious while still providing competitive advantage
-  - [x] **Bias Player Count Threshold**: Added configurable threshold for small games
-    - [x] Added constant: `static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50;`
-    - [x] Bias only applies when `aliveCount() >= BIAS_ACTIVE_THRESHOLD`
-    - [x] Below threshold, all players take equal damage (no bias applied)
-    - [x] Prevents bias from being obvious in small battles
-
-- [x] **Visual HUD Text Rendering**
-  - [x] Replace console output with on-screen text overlay
-  - [x] Implement simple bitmap font rendering or Dear ImGui integration
-  - [x] Display "Players left: X" in top-left corner
-  - [x] Add winner name display in center screen during victory
-
-- [x] **Performance Instrumentation Baseline** ✅ **COMPLETED**
-  - [x] Integrate frame-time capture (CPU & GPU) with rolling average output
-  - [x] Add toggleable on-screen diagnostics overlay (FPS, alive count, image stats)
-  - [x] Document baseline metrics pre-optimization (target player counts)
-
-- [ ] **🔄 Dynamic Camera Scaling** (Player Count-Based Zoom) **DEFERRED – WAITING ON NEW SPATIAL PIPELINE**
-  - [x] ~~Global scale factor approach~~ **DEPRECATED** - causes physics-rendering mismatch
-  - [ ] **Prep work only**: define `CameraState` (min/max zoom, smoothing, winner focus)
-  - [ ] Blocked: implement zoom logic after advanced spatial partitioning lands
-  - [ ] Coordinate final implementation with **Enhanced Winner Sequence** tasks for shared camera polish
-  - [ ] Post-blocker checklist (unlocked once new spatial system ships)
-    - [ ] Add zoom factor calculation: `zoomFactor = calculateZoomFromPlayerCount(aliveCount)`
-    - [ ] Add min/max zoom constants (MIN_ZOOM_FACTOR = 0.5f, MAX_ZOOM_FACTOR = 3.0f)
-    - [ ] Calculate effective world boundaries: `effectiveWorld = worldSize / zoomFactor`
-    - [ ] Update wall collision detection to use effective boundaries (not fixed world size)
-    - [ ] Update spatial grid dimensions to match effective world size
-    - [ ] Calculate effective viewport: `effectiveViewport = realViewport / zoomFactor`
-    - [ ] Update push constants to send effectiveViewport instead of viewport
-    - [ ] Update vertex shader to use pc.effectiveViewport for world-to-NDC conversion
-    - [ ] Keep circle physics unchanged at fixed 40px radius
-    - [ ] Test smooth scaling with proper wall collision alignment from 50k players to winner
-  - [ ] **Constraint validation (post-blocker)**
-    - [ ] Verify minimum zoom (0.5x) handles massive player counts without over-zooming
-    - [ ] Verify maximum zoom (3.0x) provides dramatic final battle view
-    - [ ] Test smooth interpolation between zoom levels
-
-### MEDIUM PRIORITY - Polish & Performance
+### Stage 2 – Camera & Presentation (unblocked by Stage 1)
 - [ ] **Health Bar Rendering**
-  - [ ] Add visual health bars above/below circles
-  - [ ] Implement second instanced rendering pass for health indicators
-  - [ ] Color-code health bars (green → yellow → red)
-
-- [ ] **Enhanced Winner Sequence**
-  - [x] Simplify celebration to a single centered winner avatar with other circles removed
-  - [x] Show custom-font "username wins" banner while the regular HUD stays hidden
+  - [ ] Add visual health bars above or below each circle
+  - [ ] Implement a second instanced rendering pass dedicated to the health overlay
+  - [ ] Color-code the bars so they transition green → yellow → red as health drops
+- [ ] **Dynamic Camera Scaling**
+  - [ ] Define `CameraState` covering min/max zoom, smoothing, and winner focus behavior
+  - [ ] Add zoom factor calculation: `zoomFactor = calculateZoomFromPlayerCount(aliveCount)`
+  - [ ] Add min/max zoom constants (MIN_ZOOM_FACTOR = 0.5f, MAX_ZOOM_FACTOR = 3.0f)
+  - [ ] Calculate effective world bounds: `effectiveWorld = worldSize / zoomFactor`
+  - [ ] Update wall collision detection to respect effective bounds instead of fixed world size
+  - [ ] Update spatial grid dimensions to track the effective world size
+  - [ ] Modify push constants to send `effectiveViewport`
+  - [ ] Update the vertex shader to consume `effectiveViewport` for world-to-NDC conversion
+  - [ ] Validate smooth zoom behavior across the 0.5×–3.0× range with collision alignment tests
+- [ ] **Winner Sequence Polish**
   - [ ] Layer in optional celebratory VFX (confetti, particles, post effects)
-  - [ ] Revisit camera polish or transitions once future zoom work is defined
+  - [ ] Revisit camera polish or transitions once the zoom work ships
 
-### HIGH PRIORITY - 1M+ Entity Scaling Implementation
-- [x] **✅ Adaptive Simulation Architecture Foundation** **COMPLETED**
-  - [x] Implement `AdaptiveCircleSimulation` class with tier-based entity management
-  - [x] Define `CircleSimulationTier` enum (INDIVIDUAL, CLUSTERED, STATISTICAL, INVISIBLE)
-  - [x] Create data structures for individual circles, density clusters, and statistical clusters
-  - [x] Add apparent screen size calculation: `apparentRadius = physicalRadius * zoomFactor / distanceFromCamera`
+### Stage 3 – GPU-Driven Rendering Pipeline (start once Stage 2 stabilizes)
+- [ ] **GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
+  - [ ] Stand up a compute pass that frustum-culls instance data into a GPU-visible list
+  - [ ] Define the shared visibility buffer layout (hook in future `CameraState` zoom factor)
+  - [ ] Validate correctness against the CPU path with instrumentation metrics
+- [ ] **GPU-Driven Rendering – Stage 2 (Indirect Draw Integration)**
+  - [ ] Replace direct draws with `vkCmdDrawIndexedIndirect`
+  - [ ] Add GPU-side instance-count readback guards or a CPU fallback path
+  - [ ] Benchmark draw-call reduction using the performance instrumentation baseline
+- [ ] **GPU-Driven Rendering – Stage 3 (Hi-Z Occlusion & Refinement)**
+  - [ ] Build a Hi-Z buffer from the prior frame depth
+  - [ ] Integrate the occlusion test into the compute culling pass
+  - [ ] Hit the target of 125k+ entities at 60+ FPS
+- [ ] **Modern Vulkan Features (Advanced)**
+  - [ ] Evaluate mesh shader adoption for potential 10× geometry throughput
+  - [ ] Investigate GPU-controlled texture loading via compute shaders
 
-- [x] **✅ Density-Based Rendering System** **COMPLETED**
-  - [x] Implement dynamic detail selection based on apparent radius thresholds
-  - [x] Add pixel-level rendering for sub-pixel circles (apparentRadius < 0.5f)
-  - [x] Add square rendering for tiny circles (0.5f-2.0f pixels)
-  - [x] Add simplified SDF for small circles (2.0f-10.0f pixels)
-  - [x] Keep full detail rendering for large circles (>10.0f pixels)
-
-- [x] **✅ Statistical Clustering Implementation** **COMPLETED**
-  - [x] Create `StatisticalCluster` data structure with center of mass, total mass, average velocity
-  - [x] Implement cluster formation logic for nearby dust-level circles
-  - [x] Add cluster-to-cluster physics simulation (simplified)
-  - [x] Implement statistical elimination within clusters
-  - [x] Add cluster breakup logic when count falls below threshold
-
-- [x] **✅ Dynamic Tier Promotion/Demotion System** **COMPLETED**
-  - [x] Implement `updateSimulationTiers()` function with zoom-based promotion/demotion
-  - [x] Add promotion thresholds: clusters → individuals when zooming in
-  - [x] Add demotion thresholds: individuals → clusters when zooming out
-  - [x] Implement smooth transitions between simulation tiers
-
-- [x] **✅ Adaptive Performance System** **COMPLETED**
-  - [x] Add real-time performance monitoring for tier threshold adjustment
-  - [x] Implement dynamic `DUST_THRESHOLD` adjustment based on frame time
-  - [x] Add performance headroom calculation for aggressive/conservative clustering
-  - [x] Create performance scaling matrix validation (1k→10k→100k→1M entities)
-
-- [x] **✅ Circle-Specific Optimizations** **COMPLETED**
-  - [x] Implement battle royale elimination cascading (cluster breakup near finale)
-  - [x] Add pixel-cluster aggregation for overlapping circles
-  - [x] Optimize collision detection for clustered vs individual entities
-  - [x] Validate viewport-physics harmony across different simulation tiers
-
-### MEDIUM PRIORITY - Advanced Performance
-- [ ] **Performance Optimization** (Milestone 8) **RESEARCH-BACKED STRATEGIES**
-  - [ ] **GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
-    - [ ] Stand up compute pass that frustum-culls instance data into a GPU-visible list
-    - [ ] Define shared visibility buffer layout (include hook for future `CameraState` zoom factor)
-    - [ ] Validate correctness against CPU path using instrumentation metrics
-  - [ ] **GPU-Driven Rendering – Stage 2 (Indirect Draw Integration)**
-    - [ ] Replace direct draws with `vkCmdDrawIndexedIndirect`
-    - [ ] Add GPU-side instance count readback guards or fallback path
-    - [ ] Benchmark draw-call reduction using new baseline instrumentation
-  - [ ] **GPU-Driven Rendering – Stage 3 (Hi-Z Occlusion & Refinement)**
-    - [ ] Build Hi-Z buffer from prior frame depth
-    - [ ] Integrate occlusion test into compute culling
-    - [ ] Target: 125k+ entities at 60+ FPS (industry benchmark achieved)
-  - [ ] **Advanced Spatial Partitioning**
-    - [ ] Replace simple hash grid with hybrid quadtree + hash grid system
-    - [ ] Implement dynamic rebalancing for moving entities
-    - [ ] Optimize collision detection from O(n²) to O(n) for clustered objects
-    - [ ] Expose spatial bounds API consumed by deferred camera zoom feature
-  - [ ] **Data-Oriented Memory Optimization**
-    - [ ] Verify current SoA layout is SIMD-friendly for vectorized operations
-    - [ ] Add memory coherence profiling for cache miss optimization
-    - [ ] Implement batch processing for position/velocity updates
-  - [ ] **Modern Vulkan Features** (Advanced)
-    - [ ] Evaluate mesh shader implementation for 10x geometry performance
-    - [ ] Consider GPU-controlled texture loading via compute shaders
-
-### LOW PRIORITY - Advanced Features
-- [ ] **Ultra-Massive Scale Support** (500k+ files) **BEYOND CURRENT SCOPE**
+### Stage 4 – Long-Term Enhancements (tackle after core goals)
+- [ ] **Ultra-Massive Scale Support** (500k+ files; currently out of scope)
   - [ ] Implement ECS-style entity management for million+ entities (Unity DOTS-inspired)
   - [ ] Add background texture streaming with predictive loading
-  - [ ] Create hierarchical culling system with mesh shaders
-  - [ ] Research: Burst compiler equivalent for C++ SIMD optimization
-
-- [ ] **Enhanced Collision System**
+  - [ ] Create a hierarchical culling system backed by mesh shaders
+  - [ ] Research a Burst-compiler-equivalent approach for C++ SIMD optimization
+- [ ] **Enhanced Collision & FX**
   - [ ] Add collision sound effects
   - [ ] Implement particle effects for impacts
   - [ ] Add circle trail/motion blur effects
-
 - [ ] **Configuration & Tuning**
-  - [ ] Create JSON-based configuration file for all constants
+  - [ ] Create a JSON-based configuration file for all constants
   - [ ] Add runtime parameter adjustment (speed, damage, etc.)
-  - [ ] Implement save/load settings system
-
+  - [ ] Implement save/load settings support
 - [ ] **Debug & Development Tools**
-  - [ ] Add debug visualization for spatial grid
-  - [ ] Implement performance profiling overlay
+  - [ ] Add debug visualization for the spatial grid
+  - [ ] Implement an expanded performance profiling overlay
   - [ ] Add collision count statistics
-  - [ ] Create replay system for battles
+  - [ ] Create a replay system for battles
 
 ---
-
 ## Notes on MoltenVK capabilities
 - Descriptor indexing/bindless is limited; plan on atlas array + indirection buffer.
 - Avoid geometry shaders; use instancing + SDF.
