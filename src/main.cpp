@@ -255,7 +255,7 @@ struct Simulation {
 	// Winner/victory state
 	bool inVictory = false;
 	int winnerIndex = -1;
-	float victoryTime = 0.0f;
+	bool victorySetupDone = false;
 
 	void loadBiasConfig(const std::string& biasFile) {
 		biasReductions.clear();
@@ -446,23 +446,32 @@ struct Simulation {
 			if (cnt <= 1 && last >= 0) {
 				inVictory = true;
 				winnerIndex = last;
-				victoryTime = 0.0f;
+				victorySetupDone = false;
 			}
 		} else {
-			victoryTime += dt;
-			// Freeze others
-			for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
-				if (i == winnerIndex) continue;
-				velX[i] = 0.0f; velY[i] = 0.0f;
+			if (!victorySetupDone && winnerIndex >= 0) {
+				const float centerX = worldWidth * 0.5f;
+				const float centerY = worldHeight * 0.5f;
+				const float displayRadius = std::max(fixedRadius, std::min(worldWidth, worldHeight) * 0.35f);
+
+				for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
+					velX[i] = 0.0f;
+					velY[i] = 0.0f;
+					if (i == winnerIndex) {
+						posX[i] = centerX;
+						posY[i] = centerY;
+						radius[i] = displayRadius;
+						health[i] = 1.0f;
+						if (imageId[i] != UINT32_MAX) {
+							imageTier[i] = std::max<uint8_t>(imageTier[i], 2);
+						}
+						continue;
+					}
+					alive[i] = 0;
+				}
+
+				victorySetupDone = true;
 			}
-			// Move winner to center and scale up
-			float targetX = worldWidth * 0.5f;
-			float targetY = worldHeight * 0.5f;
-			float t = std::min(1.0f, victoryTime * 0.5f);
-			posX[winnerIndex] = posX[winnerIndex] + (targetX - posX[winnerIndex]) * t;
-			posY[winnerIndex] = posY[winnerIndex] + (targetY - posY[winnerIndex]) * t;
-			float baseR = std::max(30.0f, radius[winnerIndex]);
-			radius[winnerIndex] = baseR * (1.0f + t * 2.5f);
 		}
 	}
 
@@ -530,6 +539,13 @@ struct Simulation {
 				inst.color[0] = 1.0f - h;
 				inst.color[1] = h;
 				inst.color[2] = 0.2f;
+				inst.color[3] = 1.0f;
+			}
+
+			if (inVictory && static_cast<int>(i) == winnerIndex) {
+				inst.color[0] = 1.0f;
+				inst.color[1] = 1.0f;
+				inst.color[2] = 1.0f;
 				inst.color[3] = 1.0f;
 			}
 
@@ -2280,28 +2296,33 @@ int main() {
 		// Print status updates periodically
 		frameCount++;
 		uint32_t currentAlive = sim.aliveCount();
-		hudVertices.clear();
-		if (hudFont.ready) {
+	hudVertices.clear();
+	if (hudFont.ready) {
+		if (sim.inVictory && sim.winnerIndex >= 0) {
+			std::string winnerText = sim.names[sim.winnerIndex];
+			if (winnerText.empty()) {
+				winnerText = "Winner";
+			}
+
+			const float winnerTextSize = 96.0f;
+			float width = hudMeasureWidth(hudFont, winnerText, winnerTextSize);
+			float height = hudMeasureHeight(hudFont, winnerText, winnerTextSize);
+			float baseX = 0.5f * (static_cast<float>(sc.extent.width) - width);
+			float baseY = 0.75f * static_cast<float>(sc.extent.height) - 0.5f * height;
+
+			const std::array<float, 4> winnerShadow{0.0f, 0.0f, 0.0f, 0.65f};
+			const std::array<float, 4> winnerColor{1.0f, 1.0f, 1.0f, 1.0f};
+			appendHudText(hudFont, hudVertices, baseX + 4.0f, baseY + 4.0f, winnerText, winnerTextSize, winnerShadow);
+			appendHudText(hudFont, hudVertices, baseX, baseY, winnerText, winnerTextSize, winnerColor);
+		} else {
 			const float hudTextSize = 36.0f;
 			const std::array<float, 4> hudShadowColor{0.0f, 0.0f, 0.0f, 0.6f};
 			const std::array<float, 4> hudMainColor{1.0f, 1.0f, 1.0f, 1.0f};
 			std::string playersLeftText = "Players left: " + std::to_string(currentAlive);
 			appendHudText(hudFont, hudVertices, 24.0f + 2.0f, 32.0f + 2.0f, playersLeftText, hudTextSize, hudShadowColor);
 			appendHudText(hudFont, hudVertices, 24.0f, 32.0f, playersLeftText, hudTextSize, hudMainColor);
-
-			if (sim.inVictory && sim.winnerIndex >= 0) {
-				std::string winnerText = "Winner: " + sim.names[sim.winnerIndex];
-				const float winnerTextSize = 80.0f;
-				float width = hudMeasureWidth(hudFont, winnerText, winnerTextSize);
-				float height = hudMeasureHeight(hudFont, winnerText, winnerTextSize);
-				float baseX = 0.5f * (static_cast<float>(sc.extent.width) - width);
-				float baseY = 0.5f * (static_cast<float>(sc.extent.height) - height);
-				const std::array<float, 4> winnerShadow{0.0f, 0.0f, 0.0f, 0.6f};
-				const std::array<float, 4> winnerColor{1.0f, 0.85f, 0.1f, 1.0f};
-				appendHudText(hudFont, hudVertices, baseX + 4.0f, baseY + 4.0f, winnerText, winnerTextSize, winnerShadow);
-				appendHudText(hudFont, hudVertices, baseX, baseY, winnerText, winnerTextSize, winnerColor);
-			}
 		}
+	}
 
 		VkDeviceSize hudDataSize = sizeof(TextVertex) * hudVertices.size();
 		if (hudDataSize > hud.bufferSize) {
