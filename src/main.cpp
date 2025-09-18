@@ -867,6 +867,94 @@ public:
 		return total;
 	}
 
+	// Cluster-to-cluster collision detection and resolution
+	void processClusterCollisions(float dt) {
+		// Process collisions between statistical clusters
+		for (size_t i = 0; i < dustClusters.size(); ++i) {
+			if (dustClusters[i].aliveCount == 0) continue;
+
+			for (size_t j = i + 1; j < dustClusters.size(); ++j) {
+				if (dustClusters[j].aliveCount == 0) continue;
+
+				auto& clusterA = dustClusters[i];
+				auto& clusterB = dustClusters[j];
+
+				// Calculate distance between cluster centers
+				float dx = clusterB.centerOfMass.x - clusterA.centerOfMass.x;
+				float dy = clusterB.centerOfMass.y - clusterA.centerOfMass.y;
+				float distance = std::sqrt(dx * dx + dy * dy);
+				float minDistance = clusterA.effectiveRadius + clusterB.effectiveRadius;
+
+				if (distance < minDistance && distance > 1e-6f) {
+					// Collision detected - resolve using elastic collision
+					float overlap = minDistance - distance;
+					float nx = dx / distance; // Normalized collision normal
+					float ny = dy / distance;
+
+					// Separate clusters
+					float separationA = overlap * 0.5f * (clusterB.totalMass / (clusterA.totalMass + clusterB.totalMass));
+					float separationB = overlap * 0.5f * (clusterA.totalMass / (clusterA.totalMass + clusterB.totalMass));
+
+					clusterA.centerOfMass.x -= nx * separationA;
+					clusterA.centerOfMass.y -= ny * separationA;
+					clusterB.centerOfMass.x += nx * separationB;
+					clusterB.centerOfMass.y += ny * separationB;
+
+					// Calculate relative velocity along collision normal
+					float vrelX = clusterB.averageVelocity.x - clusterA.averageVelocity.x;
+					float vrelY = clusterB.averageVelocity.y - clusterA.averageVelocity.y;
+					float vrelNormal = vrelX * nx + vrelY * ny;
+
+					// Only resolve if objects are moving towards each other
+					if (vrelNormal > 0) continue;
+
+					// Calculate collision impulse
+					float totalMass = clusterA.totalMass + clusterB.totalMass;
+					float impulse = -2.0f * vrelNormal / totalMass;
+
+					// Apply impulse to velocities
+					float impulseX = impulse * nx;
+					float impulseY = impulse * ny;
+
+					clusterA.averageVelocity.x -= impulseX * clusterB.totalMass;
+					clusterA.averageVelocity.y -= impulseY * clusterB.totalMass;
+					clusterB.averageVelocity.x += impulseX * clusterA.totalMass;
+					clusterB.averageVelocity.y += impulseY * clusterA.totalMass;
+
+					// Apply damping to maintain constant speed
+					float speedA = std::sqrt(clusterA.averageVelocity.x * clusterA.averageVelocity.x +
+											clusterA.averageVelocity.y * clusterA.averageVelocity.y);
+					float speedB = std::sqrt(clusterB.averageVelocity.x * clusterB.averageVelocity.x +
+											clusterB.averageVelocity.y * clusterB.averageVelocity.y);
+
+					const float constantSpeed = 140.0f * 2.0f; // Match simulation constant speed
+					if (speedA > 0.0f) {
+						clusterA.averageVelocity.x = (clusterA.averageVelocity.x / speedA) * constantSpeed;
+						clusterA.averageVelocity.y = (clusterA.averageVelocity.y / speedA) * constantSpeed;
+					}
+					if (speedB > 0.0f) {
+						clusterB.averageVelocity.x = (clusterB.averageVelocity.x / speedB) * constantSpeed;
+						clusterB.averageVelocity.y = (clusterB.averageVelocity.y / speedB) * constantSpeed;
+					}
+
+					// Apply statistical damage based on collision intensity
+					float collisionIntensity = std::abs(vrelNormal) * 0.001f;
+					float baseDamage = std::max(0.01f, collisionIntensity);
+
+					clusterA.processEliminations(baseDamage);
+					clusterB.processEliminations(baseDamage);
+				}
+			}
+		}
+
+		// Update cluster physics after collisions
+		for (auto& cluster : dustClusters) {
+			if (cluster.aliveCount > 0) {
+				cluster.updatePhysics(dt, 800.0f, 600.0f); // Use simulation world dimensions
+			}
+		}
+	}
+
 private:
 	void promoteClusterToIndividuals(const StatisticalCluster& cluster) {
 		for (uint32_t idx : cluster.memberIndices) {
@@ -2772,8 +2860,13 @@ int main() {
 		// Update adaptive simulation architecture
 		// For now, use a default zoom factor of 1.0f (will be dynamic when camera scaling is implemented)
 		float currentZoomFactor = 1.0f;
-		adaptiveSim.updateSimulationTiers(sim, currentZoomFactor);
+
+		// Integrate performance monitoring for adaptive thresholds
 		adaptiveSim.setFrameTime(metrics.rollingAverage);
+		adaptiveSim.updateSimulationTiers(sim, currentZoomFactor);
+
+		// Process cluster-to-cluster collisions for statistical simulation
+		adaptiveSim.processClusterCollisions(dt);
 
 		// Use LOD-based rendering system
 		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, currentZoomFactor);
