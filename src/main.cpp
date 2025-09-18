@@ -71,6 +71,7 @@ struct PipelineObjects {
 struct GeometryBuffers {
 	BufferWithMemory quadVertexBuffer;
 	BufferWithMemory instanceBuffer;
+	VkDeviceSize instanceBufferCapacity = 0;
 	uint32_t instanceCount = 0;
 };
 
@@ -268,7 +269,7 @@ struct Simulation {
 	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
 
 	// Camera zoom constants for dynamic scaling
-	static constexpr float MIN_ZOOM_FACTOR = 0.5f;  // Max zoom out (50k players)
+	static constexpr float MIN_ZOOM_FACTOR = 0.1f;  // Max zoom out (50k players)
 	static constexpr float MAX_ZOOM_FACTOR = 3.0f;  // Max zoom in (final players)
 	static constexpr uint32_t MAX_PLAYERS_FOR_MIN_ZOOM = 50000;
 	static constexpr uint32_t MIN_PLAYERS_FOR_MAX_ZOOM = 1;
@@ -2984,6 +2985,7 @@ int main() {
 		// Instance buffer initial capacity; will update every frame
 		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * 2048;
 		createBuffer(physical, device, ibSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, geom.instanceBuffer);
+		geom.instanceBufferCapacity = ibSize;
 	}
 
 	HudGeometry hud{};
@@ -3410,6 +3412,22 @@ int main() {
 		}
 		geom.instanceCount = static_cast<uint32_t>(cpuInstances.size());
 		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * cpuInstances.size();
+		if (ibSize > geom.instanceBufferCapacity) {
+			// Grow the instance buffer to accommodate large player counts
+			if (geom.instanceBuffer.buffer != VK_NULL_HANDLE) {
+				vkDestroyBuffer(device, geom.instanceBuffer.buffer, nullptr);
+				geom.instanceBuffer.buffer = VK_NULL_HANDLE;
+			}
+			if (geom.instanceBuffer.memory != VK_NULL_HANDLE) {
+				vkFreeMemory(device, geom.instanceBuffer.memory, nullptr);
+				geom.instanceBuffer.memory = VK_NULL_HANDLE;
+			}
+			VkDeviceSize newSize = std::max<VkDeviceSize>(ibSize, geom.instanceBufferCapacity ? geom.instanceBufferCapacity * 2 : ibSize);
+			createBuffer(physical, device, newSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				geom.instanceBuffer);
+			geom.instanceBufferCapacity = newSize;
+		}
 		if (ibSize > 0) {
 			void* ptr = mapMemory(device, geom.instanceBuffer.memory, ibSize);
 			std::memcpy(ptr, cpuInstances.data(), static_cast<size_t>(ibSize));
@@ -3471,6 +3489,9 @@ int main() {
 	for (auto s : imageAvailableSemaphores) vkDestroySemaphore(device, s, nullptr);
 	vkDestroyBuffer(device, geom.instanceBuffer.buffer, nullptr);
 	vkFreeMemory(device, geom.instanceBuffer.memory, nullptr);
+	geom.instanceBuffer.buffer = VK_NULL_HANDLE;
+	geom.instanceBuffer.memory = VK_NULL_HANDLE;
+	geom.instanceBufferCapacity = 0;
 	vkDestroyBuffer(device, geom.quadVertexBuffer.buffer, nullptr);
 	vkFreeMemory(device, geom.quadVertexBuffer.memory, nullptr);
 	vkDestroyPipeline(device, circlePipeline.pipeline, nullptr);
