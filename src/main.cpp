@@ -2303,12 +2303,18 @@ int main() {
 			if (winnerText.empty()) {
 				winnerText = "Winner";
 			}
+			winnerText += " wins";
 
 			const float winnerTextSize = 96.0f;
 			float width = hudMeasureWidth(hudFont, winnerText, winnerTextSize);
 			float height = hudMeasureHeight(hudFont, winnerText, winnerTextSize);
-			float baseX = 0.5f * (static_cast<float>(sc.extent.width) - width);
-			float baseY = 0.75f * static_cast<float>(sc.extent.height) - 0.5f * height;
+
+			// Position text above the winner's circle like a nametag
+			float circleX = sim.posX[sim.winnerIndex];
+			float circleY = sim.posY[sim.winnerIndex];
+			float circleRadius = sim.radius[sim.winnerIndex];
+			float baseX = circleX - (width * 0.5f);
+			float baseY = circleY - circleRadius - height - 20.0f; // 20px offset above circle
 
 			const std::array<float, 4> winnerShadow{0.0f, 0.0f, 0.0f, 0.65f};
 			const std::array<float, 4> winnerColor{1.0f, 1.0f, 1.0f, 1.0f};
