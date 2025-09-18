@@ -260,12 +260,18 @@ struct Simulation {
 	float fixedRadius = 40.0f; // All circles have uniform size
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
-	float damageMultiplier = 0.2f;
-	float minDamage = 0.05f;
+	float damageMultiplier = 0.02f;
+	float minDamage = 0.005f;
 	float gridCellSize = 64.0f;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
 	float constantSpeed = 140.0f * speedMultiplier; // Fixed speed magnitude for all circles
 	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
+
+	// Camera zoom constants for dynamic scaling
+	static constexpr float MIN_ZOOM_FACTOR = 0.5f;  // Max zoom out (50k players)
+	static constexpr float MAX_ZOOM_FACTOR = 3.0f;  // Max zoom in (final players)
+	static constexpr uint32_t MAX_PLAYERS_FOR_MIN_ZOOM = 50000;
+	static constexpr uint32_t MIN_PLAYERS_FOR_MAX_ZOOM = 1;
 
 	// Bias system - now uses damage reduction instead of health multipliers
 	std::map<std::string, float> biasReductions; // 0.0 = no reduction, 0.5 = 50% damage reduction
@@ -285,6 +291,11 @@ struct Simulation {
 	// World
 	float worldWidth = 800.0f;
 	float worldHeight = 600.0f;
+
+	// Effective world boundaries for camera zoom (calculated from zoom factor)
+	float effectiveWorldWidth = 800.0f;
+	float effectiveWorldHeight = 600.0f;
+	float currentZoomFactor = 1.0f;
 
 	// State arrays
 	std::vector<float> posX, posY;
@@ -389,7 +400,35 @@ struct Simulation {
 		uint32_t c = 0; for (auto a : alive) if (a) ++c; return c;
 	}
 
+	float calculateZoomFromPlayerCount(uint32_t count) const {
+		// Smooth interpolation between min and max zoom based on player count
+		if (count >= MAX_PLAYERS_FOR_MIN_ZOOM) {
+			return MIN_ZOOM_FACTOR;
+		}
+		if (count <= MIN_PLAYERS_FOR_MAX_ZOOM) {
+			return MAX_ZOOM_FACTOR;
+		}
+
+		// Logarithmic interpolation for more natural scaling
+		float normalizedCount = static_cast<float>(count - MIN_PLAYERS_FOR_MAX_ZOOM) /
+		                       static_cast<float>(MAX_PLAYERS_FOR_MIN_ZOOM - MIN_PLAYERS_FOR_MAX_ZOOM);
+
+		// Use logarithmic scaling for more dramatic zoom during finale
+		float logNormalized = std::log(normalizedCount * (std::exp(1.0f) - 1.0f) + 1.0f);
+
+		return MIN_ZOOM_FACTOR + (MAX_ZOOM_FACTOR - MIN_ZOOM_FACTOR) * (1.0f - logNormalized);
+	}
+
+	void updateEffectiveWorldBounds() {
+		currentZoomFactor = calculateZoomFromPlayerCount(aliveCount());
+		effectiveWorldWidth = worldWidth / currentZoomFactor;
+		effectiveWorldHeight = worldHeight / currentZoomFactor;
+	}
+
 	void step(float dt) {
+		// Update effective world boundaries based on current player count
+		updateEffectiveWorldBounds();
+
 		// Integrate and wall collisions
 		for (size_t i = 0; i < posX.size(); ++i) {
 			if (!alive[i]) continue;
@@ -398,9 +437,9 @@ struct Simulation {
 			float r = radius[i];
 			bool wallHit = false;
 			if (posX[i] - r < 0.0f) { posX[i] = r; velX[i] = -velX[i]; wallHit = true; }
-			if (posX[i] + r > worldWidth) { posX[i] = worldWidth - r; velX[i] = -velX[i]; wallHit = true; }
+			if (posX[i] + r > effectiveWorldWidth) { posX[i] = effectiveWorldWidth - r; velX[i] = -velX[i]; wallHit = true; }
 			if (posY[i] - r < 0.0f) { posY[i] = r; velY[i] = -velY[i]; wallHit = true; }
-			if (posY[i] + r > worldHeight) { posY[i] = worldHeight - r; velY[i] = -velY[i]; wallHit = true; }
+			if (posY[i] + r > effectiveWorldHeight) { posY[i] = effectiveWorldHeight - r; velY[i] = -velY[i]; wallHit = true; }
 			// Normalize velocity to maintain constant speed after wall collisions
 			if (wallHit) {
 				normalizeVelocity(i);
@@ -408,8 +447,8 @@ struct Simulation {
 		}
 
 		// Spatial grid dimensions
-		const int cellsX = std::max(1, static_cast<int>(worldWidth / gridCellSize));
-		const int cellsY = std::max(1, static_cast<int>(worldHeight / gridCellSize));
+		const int cellsX = std::max(1, static_cast<int>(effectiveWorldWidth / gridCellSize));
+		const int cellsY = std::max(1, static_cast<int>(effectiveWorldHeight / gridCellSize));
 		std::vector<std::vector<int>> grid(static_cast<size_t>(cellsX * cellsY));
 		auto cellIndex = [&](float x, float y) {
 			int cx = std::clamp(static_cast<int>(x / gridCellSize), 0, cellsX - 1);
@@ -643,7 +682,7 @@ struct StatisticalCluster {
 	std::vector<uint32_t> memberIndices;
 
 	// Simplified physics: treat cluster as single large circle
-	void updatePhysics(float dt, float worldWidth, float worldHeight) {
+	void updatePhysics(float dt, float effectiveWorldWidth, float effectiveWorldHeight) {
 		// Integrate cluster position
 		centerOfMass.x += averageVelocity.x * dt;
 		centerOfMass.y += averageVelocity.y * dt;
@@ -655,8 +694,8 @@ struct StatisticalCluster {
 			averageVelocity.x = -averageVelocity.x;
 			wallHit = true;
 		}
-		if (centerOfMass.x + effectiveRadius > worldWidth) {
-			centerOfMass.x = worldWidth - effectiveRadius;
+		if (centerOfMass.x + effectiveRadius > effectiveWorldWidth) {
+			centerOfMass.x = effectiveWorldWidth - effectiveRadius;
 			averageVelocity.x = -averageVelocity.x;
 			wallHit = true;
 		}
@@ -665,8 +704,8 @@ struct StatisticalCluster {
 			averageVelocity.y = -averageVelocity.y;
 			wallHit = true;
 		}
-		if (centerOfMass.y + effectiveRadius > worldHeight) {
-			centerOfMass.y = worldHeight - effectiveRadius;
+		if (centerOfMass.y + effectiveRadius > effectiveWorldHeight) {
+			centerOfMass.y = effectiveWorldHeight - effectiveRadius;
 			averageVelocity.y = -averageVelocity.y;
 			wallHit = true;
 		}
@@ -1062,7 +1101,7 @@ public:
 		processClusterToClusterCollisions(dt);
 
 		// Phase 3: Update cluster physics after all collisions
-		updateClusterPhysics(dt);
+		updateClusterPhysics(dt, sim.effectiveWorldWidth, sim.effectiveWorldHeight);
 	}
 
 private:
@@ -1195,10 +1234,10 @@ private:
 	}
 
 	// Update cluster physics after all collision processing
-	void updateClusterPhysics(float dt) {
+	void updateClusterPhysics(float dt, float effectiveWorldWidth, float effectiveWorldHeight) {
 		for (auto& cluster : dustClusters) {
 			if (cluster.aliveCount > 0) {
-				cluster.updatePhysics(dt, 800.0f, 600.0f); // Use simulation world dimensions
+				cluster.updatePhysics(dt, effectiveWorldWidth, effectiveWorldHeight);
 			}
 		}
 	}
@@ -3234,8 +3273,10 @@ int main() {
 		// Bind descriptor set for texture atlas
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
 
-		// Push constants: viewport size
-		float vp[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
+		// Push constants: effective viewport size (adjusted for zoom)
+		float effectiveViewportWidth = static_cast<float>(sc.extent.width) / sim.currentZoomFactor;
+		float effectiveViewportHeight = static_cast<float>(sc.extent.height) / sim.currentZoomFactor;
+		float vp[2] = { effectiveViewportWidth, effectiveViewportHeight };
 		vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), vp);
 
 		// Update simulation and instance buffer

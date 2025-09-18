@@ -8,7 +8,7 @@ layout(location = 3) in vec4 inColor;     // RGBA
 layout(location = 4) in float inImageLayer; // Atlas layer index, -1 for flat color
 
 layout(push_constant) uniform Push {
-    vec2 viewport; // framebuffer size in pixels
+    vec2 viewport; // effective viewport size (framebuffer size / zoom factor)
 } pc;
 
 layout(location = 0) out vec2 vPos;   // pass the local quad pos for SDF

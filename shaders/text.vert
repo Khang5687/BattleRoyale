@@ -6,7 +6,7 @@ layout(location = 1) in vec2 inUV;
 layout(location = 2) in vec4 inColor;
 
 layout(push_constant) uniform Push {
-    vec2 viewport;
+    vec2 viewport; // effective viewport size (framebuffer size / zoom factor)
 } pc;
 
 layout(location = 0) out vec2 vUV;
