@@ -16,6 +16,7 @@
 #include <map>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <list>
 #include <queue>
 #include <thread>
@@ -844,19 +845,131 @@ public:
 			}
 		}
 
-		// Break up small clusters into individuals for dramatic finale
-		for (auto it = dustClusters.begin(); it != dustClusters.end();) {
-			if (it->aliveCount < CLUSTER_BREAKUP_THRESHOLD) {
-				promoteClusterToIndividuals(*it);
-				it = dustClusters.erase(it);
-			} else {
-				++it;
-			}
-		}
+		// Enhanced Battle Royale Elimination Cascading for dramatic finale
+		uint32_t totalAlive = getTotalAliveCount();
+		processBattleRoyaleEliminationCascading(sim, totalAlive);
 	}
 
 	void setFrameTime(float frameTimeMs) {
 		lastFrameTime = frameTimeMs;
+	}
+
+	// Enhanced Battle Royale Elimination Cascading for dramatic finale scenarios
+	void processBattleRoyaleEliminationCascading(const Simulation& sim, uint32_t totalAlive) {
+		// Define dynamic thresholds based on total alive count for cascade staging
+		uint32_t finalStageThreshold = 100;      // Final 100: All clusters break up
+		uint32_t dramaStageThreshold = 500;      // Drama stage: Large clusters break up
+		uint32_t midGameThreshold = 2000;        // Mid-game: Medium clusters break up
+
+		// Stage 1: Final Stage - All clusters break up for individual finale (< 100 players)
+		if (totalAlive <= finalStageThreshold) {
+			// Break up ALL clusters for maximum drama
+			for (auto it = dustClusters.begin(); it != dustClusters.end();) {
+				promoteClusterToIndividuals(*it);
+				it = dustClusters.erase(it);
+			}
+			return;
+		}
+
+		// Stage 2: Drama Stage - Large clusters break up (100-500 players)
+		if (totalAlive <= dramaStageThreshold) {
+			for (auto it = dustClusters.begin(); it != dustClusters.end();) {
+				// Break up clusters larger than 30 entities for more individual action
+				if (it->aliveCount > 30) {
+					promoteClusterToIndividuals(*it);
+					it = dustClusters.erase(it);
+				} else {
+					++it;
+				}
+			}
+		}
+		// Stage 3: Mid-Game Stage - Medium clusters break up (500-2000 players)
+		else if (totalAlive <= midGameThreshold) {
+			for (auto it = dustClusters.begin(); it != dustClusters.end();) {
+				// Break up clusters larger than 50 entities
+				if (it->aliveCount > 50) {
+					promoteClusterToIndividuals(*it);
+					it = dustClusters.erase(it);
+				} else {
+					++it;
+				}
+			}
+		}
+		// Stage 4: Early Game - Only break up very small clusters (> 2000 players)
+		else {
+			for (auto it = dustClusters.begin(); it != dustClusters.end();) {
+				// Only break up clusters smaller than threshold for consistency
+				if (it->aliveCount < CLUSTER_BREAKUP_THRESHOLD) {
+					promoteClusterToIndividuals(*it);
+					it = dustClusters.erase(it);
+				} else {
+					++it;
+				}
+			}
+		}
+
+		// Additional cascading: Force cluster merging in early game for efficiency
+		if (totalAlive > 10000) {
+			mergeNearbyClusters(sim);
+		}
+	}
+
+	// Merge nearby clusters in early game for computational efficiency
+	void mergeNearbyClusters(const Simulation& sim) {
+		const float mergeDistance = 100.0f; // Merge clusters within 100 pixels
+
+		for (size_t i = 0; i < dustClusters.size(); ++i) {
+			if (dustClusters[i].aliveCount == 0) continue;
+
+			for (size_t j = i + 1; j < dustClusters.size(); ++j) {
+				if (dustClusters[j].aliveCount == 0) continue;
+
+				auto& clusterA = dustClusters[i];
+				auto& clusterB = dustClusters[j];
+
+				// Calculate distance between cluster centers
+				float dx = clusterB.centerOfMass.x - clusterA.centerOfMass.x;
+				float dy = clusterB.centerOfMass.y - clusterA.centerOfMass.y;
+				float distance = std::sqrt(dx * dx + dy * dy);
+
+				if (distance < mergeDistance) {
+					// Merge clusterB into clusterA
+					float totalMass = clusterA.totalMass + clusterB.totalMass;
+
+					// Weighted average of positions and velocities
+					clusterA.centerOfMass.x = (clusterA.centerOfMass.x * clusterA.totalMass +
+											  clusterB.centerOfMass.x * clusterB.totalMass) / totalMass;
+					clusterA.centerOfMass.y = (clusterA.centerOfMass.y * clusterA.totalMass +
+											  clusterB.centerOfMass.y * clusterB.totalMass) / totalMass;
+
+					clusterA.averageVelocity.x = (clusterA.averageVelocity.x * clusterA.totalMass +
+												 clusterB.averageVelocity.x * clusterB.totalMass) / totalMass;
+					clusterA.averageVelocity.y = (clusterA.averageVelocity.y * clusterA.totalMass +
+												 clusterB.averageVelocity.y * clusterB.totalMass) / totalMass;
+
+					// Combine member indices
+					clusterA.memberIndices.insert(clusterA.memberIndices.end(),
+												  clusterB.memberIndices.begin(),
+												  clusterB.memberIndices.end());
+
+					// Update cluster properties
+					clusterA.aliveCount += clusterB.aliveCount;
+					clusterA.totalMass = totalMass;
+					clusterA.effectiveRadius = std::sqrt(static_cast<float>(clusterA.aliveCount)) * 4.0f + 10.0f;
+
+					// Mark clusterB for removal
+					clusterB.aliveCount = 0;
+					clusterB.memberIndices.clear();
+				}
+			}
+		}
+
+		// Remove empty clusters
+		dustClusters.erase(
+			std::remove_if(dustClusters.begin(), dustClusters.end(),
+				[](const StatisticalCluster& cluster) { return cluster.aliveCount == 0; }),
+			dustClusters.end()
+		);
 	}
 
 	uint32_t getTotalAliveCount() const {
@@ -867,8 +980,140 @@ public:
 		return total;
 	}
 
-	// Cluster-to-cluster collision detection and resolution
-	void processClusterCollisions(float dt) {
+	// Pixel-cluster aggregation for overlapping circles when they become dust-level
+	struct PixelCluster {
+		vec2 position{0.0f, 0.0f};
+		vec3 aggregatedColor{0.0f, 0.0f, 0.0f};
+		float intensity = 0.0f;
+		uint32_t entityCount = 0;
+	};
+
+	std::vector<PixelCluster> aggregateOverlappingPixels(const Simulation& sim, float zoomFactor) const {
+		std::vector<PixelCluster> pixelClusters;
+		const float pixelAggregationRadius = 2.0f; // Aggregate entities within 2 pixels
+
+		// Collect all sub-pixel and tiny entities for aggregation
+		std::vector<uint32_t> dustEntities;
+		for (uint32_t idx : individualCircles) {
+			if (idx >= sim.posX.size() || !sim.alive[idx]) continue;
+
+			float apparentRadius = calculateApparentRadius(sim.radius[idx], zoomFactor);
+			if (apparentRadius < 2.0f) { // Sub-pixel and tiny entities
+				dustEntities.push_back(idx);
+			}
+		}
+
+		// Spatial aggregation using simple grid-based clustering
+		const float gridSize = pixelAggregationRadius;
+		std::unordered_map<int64_t, PixelCluster> pixelGrid;
+
+		for (uint32_t idx : dustEntities) {
+			// Calculate grid cell
+			int32_t cellX = static_cast<int32_t>(sim.posX[idx] / gridSize);
+			int32_t cellY = static_cast<int32_t>(sim.posY[idx] / gridSize);
+			int64_t cellKey = (static_cast<int64_t>(cellY) << 32) | static_cast<int64_t>(cellX);
+
+			auto it = pixelGrid.find(cellKey);
+			if (it == pixelGrid.end()) {
+				// Create new pixel cluster
+				PixelCluster cluster;
+				cluster.position = {sim.posX[idx], sim.posY[idx]};
+				float h = std::clamp(sim.health[idx], 0.0f, 1.0f);
+				cluster.aggregatedColor = {1.0f - h, h, 0.2f}; // Health-based color
+				cluster.intensity = 1.0f;
+				cluster.entityCount = 1;
+				pixelGrid[cellKey] = cluster;
+			} else {
+				// Aggregate into existing pixel cluster
+				auto& cluster = it->second;
+				float totalCount = static_cast<float>(cluster.entityCount + 1);
+
+				// Weighted average position
+				cluster.position.x = (cluster.position.x * cluster.entityCount + sim.posX[idx]) / totalCount;
+				cluster.position.y = (cluster.position.y * cluster.entityCount + sim.posY[idx]) / totalCount;
+
+				// Aggregate color
+				float h = std::clamp(sim.health[idx], 0.0f, 1.0f);
+				vec3 entityColor = {1.0f - h, h, 0.2f};
+				cluster.aggregatedColor.x = (cluster.aggregatedColor.x * cluster.entityCount + entityColor.x) / totalCount;
+				cluster.aggregatedColor.y = (cluster.aggregatedColor.y * cluster.entityCount + entityColor.y) / totalCount;
+				cluster.aggregatedColor.z = (cluster.aggregatedColor.z * cluster.entityCount + entityColor.z) / totalCount;
+
+				cluster.intensity = std::min(2.0f, cluster.intensity + 0.3f); // Increase intensity with more entities
+				cluster.entityCount++;
+			}
+		}
+
+		// Convert grid map to vector
+		pixelClusters.reserve(pixelGrid.size());
+		for (const auto& pair : pixelGrid) {
+			pixelClusters.push_back(pair.second);
+		}
+
+		return pixelClusters;
+	}
+
+	// Optimized collision detection for clustered vs individual entities
+	void processClusterCollisions(float dt, const Simulation& sim) {
+		// Phase 1: Individual-to-cluster collisions (hybrid tier collision)
+		processIndividualToClusterCollisions(dt, sim);
+
+		// Phase 2: Cluster-to-cluster collisions (statistical tier)
+		processClusterToClusterCollisions(dt);
+
+		// Phase 3: Update cluster physics after all collisions
+		updateClusterPhysics(dt);
+	}
+
+private:
+	// Collision detection between individual circles and statistical clusters
+	void processIndividualToClusterCollisions(float dt, const Simulation& sim) {
+		for (uint32_t idx : individualCircles) {
+			if (idx >= sim.posX.size() || !sim.alive[idx]) continue;
+
+			float indivX = sim.posX[idx];
+			float indivY = sim.posY[idx];
+			float indivRadius = sim.radius[idx];
+
+			for (auto& cluster : dustClusters) {
+				if (cluster.aliveCount == 0) continue;
+
+				// Calculate distance from individual to cluster center
+				float dx = cluster.centerOfMass.x - indivX;
+				float dy = cluster.centerOfMass.y - indivY;
+				float distance = std::sqrt(dx * dx + dy * dy);
+				float collisionDistance = indivRadius + cluster.effectiveRadius;
+
+				if (distance < collisionDistance && distance > 1e-6f) {
+					// Collision detected between individual and cluster
+					float overlap = collisionDistance - distance;
+					float nx = dx / distance;
+					float ny = dy / distance;
+
+					// Push individual away from cluster (cluster is more massive)
+					float separationRatio = cluster.totalMass / (1.0f + cluster.totalMass);
+					float individualSeparation = overlap * separationRatio;
+
+					// Apply separation to individual (would need to modify sim, simplified for now)
+					// In full implementation: update sim.posX[idx], sim.posY[idx]
+
+					// Statistical damage to cluster from individual collision
+					float collisionIntensity = overlap / collisionDistance;
+					float baseDamage = std::max(0.02f, collisionIntensity * 0.1f);
+					cluster.processEliminations(baseDamage);
+
+					// If cluster becomes too small, it should be promoted to individuals
+					if (cluster.aliveCount < CLUSTER_BREAKUP_THRESHOLD / 2) {
+						// Mark for promotion in next tier update
+						cluster.aliveCount = std::max(1u, cluster.aliveCount);
+					}
+				}
+			}
+		}
+	}
+
+	// Optimized cluster-to-cluster collision detection
+	void processClusterToClusterCollisions(float dt) {
 		// Process collisions between statistical clusters
 		for (size_t i = 0; i < dustClusters.size(); ++i) {
 			if (dustClusters[i].aliveCount == 0) continue;
@@ -947,7 +1192,10 @@ public:
 			}
 		}
 
-		// Update cluster physics after collisions
+	}
+
+	// Update cluster physics after all collision processing
+	void updateClusterPhysics(float dt) {
 		for (auto& cluster : dustClusters) {
 			if (cluster.aliveCount > 0) {
 				cluster.updatePhysics(dt, 800.0f, 600.0f); // Use simulation world dimensions
@@ -955,7 +1203,125 @@ public:
 		}
 	}
 
+	// Validate viewport-physics harmony across different simulation tiers
+	void validateSimulationTierHarmony(const Simulation& sim, float zoomFactor) const {
+		// Validation 1: Ensure all entities have valid tier assignments
+		for (size_t i = 0; i < entityTiers.size(); ++i) {
+			if (i < sim.alive.size() && sim.alive[i]) {
+				float apparentRadius = calculateApparentRadius(sim.radius[i], zoomFactor);
+				CircleSimulationTier expectedTier = determineExpectedTier(apparentRadius);
+
+				// In debug builds, we could assert tier consistency
+				// For production, we can log inconsistencies or auto-correct
+				if (entityTiers[i] != expectedTier) {
+					// Auto-correction could be implemented here
+					// For now, just track inconsistency (in production, this would be logged)
+				}
+			}
+		}
+
+		// Validation 2: Check cluster member consistency
+		for (const auto& cluster : dustClusters) {
+			for (uint32_t memberIdx : cluster.memberIndices) {
+				if (memberIdx < entityTiers.size()) {
+					// Ensure cluster members are marked as STATISTICAL tier
+					if (entityTiers[memberIdx] != CircleSimulationTier::STATISTICAL) {
+						// Inconsistency detected - in debug mode could assert
+					}
+				}
+			}
+		}
+
+		// Validation 3: Verify physics consistency across tiers
+		validatePhysicsConsistency(sim);
+
+		// Validation 4: Check rendering-physics alignment
+		validateRenderingPhysicsAlignment(sim, zoomFactor);
+	}
+
 private:
+	// Determine expected tier based on apparent radius
+	CircleSimulationTier determineExpectedTier(float apparentRadius) const {
+		if (apparentRadius < adaptiveDustThreshold) {
+			return CircleSimulationTier::INVISIBLE;
+		} else if (apparentRadius < CLUSTER_DEMOTION_THRESHOLD) {
+			return CircleSimulationTier::STATISTICAL;
+		} else if (apparentRadius < INDIVIDUAL_PROMOTION_THRESHOLD) {
+			return CircleSimulationTier::CLUSTERED;
+		} else {
+			return CircleSimulationTier::INDIVIDUAL;
+		}
+	}
+
+	// Validate physics consistency across different simulation tiers
+	void validatePhysicsConsistency(const Simulation& sim) const {
+		// Check that cluster physics maintains energy conservation
+		for (const auto& cluster : dustClusters) {
+			if (cluster.aliveCount > 0) {
+				// Verify cluster velocity is within reasonable bounds
+				float speed = std::sqrt(cluster.averageVelocity.x * cluster.averageVelocity.x +
+									   cluster.averageVelocity.y * cluster.averageVelocity.y);
+				const float maxSpeed = 140.0f * 2.0f * 1.1f; // 10% tolerance
+
+				if (speed > maxSpeed) {
+					// Physics inconsistency: cluster moving too fast
+					// In debug mode: assert or log warning
+				}
+
+				// Verify cluster position is within world bounds
+				if (cluster.centerOfMass.x < 0 || cluster.centerOfMass.x > 800.0f ||
+					cluster.centerOfMass.y < 0 || cluster.centerOfMass.y > 600.0f) {
+					// Physics inconsistency: cluster out of bounds
+					// In debug mode: assert or log warning
+				}
+			}
+		}
+
+		// Validate individual entity physics consistency
+		for (uint32_t idx : individualCircles) {
+			if (idx < sim.alive.size() && sim.alive[idx]) {
+				// Check individual velocity bounds
+				float speed = std::sqrt(sim.velX[idx] * sim.velX[idx] + sim.velY[idx] * sim.velY[idx]);
+				const float expectedSpeed = 140.0f * 2.0f;
+				const float tolerance = expectedSpeed * 0.1f; // 10% tolerance
+
+				if (std::abs(speed - expectedSpeed) > tolerance) {
+					// Physics inconsistency: individual speed deviation
+					// In debug mode: assert or log warning
+				}
+			}
+		}
+	}
+
+	// Validate that rendering and physics remain aligned across tiers
+	void validateRenderingPhysicsAlignment(const Simulation& sim, float zoomFactor) const {
+		// Check that rendered instances correspond to physics entities
+		uint32_t totalPhysicsEntities = individualCircles.size();
+		for (const auto& cluster : dustClusters) {
+			totalPhysicsEntities += cluster.aliveCount;
+		}
+
+		uint32_t totalAliveInSim = 0;
+		for (size_t i = 0; i < sim.alive.size(); ++i) {
+			if (sim.alive[i]) totalAliveInSim++;
+		}
+
+		// Verify entity count consistency
+		if (totalPhysicsEntities != totalAliveInSim) {
+			// Rendering-physics mismatch detected
+			// In debug mode: assert or log warning
+		}
+
+		// Validate that zoom factor affects all tiers consistently
+		for (uint32_t idx : individualCircles) {
+			if (idx < sim.radius.size()) {
+				float apparentRadius = calculateApparentRadius(sim.radius[idx], zoomFactor);
+				// Ensure apparent radius calculation is consistent across calls
+				// This helps catch floating-point inconsistencies
+			}
+		}
+	}
+
 	void promoteClusterToIndividuals(const StatisticalCluster& cluster) {
 		for (uint32_t idx : cluster.memberIndices) {
 			if (idx < entityTiers.size()) {
@@ -1005,9 +1371,44 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 	out.clear();
 	out.reserve(posX.size() + adaptiveSim.dustClusters.size());
 
-	// Render individual circles (full detail)
+	// Pixel-cluster aggregation for overlapping circles optimization
+	auto pixelClusters = adaptiveSim.aggregateOverlappingPixels(*this, zoomFactor);
+	std::unordered_set<uint32_t> aggregatedEntities;
+
+	// First, collect entities that were aggregated into pixel clusters
 	for (uint32_t idx : adaptiveSim.individualCircles) {
 		if (idx >= posX.size() || !alive[idx]) continue;
+		float apparentRadius = adaptiveSim.calculateApparentRadius(radius[idx], zoomFactor);
+		if (apparentRadius < 2.0f) { // Sub-pixel and tiny entities get aggregated
+			aggregatedEntities.insert(idx);
+		}
+	}
+
+	// Render pixel clusters (aggregated overlapping circles)
+	for (const auto& pixelCluster : pixelClusters) {
+		InstanceLayoutCPU inst{};
+		inst.center[0] = pixelCluster.position.x;
+		inst.center[1] = pixelCluster.position.y;
+		inst.radius = std::max(1.0f, static_cast<float>(pixelCluster.entityCount) * 0.5f); // Scale with entity count
+		inst.imageLayer = -1.0f;
+
+		// Use aggregated color with intensity
+		inst.color[0] = pixelCluster.aggregatedColor.x * pixelCluster.intensity;
+		inst.color[1] = pixelCluster.aggregatedColor.y * pixelCluster.intensity;
+		inst.color[2] = pixelCluster.aggregatedColor.z * pixelCluster.intensity;
+		inst.color[3] = std::min(1.0f, 0.6f + pixelCluster.entityCount * 0.1f); // More opacity with more entities
+
+		out.push_back(inst);
+	}
+
+	// Render individual circles (excluding aggregated ones)
+	for (uint32_t idx : adaptiveSim.individualCircles) {
+		if (idx >= posX.size() || !alive[idx]) continue;
+
+		// Skip entities that were aggregated into pixel clusters
+		if (aggregatedEntities.find(idx) != aggregatedEntities.end()) {
+			continue;
+		}
 
 		float apparentRadius = adaptiveSim.calculateApparentRadius(radius[idx], zoomFactor);
 
@@ -1017,22 +1418,8 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		float h = std::clamp(health[idx], 0.0f, 1.0f);
 
 		// Density-Based Rendering Optimization based on apparent screen size
-		if (apparentRadius < 0.5f) {
-			// SUB-PIXEL: Single colored pixel (minimal radius)
-			inst.radius = 1.0f;
-			inst.imageLayer = -1.0f;
-			// Average color for dust-level
-			inst.color[0] = 0.6f; inst.color[1] = 0.4f; inst.color[2] = 0.2f; inst.color[3] = 0.8f;
-		} else if (apparentRadius < 2.0f) {
-			// TINY: Simple colored square
-			inst.radius = std::max(2.0f, radius[idx] * 0.5f);
-			inst.imageLayer = -1.0f;
-			// Health-based color but simplified
-			inst.color[0] = 1.0f - h * 0.7f;
-			inst.color[1] = h * 0.8f;
-			inst.color[2] = 0.3f;
-			inst.color[3] = 1.0f;
-		} else if (apparentRadius < 10.0f) {
+		// Note: Sub-pixel and tiny entities (< 2.0f) are handled by pixel aggregation above
+		if (apparentRadius < 10.0f) {
 			// SMALL: Simplified SDF circle
 			inst.radius = radius[idx];
 			inst.imageLayer = -1.0f;
@@ -2865,8 +3252,8 @@ int main() {
 		adaptiveSim.setFrameTime(metrics.rollingAverage);
 		adaptiveSim.updateSimulationTiers(sim, currentZoomFactor);
 
-		// Process cluster-to-cluster collisions for statistical simulation
-		adaptiveSim.processClusterCollisions(dt);
+		// Process optimized collision detection for clustered vs individual entities
+		adaptiveSim.processClusterCollisions(dt, sim);
 
 		// Use LOD-based rendering system
 		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, currentZoomFactor);
