@@ -24,11 +24,13 @@
 #include <array>
 #include <algorithm>
 
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "../stb/stb_truetype.h"
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "../stb/stb_image_resize2.h"
-#include "../stb/stb_easy_font.h"
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -76,6 +78,8 @@ struct HudGeometry {
 };
 
 static constexpr size_t HUD_INITIAL_VERTEX_CAPACITY = 8192;
+static constexpr uint32_t HUD_FONT_ATLAS_SIZE = 1024;
+static constexpr float HUD_FONT_PIXEL_HEIGHT = 48.0f;
 
 struct InstanceLayoutCPU {
 	float center[2];
@@ -88,7 +92,21 @@ struct InstanceLayoutCPU {
 
 struct TextVertex {
 	float position[2];
+	float uv[2];
 	float color[4];
+};
+
+struct HudGlyph {
+	float xoff;
+	float yoff;
+	float xoff2;
+	float yoff2;
+	float u0;
+	float v0;
+	float u1;
+	float v1;
+	float xadvance;
+	uint32_t glyphIndex;
 };
 
 // Image avatar loading system
@@ -157,6 +175,25 @@ struct ImageManager {
 	std::atomic<uint32_t> loadSuccessCount{0};
 	std::atomic<uint32_t> loadFailCount{0};
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
+};
+
+struct HudFont {
+	float basePixelHeight = 48.0f;
+	float ascent = 0.0f;
+	float descent = 0.0f;
+	float lineGap = 0.0f;
+	float scale = 1.0f;
+	float lineAdvance = 0.0f;
+	uint32_t atlasWidth = 0;
+	uint32_t atlasHeight = 0;
+	ImageWithMemory atlasImage;
+	VkImageView atlasView = VK_NULL_HANDLE;
+	VkSampler sampler = VK_NULL_HANDLE;
+	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+	std::unordered_map<uint32_t, HudGlyph> glyphs;
+	std::vector<unsigned char> fontData;
+	stbtt_fontinfo fontInfo{};
+	bool ready = false;
 };
 
 // Forward declarations
@@ -771,21 +808,25 @@ static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat,
 	binding.stride = sizeof(TextVertex);
 	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-	VkVertexInputAttributeDescription attrs[2]{};
+	VkVertexInputAttributeDescription attrs[3]{};
 	attrs[0].location = 0;
 	attrs[0].binding = 0;
 	attrs[0].format = VK_FORMAT_R32G32_SFLOAT;
 	attrs[0].offset = offsetof(TextVertex, position);
 	attrs[1].location = 1;
 	attrs[1].binding = 0;
-	attrs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	attrs[1].offset = offsetof(TextVertex, color);
+	attrs[1].format = VK_FORMAT_R32G32_SFLOAT;
+	attrs[1].offset = offsetof(TextVertex, uv);
+	attrs[2].location = 2;
+	attrs[2].binding = 0;
+	attrs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	attrs[2].offset = offsetof(TextVertex, color);
 
 	VkPipelineVertexInputStateCreateInfo vi{};
 	vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vi.vertexBindingDescriptionCount = 1;
 	vi.pVertexBindingDescriptions = &binding;
-	vi.vertexAttributeDescriptionCount = 2;
+	vi.vertexAttributeDescriptionCount = 3;
 	vi.pVertexAttributeDescriptions = attrs;
 
 	VkPipelineInputAssemblyStateCreateInfo ia{};
@@ -839,15 +880,34 @@ static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat,
 	pcr.offset = 0;
 	pcr.size = sizeof(float) * 2;
 
+	VkDescriptorSetLayoutBinding samplerLayout{};
+	samplerLayout.binding = 0;
+	samplerLayout.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	samplerLayout.descriptorCount = 1;
+	samplerLayout.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	samplerLayout.pImmutableSamplers = nullptr;
+
+	VkDescriptorSetLayoutCreateInfo dslci{};
+	dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	dslci.bindingCount = 1;
+	dslci.pBindings = &samplerLayout;
+
+	PipelineObjects po{};
+	if (vkCreateDescriptorSetLayout(device, &dslci, nullptr, &po.descriptorSetLayout) != VK_SUCCESS) {
+		vkDestroyShaderModule(device, frag, nullptr);
+		vkDestroyShaderModule(device, vert, nullptr);
+		throw std::runtime_error("Failed to create HUD text descriptor set layout");
+	}
+
 	VkPipelineLayoutCreateInfo plci{};
 	plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	plci.setLayoutCount = 0;
-	plci.pSetLayouts = nullptr;
+	plci.setLayoutCount = 1;
+	plci.pSetLayouts = &po.descriptorSetLayout;
 	plci.pushConstantRangeCount = 1;
 	plci.pPushConstantRanges = &pcr;
 
-	PipelineObjects po{};
 	if (vkCreatePipelineLayout(device, &plci, nullptr, &po.layout) != VK_SUCCESS) {
+		vkDestroyDescriptorSetLayout(device, po.descriptorSetLayout, nullptr);
 		vkDestroyShaderModule(device, frag, nullptr);
 		vkDestroyShaderModule(device, vert, nullptr);
 		throw std::runtime_error("Failed to create text pipeline layout");
@@ -871,6 +931,7 @@ static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat,
 
 	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &po.pipeline) != VK_SUCCESS) {
 		vkDestroyPipelineLayout(device, po.layout, nullptr);
+		vkDestroyDescriptorSetLayout(device, po.descriptorSetLayout, nullptr);
 		vkDestroyShaderModule(device, frag, nullptr);
 		vkDestroyShaderModule(device, vert, nullptr);
 		throw std::runtime_error("Failed to create text pipeline");
@@ -881,53 +942,167 @@ static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat,
 	return po;
 }
 
-static int hudMeasureWidth(const std::string& text) {
-	if (text.empty()) return 0;
-	return stb_easy_font_width(const_cast<char*>(text.c_str()));
-}
-
-static int hudMeasureHeight(const std::string& text) {
-	if (text.empty()) return 0;
-	return stb_easy_font_height(const_cast<char*>(text.c_str()));
-}
-
-static void appendHudText(std::vector<TextVertex>& out, float x, float y, const std::string& text, float scale, const std::array<float, 4>& color) {
-	if (text.empty()) return;
-
-	static std::vector<char> scratch;
-	const size_t minBytes = std::max<size_t>(text.size() * 128, 4096);
-	if (scratch.size() < minBytes) {
-		scratch.resize(minBytes);
-	}
-
-	int quads = stb_easy_font_print(0.0f, 0.0f, const_cast<char*>(text.c_str()), nullptr, scratch.data(), static_cast<int>(scratch.size()));
-	const size_t quadStride = 4 * 16;
-	for (int qi = 0; qi < quads; ++qi) {
-		const char* quadPtr = scratch.data() + qi * quadStride;
-		float px[4];
-		float py[4];
-		for (int v = 0; v < 4; ++v) {
-			const float* pos = reinterpret_cast<const float*>(quadPtr + v * 16);
-			px[v] = x + pos[0] * scale;
-			py[v] = y + pos[1] * scale;
+static void decodeUtf8(const std::string& text, std::vector<uint32_t>& out) {
+	out.clear();
+	out.reserve(text.size());
+	uint32_t codepoint = 0;
+	int expected = 0;
+	for (unsigned char c : text) {
+		if (expected == 0) {
+			if ((c & 0x80u) == 0) {
+				out.push_back(c);
+			} else if ((c & 0xE0u) == 0xC0u) {
+				codepoint = c & 0x1Fu;
+				expected = 1;
+			} else if ((c & 0xF0u) == 0xE0u) {
+				codepoint = c & 0x0Fu;
+				expected = 2;
+			} else if ((c & 0xF8u) == 0xF0u) {
+				codepoint = c & 0x07u;
+				expected = 3;
+			} else {
+				out.push_back('?');
+				codepoint = 0;
+				expected = 0;
+			}
+		} else {
+			if ((c & 0xC0u) != 0x80u) {
+				out.push_back('?');
+				codepoint = 0;
+				expected = 0;
+				if ((c & 0x80u) == 0) {
+					out.push_back(c);
+				}
+			} else {
+				codepoint = (codepoint << 6) | (c & 0x3Fu);
+				if (--expected == 0) {
+					out.push_back(codepoint);
+					codepoint = 0;
+				}
+			}
 		}
+	}
+	if (expected != 0) {
+		out.push_back('?');
+	}
+}
+
+static const HudGlyph* lookupGlyph(const HudFont& font, uint32_t codepoint) {
+	auto it = font.glyphs.find(codepoint);
+	if (it != font.glyphs.end()) return &it->second;
+	it = font.glyphs.find('?');
+	if (it != font.glyphs.end()) return &it->second;
+	return nullptr;
+}
+
+static float computeKerning(const HudFont& font, uint32_t prevGlyphIndex, uint32_t glyphIndex) {
+	if (prevGlyphIndex == 0 || glyphIndex == 0) return 0.0f;
+	int kernUnits = stbtt_GetGlyphKernAdvance(&font.fontInfo, prevGlyphIndex, glyphIndex);
+	return static_cast<float>(kernUnits) * font.scale;
+}
+
+static float hudMeasureWidth(const HudFont& font, const std::string& text, float pixelHeight) {
+	if (!font.ready || text.empty()) return 0.0f;
+	std::vector<uint32_t> codepoints;
+	decodeUtf8(text, codepoints);
+	float scaleFactor = pixelHeight / font.basePixelHeight;
+	float cursorX = 0.0f;
+	float maxWidth = 0.0f;
+	uint32_t prevGlyph = 0;
+	for (uint32_t cp : codepoints) {
+		if (cp == '\n') {
+			maxWidth = std::max(maxWidth, cursorX);
+			cursorX = 0.0f;
+			prevGlyph = 0;
+			continue;
+		}
+		const HudGlyph* glyph = lookupGlyph(font, cp);
+		if (!glyph) continue;
+		float advance = glyph->xadvance;
+		advance += computeKerning(font, prevGlyph, glyph->glyphIndex);
+		cursorX += advance * scaleFactor;
+		prevGlyph = glyph->glyphIndex;
+	}
+	maxWidth = std::max(maxWidth, cursorX);
+	return maxWidth;
+}
+
+static float hudMeasureHeight(const HudFont& font, const std::string& text, float pixelHeight) {
+	if (!font.ready || text.empty()) return 0.0f;
+	std::vector<uint32_t> codepoints;
+	decodeUtf8(text, codepoints);
+	float scaleFactor = pixelHeight / font.basePixelHeight;
+	float lineHeight = (font.lineAdvance > 0.0f ? font.lineAdvance : (font.ascent - font.descent)) * scaleFactor;
+	int lines = 1;
+	for (uint32_t cp : codepoints) {
+		if (cp == '\n') {
+			lines++;
+		}
+	}
+	return lineHeight * static_cast<float>(lines);
+}
+
+static void appendHudText(const HudFont& font, std::vector<TextVertex>& out, float x, float y, const std::string& text, float pixelHeight, const std::array<float, 4>& color) {
+	if (!font.ready || text.empty()) return;
+	std::vector<uint32_t> codepoints;
+	decodeUtf8(text, codepoints);
+	float scaleFactor = pixelHeight / font.basePixelHeight;
+	float baselineY = y + font.ascent * scaleFactor;
+	float cursorX = x;
+	const float lineHeight = (font.lineAdvance > 0.0f ? font.lineAdvance : (font.ascent - font.descent)) * scaleFactor;
+	uint32_t prevGlyph = 0;
+	for (uint32_t cp : codepoints) {
+		if (cp == '\n') {
+			cursorX = x;
+			baselineY += lineHeight;
+			prevGlyph = 0;
+			continue;
+		}
+		const HudGlyph* glyph = lookupGlyph(font, cp);
+		if (!glyph) continue;
+
+		float gx0 = cursorX + glyph->xoff * scaleFactor;
+		float gy0 = baselineY + glyph->yoff * scaleFactor;
+		float gx1 = cursorX + glyph->xoff2 * scaleFactor;
+		float gy1 = baselineY + glyph->yoff2 * scaleFactor;
 
 		TextVertex v0{};
-		v0.position[0] = px[0];
-		v0.position[1] = py[0];
+		v0.position[0] = gx0;
+		v0.position[1] = gy0;
+		v0.uv[0] = glyph->u0;
+		v0.uv[1] = glyph->v0;
 		std::copy(color.begin(), color.end(), v0.color);
-		TextVertex v1 = v0; v1.position[0] = px[1]; v1.position[1] = py[1];
-		TextVertex v2 = v0; v2.position[0] = px[2]; v2.position[1] = py[2];
-		TextVertex v3 = v0; v3.position[0] = px[3]; v3.position[1] = py[3];
+
+		TextVertex v1 = v0;
+		v1.position[0] = gx1;
+		v1.uv[0] = glyph->u1;
+		v1.uv[1] = glyph->v0;
+
+		TextVertex v2 = v0;
+		v2.position[0] = gx0;
+		v2.position[1] = gy1;
+		v2.uv[0] = glyph->u0;
+		v2.uv[1] = glyph->v1;
+
+		TextVertex v3 = v1;
+		v3.position[1] = gy1;
+		v3.uv[0] = glyph->u1;
+		v3.uv[1] = glyph->v1;
 
 		out.push_back(v0);
 		out.push_back(v1);
-		out.push_back(v2);
-		out.push_back(v0);
-		out.push_back(v2);
 		out.push_back(v3);
+		out.push_back(v0);
+		out.push_back(v3);
+		out.push_back(v2);
+
+		float advance = glyph->xadvance;
+		advance += computeKerning(font, prevGlyph, glyph->glyphIndex);
+		cursorX += advance * scaleFactor;
+		prevGlyph = glyph->glyphIndex;
 	}
 }
+
 
 static std::vector<const char*> getRequiredInstanceExtensions() {
 	uint32_t count = 0;
@@ -1221,6 +1396,227 @@ static void transitionImageLayout(VkDevice device, VkCommandPool commandPool, Vk
 	vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
 	endSingleTimeCommands(device, commandPool, graphicsQueue, commandBuffer);
+}
+
+static bool loadFontFile(const std::filesystem::path& path, std::vector<unsigned char>& out) {
+	std::ifstream file(path, std::ios::binary);
+	if (!file) {
+		return false;
+	}
+	file.seekg(0, std::ios::end);
+	const auto size = static_cast<size_t>(file.tellg());
+	file.seekg(0, std::ios::beg);
+	out.resize(size);
+	if (size > 0) {
+		file.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
+		if (!file) {
+			out.clear();
+			return false;
+		}
+	}
+	return true;
+}
+
+static void uploadHudFontAtlas(HudFont& font, VkPhysicalDevice physical, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, const std::vector<unsigned char>& pixels) {
+	BufferWithMemory staging;
+	VkDeviceSize imageSize = static_cast<VkDeviceSize>(pixels.size());
+	createBuffer(physical, device, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging);
+	void* data = mapMemory(device, staging.memory, imageSize);
+	std::memcpy(data, pixels.data(), static_cast<size_t>(imageSize));
+	unmapMemory(device, staging.memory);
+
+	transitionImageLayout(device, commandPool, graphicsQueue, font.atlasImage.image, VK_FORMAT_R8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0);
+
+	VkCommandBuffer cmd = beginSingleTimeCommands(device, commandPool);
+	VkBufferImageCopy region{};
+	region.bufferOffset = 0;
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.mipLevel = 0;
+	region.imageSubresource.baseArrayLayer = 0;
+	region.imageSubresource.layerCount = 1;
+	region.imageOffset = {0, 0, 0};
+	region.imageExtent = { font.atlasWidth, font.atlasHeight, 1 };
+
+	vkCmdCopyBufferToImage(cmd, staging.buffer, font.atlasImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	endSingleTimeCommands(device, commandPool, graphicsQueue, cmd);
+
+	transitionImageLayout(device, commandPool, graphicsQueue, font.atlasImage.image, VK_FORMAT_R8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0);
+
+	vkDestroyBuffer(device, staging.buffer, nullptr);
+	vkFreeMemory(device, staging.memory, nullptr);
+}
+
+static bool loadHudFont(HudFont& font, VkPhysicalDevice physical, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue) {
+	const std::array<std::filesystem::path, 4> candidatePaths = {
+		std::filesystem::path("assets/fonts/hud.ttf"),
+		std::filesystem::path("assets/fonts/Roboto-Regular.ttf"),
+		std::filesystem::path("assets/hud.ttf"),
+		std::filesystem::path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
+	};
+
+	std::filesystem::path fontPath;
+	for (const auto& candidate : candidatePaths) {
+		if (!candidate.empty() && std::filesystem::exists(candidate)) {
+			fontPath = candidate;
+			break;
+		}
+	}
+
+	if (fontPath.empty()) {
+		std::cerr << "HUD font not found. Expected assets/fonts/hud.ttf or compatible fallback." << std::endl;
+		return false;
+	}
+
+	std::cout << "HUD font: attempting to load '" << fontPath.string() << "'" << std::endl;
+
+	if (!loadFontFile(fontPath, font.fontData)) {
+		std::cerr << "Failed to read HUD font file: " << fontPath << std::endl;
+		return false;
+	}
+
+	int fontOffset = stbtt_GetFontOffsetForIndex(font.fontData.data(), 0);
+	if (fontOffset < 0) {
+		std::cerr << "Invalid font file for HUD: " << fontPath << std::endl;
+		font.fontData.clear();
+		return false;
+	}
+
+	if (!stbtt_InitFont(&font.fontInfo, font.fontData.data(), fontOffset)) {
+		std::cerr << "stbtt_InitFont failed for HUD font" << std::endl;
+		font.fontData.clear();
+		return false;
+	}
+
+	font.basePixelHeight = HUD_FONT_PIXEL_HEIGHT;
+	font.scale = stbtt_ScaleForPixelHeight(&font.fontInfo, font.basePixelHeight);
+	int ascent = 0, descent = 0, lineGap = 0;
+	stbtt_GetFontVMetrics(&font.fontInfo, &ascent, &descent, &lineGap);
+	font.ascent = static_cast<float>(ascent) * font.scale;
+	font.descent = static_cast<float>(descent) * font.scale;
+	font.lineGap = static_cast<float>(lineGap) * font.scale;
+	font.lineAdvance = font.ascent - font.descent + font.lineGap;
+	font.atlasWidth = HUD_FONT_ATLAS_SIZE;
+	font.atlasHeight = HUD_FONT_ATLAS_SIZE;
+
+	struct RangeConfig {
+		int first;
+		int count;
+	};
+
+	const std::array<RangeConfig, 8> ranges = {
+		RangeConfig{0x0020, 95},   // Basic Latin
+		RangeConfig{0x00A0, 96},   // Latin-1 Supplement
+		RangeConfig{0x0100, 128},  // Latin Extended-A
+		RangeConfig{0x0180, 208},  // Latin Extended-B
+		RangeConfig{0x0370, 112},  // Greek & Coptic
+		RangeConfig{0x0400, 256},  // Cyrillic
+		RangeConfig{0x2000, 112},  // General punctuation
+		RangeConfig{0x20A0, 32}    // Currency symbols
+	};
+
+	struct PackAttempt {
+		int atlasSize;
+		unsigned oversample;
+	};
+
+	const std::array<PackAttempt, 4> attempts = {
+		PackAttempt{static_cast<int>(HUD_FONT_ATLAS_SIZE), 2},
+		PackAttempt{static_cast<int>(HUD_FONT_ATLAS_SIZE), 1},
+		PackAttempt{static_cast<int>(HUD_FONT_ATLAS_SIZE * 2), 2},
+		PackAttempt{static_cast<int>(HUD_FONT_ATLAS_SIZE * 2), 1}
+	};
+
+	for (const auto& attempt : attempts) {
+		font.atlasWidth = static_cast<uint32_t>(attempt.atlasSize);
+		font.atlasHeight = static_cast<uint32_t>(attempt.atlasSize);
+		std::vector<unsigned char> atlasPixels(static_cast<size_t>(font.atlasWidth) * font.atlasHeight, 0);
+		stbtt_pack_context packContext{};
+		if (!stbtt_PackBegin(&packContext, atlasPixels.data(), static_cast<int>(font.atlasWidth), static_cast<int>(font.atlasHeight), 0, 1, nullptr)) {
+			std::cerr << "HUD font: PackBegin failed for atlas " << attempt.atlasSize << std::endl;
+			continue;
+		}
+		stbtt_PackSetOversampling(&packContext, attempt.oversample, attempt.oversample);
+
+		std::vector<stbtt_pack_range> packRanges(ranges.size());
+		std::vector<std::vector<stbtt_packedchar>> packedChars(ranges.size());
+		for (size_t i = 0; i < ranges.size(); ++i) {
+			packedChars[i].resize(ranges[i].count);
+			packRanges[i].font_size = font.basePixelHeight;
+			packRanges[i].first_unicode_codepoint_in_range = ranges[i].first;
+			packRanges[i].array_of_unicode_codepoints = nullptr;
+			packRanges[i].num_chars = ranges[i].count;
+			packRanges[i].chardata_for_range = packedChars[i].data();
+		}
+
+		bool packed = stbtt_PackFontRanges(&packContext, font.fontData.data(), 0, packRanges.data(), static_cast<int>(packRanges.size())) != 0;
+		stbtt_PackEnd(&packContext);
+
+		if (!packed) {
+			std::cerr << "HUD font: atlas " << attempt.atlasSize << " oversample " << attempt.oversample << " failed to pack" << std::endl;
+			continue;
+		}
+
+		font.glyphs.clear();
+		font.glyphs.reserve(1024);
+		for (size_t ri = 0; ri < ranges.size(); ++ri) {
+			const auto& range = ranges[ri];
+			const auto& chars = packedChars[ri];
+			for (int ci = 0; ci < range.count; ++ci) {
+				const stbtt_packedchar& pc = chars[ci];
+				HudGlyph glyph{};
+				glyph.xoff = pc.xoff;
+				glyph.yoff = pc.yoff;
+				glyph.xoff2 = pc.xoff2;
+				glyph.yoff2 = pc.yoff2;
+				glyph.xadvance = pc.xadvance;
+				glyph.u0 = static_cast<float>(pc.x0) / static_cast<float>(font.atlasWidth);
+				glyph.v0 = static_cast<float>(pc.y0) / static_cast<float>(font.atlasHeight);
+				glyph.u1 = static_cast<float>(pc.x1) / static_cast<float>(font.atlasWidth);
+				glyph.v1 = static_cast<float>(pc.y1) / static_cast<float>(font.atlasHeight);
+				glyph.glyphIndex = stbtt_FindGlyphIndex(&font.fontInfo, range.first + ci);
+				font.glyphs[static_cast<uint32_t>(range.first + ci)] = glyph;
+			}
+		}
+
+		createImage(physical, device, font.atlasWidth, font.atlasHeight, 1, VK_FORMAT_R8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, font.atlasImage);
+		font.atlasView = createImageView(device, font.atlasImage.image, VK_FORMAT_R8_UNORM);
+		font.sampler = createTextureSampler(device);
+
+		uploadHudFontAtlas(font, physical, device, commandPool, graphicsQueue, atlasPixels);
+
+		font.ready = true;
+		std::cout << "HUD font ready from '" << fontPath.string() << "' (atlas "
+		          << font.atlasWidth << "x" << font.atlasHeight << ", oversample "
+		          << attempt.oversample << ", glyphs " << font.glyphs.size() << ")" << std::endl;
+		return true;
+	}
+
+	std::cerr << "HUD font: all packing attempts failed" << std::endl;
+	font.fontData.clear();
+	return false;
+}
+
+static void destroyHudFont(VkDevice device, HudFont& font) {
+	if (font.atlasView != VK_NULL_HANDLE) {
+		vkDestroyImageView(device, font.atlasView, nullptr);
+		font.atlasView = VK_NULL_HANDLE;
+	}
+	if (font.atlasImage.image != VK_NULL_HANDLE) {
+		vkDestroyImage(device, font.atlasImage.image, nullptr);
+		font.atlasImage.image = VK_NULL_HANDLE;
+	}
+	if (font.atlasImage.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(device, font.atlasImage.memory, nullptr);
+		font.atlasImage.memory = VK_NULL_HANDLE;
+	}
+	if (font.sampler != VK_NULL_HANDLE) {
+		vkDestroySampler(device, font.sampler, nullptr);
+		font.sampler = VK_NULL_HANDLE;
+	}
+	font.glyphs.clear();
+	font.fontData.clear();
+	font.ready = false;
 }
 
 static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer) {
@@ -1644,6 +2040,11 @@ int main() {
 		}
 	}
 
+	HudFont hudFont{};
+	if (!loadHudFont(hudFont, physical, device, commandPool, graphicsQueue)) {
+		std::cerr << "HUD font unavailable; overlay text disabled." << std::endl;
+	}
+
 	std::vector<VkCommandBuffer> commandBuffers(sc.framebuffers.size());
 	{
 		VkCommandBufferAllocateInfo cbai{};
@@ -1674,13 +2075,13 @@ int main() {
 	// Create descriptor pool for texture atlases
 	VkDescriptorPoolSize poolSize{};
 	poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSize.descriptorCount = 1;
+	poolSize.descriptorCount = 2;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.poolSizeCount = 1;
 	poolInfo.pPoolSizes = &poolSize;
-	poolInfo.maxSets = 1;
+	poolInfo.maxSets = 2;
 
 	VkDescriptorPool descriptorPool;
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
@@ -1724,6 +2125,37 @@ int main() {
 	descriptorWrite.pImageInfo = &imageInfo;
 
 	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+
+	if (hudFont.ready) {
+		VkDescriptorSet hudDescriptor = VK_NULL_HANDLE;
+		VkDescriptorSetAllocateInfo hudAlloc{};
+		hudAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		hudAlloc.descriptorPool = descriptorPool;
+		hudAlloc.descriptorSetCount = 1;
+		hudAlloc.pSetLayouts = &textPipeline.descriptorSetLayout;
+		if (vkAllocateDescriptorSets(device, &hudAlloc, &hudDescriptor) != VK_SUCCESS) {
+			std::cerr << "Failed to allocate HUD text descriptor set" << std::endl;
+			destroyHudFont(device, hudFont);
+			hudFont.descriptorSet = VK_NULL_HANDLE;
+			hudFont.ready = false;
+		} else {
+			VkDescriptorImageInfo hudImage{};
+			hudImage.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			hudImage.imageView = hudFont.atlasView;
+			hudImage.sampler = hudFont.sampler;
+
+			VkWriteDescriptorSet hudWrite{};
+			hudWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			hudWrite.dstSet = hudDescriptor;
+			hudWrite.dstBinding = 0;
+			hudWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			hudWrite.descriptorCount = 1;
+			hudWrite.pImageInfo = &hudImage;
+
+			vkUpdateDescriptorSets(device, 1, &hudWrite, 0, nullptr);
+			hudFont.descriptorSet = hudDescriptor;
+		}
+	}
 
 	// Initialize simulation
 	std::cout << "Creating simulation..." << std::endl; std::cout.flush();
@@ -1849,24 +2281,26 @@ int main() {
 		frameCount++;
 		uint32_t currentAlive = sim.aliveCount();
 		hudVertices.clear();
-		const float hudScale = 2.0f;
-		const std::array<float, 4> hudShadowColor{0.0f, 0.0f, 0.0f, 0.6f};
-		const std::array<float, 4> hudMainColor{1.0f, 1.0f, 1.0f, 1.0f};
-		std::string playersLeftText = "Players left: " + std::to_string(currentAlive);
-		appendHudText(hudVertices, 24.0f + 2.0f, 32.0f + 2.0f, playersLeftText, hudScale, hudShadowColor);
-		appendHudText(hudVertices, 24.0f, 32.0f, playersLeftText, hudScale, hudMainColor);
+		if (hudFont.ready) {
+			const float hudTextSize = 36.0f;
+			const std::array<float, 4> hudShadowColor{0.0f, 0.0f, 0.0f, 0.6f};
+			const std::array<float, 4> hudMainColor{1.0f, 1.0f, 1.0f, 1.0f};
+			std::string playersLeftText = "Players left: " + std::to_string(currentAlive);
+			appendHudText(hudFont, hudVertices, 24.0f + 2.0f, 32.0f + 2.0f, playersLeftText, hudTextSize, hudShadowColor);
+			appendHudText(hudFont, hudVertices, 24.0f, 32.0f, playersLeftText, hudTextSize, hudMainColor);
 
-		if (sim.inVictory && sim.winnerIndex >= 0) {
-			std::string winnerText = "Winner: " + sim.names[sim.winnerIndex];
-			const float winnerScale = 3.0f;
-			float width = static_cast<float>(hudMeasureWidth(winnerText)) * winnerScale;
-			float height = static_cast<float>(hudMeasureHeight(winnerText)) * winnerScale;
-			float baseX = 0.5f * (static_cast<float>(sc.extent.width) - width);
-			float baseY = 0.5f * (static_cast<float>(sc.extent.height) - height);
-			const std::array<float, 4> winnerShadow{0.0f, 0.0f, 0.0f, 0.6f};
-			const std::array<float, 4> winnerColor{1.0f, 0.85f, 0.1f, 1.0f};
-			appendHudText(hudVertices, baseX + 3.0f, baseY + 3.0f, winnerText, winnerScale, winnerShadow);
-			appendHudText(hudVertices, baseX, baseY, winnerText, winnerScale, winnerColor);
+			if (sim.inVictory && sim.winnerIndex >= 0) {
+				std::string winnerText = "Winner: " + sim.names[sim.winnerIndex];
+				const float winnerTextSize = 80.0f;
+				float width = hudMeasureWidth(hudFont, winnerText, winnerTextSize);
+				float height = hudMeasureHeight(hudFont, winnerText, winnerTextSize);
+				float baseX = 0.5f * (static_cast<float>(sc.extent.width) - width);
+				float baseY = 0.5f * (static_cast<float>(sc.extent.height) - height);
+				const std::array<float, 4> winnerShadow{0.0f, 0.0f, 0.0f, 0.6f};
+				const std::array<float, 4> winnerColor{1.0f, 0.85f, 0.1f, 1.0f};
+				appendHudText(hudFont, hudVertices, baseX + 4.0f, baseY + 4.0f, winnerText, winnerTextSize, winnerShadow);
+				appendHudText(hudFont, hudVertices, baseX, baseY, winnerText, winnerTextSize, winnerColor);
+			}
 		}
 
 		VkDeviceSize hudDataSize = sizeof(TextVertex) * hudVertices.size();
@@ -1911,8 +2345,9 @@ int main() {
 		vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
 		vkCmdDraw(cmd, 6, geom.instanceCount, 0, 0);
 
-		if (!hudVertices.empty()) {
+		if (hudFont.ready && hudFont.descriptorSet != VK_NULL_HANDLE && !hudVertices.empty()) {
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline.pipeline);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline.layout, 0, 1, &hudFont.descriptorSet, 0, nullptr);
 			vkCmdPushConstants(cmd, textPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), vp);
 			VkBuffer hudVbs[] = { hud.vertexBuffer.buffer };
 			VkDeviceSize hudOffs[] = { 0 };
@@ -1952,6 +2387,7 @@ int main() {
 
 	vkDeviceWaitIdle(device);
 	destroyImageManager(imageManager);
+	destroyHudFont(device, hudFont);
 	vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 	for (auto f : inFlightFences) vkDestroyFence(device, f, nullptr);
 	for (auto s : renderFinishedSemaphores) vkDestroySemaphore(device, s, nullptr);

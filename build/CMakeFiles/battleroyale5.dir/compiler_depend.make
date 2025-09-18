@@ -1026,8 +1026,8 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stdarg.h \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stddef.h \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stdint.h \
-  /Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_easy_font.h \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_image_resize2.h \
+  /Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_truetype.h \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h \
   /opt/homebrew/include/GLFW/glfw3.h \
   /usr/local/include/vk_video/vulkan_video_codec_av1std.h \
@@ -1064,8 +1064,6 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
 /opt/homebrew/include/GLFW/glfw3.h:
 
 /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h:
-
-/Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_easy_font.h:
 
 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stdint.h:
 
@@ -2410,6 +2408,8 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__utility/forward.h:
 
 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__bit/invert_if.h:
+
+/Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_truetype.h:
 
 /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/_types/_u_int64_t.h:
 
