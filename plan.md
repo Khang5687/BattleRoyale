@@ -21,7 +21,109 @@
 - Collision system: uniform spatial hash grid (or multi-level grids for varied radii). Broad-phase via grid buckets; narrow-phase exact tests. Deterministic resolution order to avoid races.
 - Scheduler: single-threaded simulation step; async I/O for image decode/loading. Thread-safe queues with double buffers to apply asset state updates.
 
-## Massive Scale Strategy (>500k files) + Performance Optimization
+## Massive Scale Strategy (1M+ Circles) + Circle-Specific Optimizations
+
+### 🎯 **Circle-Optimized Scaling Strategy for 1M+ Entities**
+
+**Core Insight**: When circles become "specks of dust" on screen, exploit visual irrelevance for computational savings through adaptive simulation tiers.
+
+### **Adaptive Simulation Architecture**
+```cpp
+class AdaptiveCircleSimulation {
+    std::vector<Circle> individualCircles;        // <10k: Full simulation
+    std::vector<DensityCluster> mediumClusters;   // 10k-100k: Grouped simulation
+    std::vector<StatisticalCluster> dustClusters; // 100k-1M: Statistical simulation
+};
+```
+
+### **Tier-Based Entity Management System**
+```cpp
+enum CircleSimulationTier {
+    INDIVIDUAL,    // >10 pixels: Full circle rendering + physics
+    CLUSTERED,     // 2-10 pixels: Group nearby circles into density blobs
+    STATISTICAL,   // 0.5-2 pixels: Statistical cluster simulation
+    INVISIBLE      // <0.5 pixels: Position tracking only
+};
+```
+
+### **Performance Scaling Matrix**
+| Entity Count | Rendering Method | Physics Method | Expected Performance |
+|-------------|------------------|----------------|-------------------|
+| 1-1k | Individual circles + SDF | Full collision detection | 120+ FPS |
+| 1k-10k | Individual + simple LOD | Spatial grid collision | 60+ FPS |
+| 10k-100k | Density clusters | Cluster-to-cluster physics | 30+ FPS |
+| 100k-1M+ | Statistical clusters | Statistical approximation | 30+ FPS |
+
+### **Density-Based Rendering Optimization**
+```cpp
+// Calculate apparent screen size for dynamic detail selection
+float apparentRadius = physicalRadius * zoomFactor / distanceFromCamera;
+
+if (apparentRadius < 0.5f) {
+    renderAsPixel(averageColor);        // SUB-PIXEL: Single colored pixel
+} else if (apparentRadius < 2.0f) {
+    renderAsSquare(color);              // TINY: Simple colored square
+} else if (apparentRadius < 10.0f) {
+    renderAsSimpleCircle(color);        // SMALL: Simplified SDF
+} else {
+    renderAsDetailedCircle(texture);    // LARGE: Full detail + texture
+}
+```
+
+### **Statistical Clustering for Dust-Level Circles**
+```cpp
+struct StatisticalCluster {
+    vec2 centerOfMass;          // Cluster position
+    float totalMass;            // Combined physics mass
+    vec2 averageVelocity;       // Average movement direction
+    uint32_t aliveCount;        // Circles in cluster
+    vec3 dominantColor;         // Most common circle color
+
+    // Simplified physics: treat cluster as single large circle
+    void updatePhysics(float dt);
+
+    // Statistical elimination within cluster
+    void processEliminations(float damage);
+};
+```
+
+### **Dynamic Tier Promotion/Demotion System**
+```cpp
+void updateSimulationTiers(float currentZoom) {
+    // Promote clusters to individuals when zooming in
+    for (auto& cluster : dustClusters) {
+        if (cluster.getApparentSize(currentZoom) > INDIVIDUAL_PROMOTION_THRESHOLD) {
+            promoteClusterToIndividuals(cluster);
+        }
+    }
+
+    // Demote individuals to clusters when zooming out
+    for (auto& circle : individualCircles) {
+        if (circle.getApparentSize(currentZoom) < CLUSTER_DEMOTION_THRESHOLD) {
+            demoteToCluster(circle);
+        }
+    }
+}
+```
+
+### **Battle Royale Elimination Cascading**
+```cpp
+// Natural entity count reduction over time
+if (cluster.aliveCount < CLUSTER_BREAKUP_THRESHOLD) {
+    // Small clusters break apart into individuals for dramatic finale
+    convertClusterToIndividuals(cluster);
+}
+```
+
+### **Adaptive Performance Thresholds**
+```cpp
+// Adjust clustering aggressiveness based on performance
+if (frameTime > TARGET_FRAME_TIME) {
+    DUST_THRESHOLD *= 1.1f;     // More aggressive clustering
+} else {
+    DUST_THRESHOLD *= 0.99f;    // More detailed rendering
+}
+```
 
 ### GPU-Driven Rendering Architecture (2024 State-of-Art)
 - **Compute Shader Culling**: Offload frustum, distance, and occlusion culling to GPU compute shaders
