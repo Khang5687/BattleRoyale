@@ -199,6 +199,14 @@ if (frameTime > TARGET_FRAME_TIME) {
 - GRID_CELL_SIZE
 - BIAS_ACTIVE_THRESHOLD (default: 50 - minimum player count for bias to be active)
 
+### 1M+ Entity Scaling Constants
+- INDIVIDUAL_PROMOTION_THRESHOLD (default: 10.0f - minimum apparent radius for individual simulation)
+- CLUSTER_DEMOTION_THRESHOLD (default: 2.0f - maximum apparent radius for cluster demotion)
+- DUST_THRESHOLD (default: 0.5f - minimum apparent radius for any rendering)
+- CLUSTER_BREAKUP_THRESHOLD (default: 10 - minimum cluster size before breakup)
+- MIN_CLUSTER_SIZE (default: 50 - minimum circles needed to form cluster)
+- TARGET_FRAME_TIME (default: 16.67ms - 60 FPS target for adaptive thresholds)
+
 ## Robustness and Edge Cases
 - Validation layers in debug; check all Vk results; RAII wrappers to prevent leaks.
 - Guard zero devices/queues/swapchain formats; handle window resize.
@@ -481,6 +489,46 @@ struct PushConstants {
   - [ ] Layer in optional celebratory VFX (confetti, particles, post effects)
   - [ ] Revisit camera polish or transitions once future zoom work is defined
 
+### HIGH PRIORITY - 1M+ Entity Scaling Implementation
+- [ ] **Adaptive Simulation Architecture Foundation**
+  - [ ] Implement `AdaptiveCircleSimulation` class with tier-based entity management
+  - [ ] Define `CircleSimulationTier` enum (INDIVIDUAL, CLUSTERED, STATISTICAL, INVISIBLE)
+  - [ ] Create data structures for individual circles, density clusters, and statistical clusters
+  - [ ] Add apparent screen size calculation: `apparentRadius = physicalRadius * zoomFactor / distanceFromCamera`
+
+- [ ] **Density-Based Rendering System**
+  - [ ] Implement dynamic detail selection based on apparent radius thresholds
+  - [ ] Add pixel-level rendering for sub-pixel circles (aparentRadius < 0.5f)
+  - [ ] Add square rendering for tiny circles (0.5f-2.0f pixels)
+  - [ ] Add simplified SDF for small circles (2.0f-10.0f pixels)
+  - [ ] Keep full detail rendering for large circles (>10.0f pixels)
+
+- [ ] **Statistical Clustering Implementation**
+  - [ ] Create `StatisticalCluster` data structure with center of mass, total mass, average velocity
+  - [ ] Implement cluster formation logic for nearby dust-level circles
+  - [ ] Add cluster-to-cluster physics simulation (simplified)
+  - [ ] Implement statistical elimination within clusters
+  - [ ] Add cluster breakup logic when count falls below threshold
+
+- [ ] **Dynamic Tier Promotion/Demotion System**
+  - [ ] Implement `updateSimulationTiers()` function with zoom-based promotion/demotion
+  - [ ] Add promotion thresholds: clusters → individuals when zooming in
+  - [ ] Add demotion thresholds: individuals → clusters when zooming out
+  - [ ] Implement smooth transitions between simulation tiers
+
+- [ ] **Adaptive Performance System**
+  - [ ] Add real-time performance monitoring for tier threshold adjustment
+  - [ ] Implement dynamic `DUST_THRESHOLD` adjustment based on frame time
+  - [ ] Add performance headroom calculation for aggressive/conservative clustering
+  - [ ] Create performance scaling matrix validation (1k→10k→100k→1M entities)
+
+- [ ] **Circle-Specific Optimizations**
+  - [ ] Implement battle royale elimination cascading (cluster breakup near finale)
+  - [ ] Add pixel-cluster aggregation for overlapping circles
+  - [ ] Optimize collision detection for clustered vs individual entities
+  - [ ] Validate viewport-physics harmony across different simulation tiers
+
+### MEDIUM PRIORITY - Advanced Performance
 - [ ] **Performance Optimization** (Milestone 8) **RESEARCH-BACKED STRATEGIES**
   - [ ] **GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
     - [ ] Stand up compute pass that frustum-culls instance data into a GPU-visible list
@@ -503,10 +551,6 @@ struct PushConstants {
     - [ ] Verify current SoA layout is SIMD-friendly for vectorized operations
     - [ ] Add memory coherence profiling for cache miss optimization
     - [ ] Implement batch processing for position/velocity updates
-  - [ ] **Adaptive Performance System**
-    - [ ] Add real-time frame time monitoring and bottleneck detection
-    - [ ] Implement dynamic IMAGE_LOAD_THRESHOLD based on performance headroom
-    - [ ] Add quality scaling system (texture resolution, effect reduction)
   - [ ] **Modern Vulkan Features** (Advanced)
     - [ ] Evaluate mesh shader implementation for 10x geometry performance
     - [ ] Consider GPU-controlled texture loading via compute shaders
