@@ -21,15 +21,44 @@
 - Collision system: uniform spatial hash grid (or multi-level grids for varied radii). Broad-phase via grid buckets; narrow-phase exact tests. Deterministic resolution order to avoid races.
 - Scheduler: single-threaded simulation step; async I/O for image decode/loading. Thread-safe queues with double buffers to apply asset state updates.
 
-## Massive Scale Strategy (>500k files)
+## Massive Scale Strategy (>500k files) + Performance Optimization
+
+### GPU-Driven Rendering Architecture (2024 State-of-Art)
+- **Compute Shader Culling**: Offload frustum, distance, and occlusion culling to GPU compute shaders
+- **Indirect Drawing**: Use `vkCmdDrawIndexedIndirect` with GPU-generated command buffers to eliminate CPU draw call overhead
+- **Performance Target**: Real-world 125k objects at 290 FPS rendering 40M+ triangles (RTX 2080 benchmark)
+
+### Multi-Level Optimization Strategy
+1. **GPU Culling Pipeline**: Compute shaders perform frustum culling, reducing CPU load exponentially
+2. **Hierarchical LOD**: GPU-based distance culling with multiple detail levels based on effective viewport size
+3. **Occlusion Culling**: Hi-Z buffer technique using previous frame depth for visibility testing
+4. **Mesh Shaders**: Modern Vulkan mesh shaders for 10x geometry pipeline performance improvement
+
+### Spatial Partitioning for Collision Performance
+- **Hybrid Spatial Structure**: Quadtree for 2D spatial queries + optimized hash grid for collision detection
+- **Performance Scaling**: Reduces collision checks from O(n²) to O(n) for clustered objects
+- **Dynamic Rebalancing**: Efficient add/remove operations as entities move and get eliminated
+
+### Data-Oriented Memory Layout (ECS-Inspired)
+- **Structure of Arrays (SoA)**: Separate arrays for position, velocity, health, alive flags for cache efficiency
+- **SIMD-Friendly Processing**: Contiguous memory layout enables vectorized operations on multiple entities
+- **Memory Coherence**: Related data stored together to minimize cache misses during hot loops
+
+### Advanced Asset Management
 - Do not load all images or create 500k Vulkan image views. Maintain metadata list of file paths and a small LRU cache of decoded + GPU-resident textures (e.g., few thousands max).
 - Use a texture atlas array (array of 2D layers) of fixed layer count (e.g., 2048) for visible, above-threshold players. Evict via LRU when layers are scarce. Index via `imageId -> layerIndex | placeholder`.
 - If descriptor indexing (bindless) is absent or limited on MoltenVK, prefer a small set of per-frame descriptor sets for the atlas array; use an indirection buffer mapping instance to atlas layer.
+- **GPU-Controlled Loading**: Compute shaders determine which textures to load based on visibility thresholds
 - Lazy tiers:
   - Tier 0 (fake): no file I/O; rendered as flat color in compute/fragment; guaranteed to die before threshold.
   - Tier 1 (placeholder): tiny 1x1 or 4x4 texture (low memory) for small-but-visible sprites.
   - Tier 2 (real): high-quality mipmapped texture uploaded on demand when radius > IMAGE_LOAD_THRESHOLD.
 - O(1) algorithmic constraint for image access: each entity holds stable index to metadata; atlas layer lookup is O(1) via a dense vector; LRU updates are O(1) amortized with linked-list + hashmap.
+
+### Performance Monitoring & Adaptive Quality
+- **Real-time Profiling**: Monitor frame time, draw calls, and memory usage
+- **Adaptive LOD**: Dynamically adjust IMAGE_LOAD_THRESHOLD based on performance headroom
+- **Quality Scaling**: Reduce texture resolution, disable effects when frame rate drops below target
 
 ## Rendering Approach
 - Instanced rendering of quads (two triangles) for circles; circle appearance via fragment shader signed distance function to avoid per-vertex circles. Image sampled using per-instance atlas layer; health bar drawn as a second instanced pass or in same shader via a screen-space overlay.
@@ -139,54 +168,92 @@ The battle royale simulation now successfully runs with the new image avatar loa
 
 The system supports rendering image avatars for battle royale circles while maintaining high performance through lazy loading and efficient GPU memory usage. Circles start as flat colors and upgrade to real image textures when they become large enough to warrant the loading cost.
 
-## 🔄 Dynamic Circle Scaling System - NEEDS REDESIGN
+## 🔄 Dynamic Camera Scaling System - PLAYER COUNT-BASED ZOOM
 
-**PROBLEM ANALYSIS**: The initial global scale factor approach caused critical physics-rendering mismatches:
+**DESIGN GOAL**: Seamless camera scaling that makes circles appear larger as player count decreases, with physics remaining unchanged.
 
-### ❌ Issues with Global Scale Factor Approach
-- **Physics Teleporting**: Circles detected as colliding from much further distances than visually apparent
-- **Hitbox Mismatch**: Visual size scaled 3x but collision detection also scaled, creating confusing interactions  
-- **Spatial Grid Issues**: Required dynamic grid cell size adjustments, causing performance overhead
-- **Wall Collision Problems**: Circles bouncing off walls prematurely due to scaled collision radius
+### 🎯 Core Concept: Player Count-Driven Camera Zoom
 
-### 🔍 Root Cause
-The fundamental issue: **separating visual representation from physics simulation space**. When rendering uses scale factor 3.0 but physics also scales collision detection, circles appear to collide when visually separated, causing unexpected "teleporting" behavior during collision resolution.
+**Visual Effect**:
+- **50,000 players**: Camera zoomed out → circles appear small but all visible
+- **Decreasing count**: Camera gradually zooms in → circles appear progressively larger
+- **Final players**: Camera zoomed in → circles appear large and dramatic
+- **Seamless transition**: Viewers perceive circles as "growing" naturally
 
-### 🎯 Recommended Solutions (Research-Backed)
+### 🎮 Implementation Approach: Viewport Scaling with Constraints
 
-**PRIMARY RECOMMENDATION: Camera/Viewport Scaling** ⭐
-- **Approach**: Decrease effective viewport dimensions instead of scaling circle radius
-- **Implementation**: `effectiveViewport = realViewport / scaleFactor` in push constants
-- **Physics**: Remains unchanged at original 40px radius - no collision issues
-- **Benefits**: 
-  - Zero physics complications
-  - Industry standard approach (used in most real-time games)
-  - O(1) performance, no per-entity updates
-  - Smooth scaling without hitbox mismatches
+**Camera Zoom Factor Calculation**:
+```cpp
+// Zoom boundaries
+static constexpr float MIN_ZOOM_FACTOR = 0.5f;  // Max zoom out (50k players)
+static constexpr float MAX_ZOOM_FACTOR = 3.0f;  // Max zoom in (final players)
+static constexpr uint32_t MAX_PLAYERS_FOR_MIN_ZOOM = 50000;
+static constexpr uint32_t MIN_PLAYERS_FOR_MAX_ZOOM = 1;
 
-**SECONDARY OPTIONS:**
-- **Discrete Entity Updates**: Update actual radius values only when scale changes >15%, with interpolation
-- **Visual-Only Scaling**: Scale in vertex shader only, accept visual ≠ collision size
-- **Hybrid Approach**: Camera scaling + discrete updates for extreme cases
+float zoomFactor = calculateZoomFromPlayerCount(aliveCount);
+vec2 effectiveViewport = realViewport / zoomFactor;
+```
 
-### 📚 Industry Research
-Research confirms camera/viewport scaling is the preferred method in real-time games because:
-- Maintains consistent physics interactions
-- Avoids hitbox alignment issues  
-- Simpler implementation with better performance
-- Used in battle royale games for "zoom effects" during endgame
+**Zoom Calculation Logic**:
+- **High player count** (≥50k): Minimum zoom factor (0.5x) → maximum world area visible
+- **Low player count** (≤1): Maximum zoom factor (3.0x) → minimum world area visible
+- **Between counts**: Smooth interpolation for seamless scaling experience
+- **Bounded range**: Min/max constraints prevent extreme zoom levels
+
+### 🏗️ Technical Implementation
+
+**Vertex Shader Modification**:
+- Replace `pc.viewport` with `pc.effectiveViewport` in world-to-NDC conversion
+- Physics world space remains unchanged at fixed 800x600 dimensions
+- Collision walls stay at original `worldWidth/worldHeight` boundaries
+
+**Push Constants Update**:
+```cpp
+struct PushConstants {
+    vec2 effectiveViewport;  // Scaled viewport for zoom effect
+    // Physics uses original worldWidth/worldHeight unchanged
+};
+```
+
+**Collision System**:
+- **Wall boundaries must scale** - collision walls need to match visible viewport area
+- **Effective world boundaries**: `effectiveWorldWidth/Height = worldWidth/Height / zoomFactor`
+- Circle physics continues at 40px radius with existing collision detection
+- Spatial grid dimensions scale with effective world size for consistency
+
+### ✨ Key Advantages
+
+**Visual Benefits**:
+- Circles appear to "grow" as battle progresses toward finale
+- Smooth, cinematic zoom effect enhances drama
+- No jarring scale jumps - continuous interpolation
+
+**Technical Benefits**:
+- **Consistent collision boundaries** - walls match visible screen edges
+- **O(1) performance** - single calculation per frame for zoom factor
+- **Proper viewport-collision alignment** - no invisible wall bouncing
+- **Industry standard approach** - camera scaling with matched collision boundaries
+
+**Constraint Benefits**:
+- **Minimum zoom** prevents over-zooming with massive player counts
+- **Maximum zoom** prevents excessive close-up with few players
+- **Bounded experience** ensures consistent visual quality range
 
 ### 🎯 Implementation Priority
 
-**IMMEDIATE NEXT STEP**: Implement camera/viewport scaling approach
-1. **Simplest Fix**: Modify vertex shader to use `effectiveViewport = realViewport / scaleFactor`
-2. **Remove Physics Scaling**: Revert all collision detection back to original fixed radius
-3. **Test Behavior**: Verify no more teleporting, smooth visual scaling
-4. **Performance Check**: Confirm O(1) scaling performance maintained
+**IMPLEMENTATION STEPS**:
+1. Add zoom factor calculation based on `sim.aliveCount()`
+2. Calculate effective world boundaries: `effectiveWorld = worldSize / zoomFactor`
+3. Update wall collision detection to use effective boundaries instead of fixed world size
+4. Update spatial grid dimensions to match effective world size
+5. Modify push constants to send `effectiveViewport` instead of `viewport`
+6. Update vertex shader to use effective viewport for world-to-NDC conversion
+7. Add min/max zoom factor constants for bounded scaling
+8. Test smooth scaling behavior with proper wall collision alignment
 
-**Expected Outcome**: Circles appear larger as player count decreases, but physics remains consistent at 40px radius, eliminating all hitbox mismatch issues.
+**Expected Outcome**: Seamless camera zoom where circles appear to grow as the battle progresses, with collision walls properly aligned to visible screen edges, maintaining consistent 40px circle physics.
 
----
+  ---
 
 ## DETAILED TODO LIST
 
@@ -219,17 +286,23 @@ Research confirms camera/viewport scaling is the preferred method in real-time g
     - [x] Below threshold, all players take equal damage (no bias applied)
     - [x] Prevents bias from being obvious in small battles
 
-- [ ] **🔄 Dynamic Circle Scaling** (Camera/Viewport Approach) **NEEDS REDESIGN**
+- [ ] **🔄 Dynamic Camera Scaling** (Player Count-Based Zoom) **READY FOR IMPLEMENTATION**
   - [x] ~~Global scale factor approach~~ **DEPRECATED** - causes physics-rendering mismatch
-  - [ ] **Implement camera/viewport scaling** (PRIMARY RECOMMENDATION)
-    - [ ] Calculate effective viewport dimensions: `effectiveViewport = realViewport / scaleFactor`
-    - [ ] Update vertex shader to use effective viewport instead of scaling radius
-    - [ ] Keep physics at original radius (40px) - no collision modifications needed
-    - [ ] Test scaling behavior without hitbox issues
-  - [ ] **Alternative approaches** (SECONDARY OPTIONS)
-    - [ ] Discrete entity updates with interpolation (if camera scaling insufficient)
-    - [ ] Visual-only scaling (accept visual ≠ collision size)
-  - [ ] Performance comparison between approaches
+  - [ ] **Implement player count-driven camera zoom** (RECOMMENDED APPROACH)
+    - [ ] Add zoom factor calculation: `zoomFactor = calculateZoomFromPlayerCount(aliveCount)`
+    - [ ] Add min/max zoom constants (MIN_ZOOM_FACTOR = 0.5f, MAX_ZOOM_FACTOR = 3.0f)
+    - [ ] Calculate effective world boundaries: `effectiveWorld = worldSize / zoomFactor`
+    - [ ] Update wall collision detection to use effective boundaries (not fixed world size)
+    - [ ] Update spatial grid dimensions to match effective world size
+    - [ ] Calculate effective viewport: `effectiveViewport = realViewport / zoomFactor`
+    - [ ] Update push constants to send effectiveViewport instead of viewport
+    - [ ] Update vertex shader to use pc.effectiveViewport for world-to-NDC conversion
+    - [ ] Keep circle physics unchanged at fixed 40px radius
+    - [ ] Test smooth scaling with proper wall collision alignment from 50k players to winner
+  - [ ] **Constraint validation**
+    - [ ] Verify minimum zoom (0.5x) handles massive player counts without over-zooming
+    - [ ] Verify maximum zoom (3.0x) provides dramatic final battle view
+    - [ ] Test smooth interpolation between zoom levels
 
 - [ ] **Visual HUD Text Rendering**
   - [ ] Replace console output with on-screen text overlay
@@ -249,17 +322,34 @@ Research confirms camera/viewport scaling is the preferred method in real-time g
   - [ ] Implement camera centering on winner
   - [ ] Add confetti or celebration effects
 
-- [ ] **Performance Optimization** (Milestone 8)
-  - [ ] Profile rendering performance with large player counts
-  - [ ] Optimize collision detection for >1000 players
-  - [ ] Implement multi-level spatial grids for varied radii
-  - [ ] Add LOD system for distant/small circles
+- [ ] **Performance Optimization** (Milestone 8) **RESEARCH-BACKED STRATEGIES**
+  - [ ] **GPU-Driven Rendering Implementation**
+    - [ ] Convert to compute shader-based frustum culling
+    - [ ] Implement `vkCmdDrawIndexedIndirect` for CPU overhead elimination
+    - [ ] Add Hi-Z buffer occlusion culling using previous frame depth
+    - [ ] Target: 125k+ entities at 60+ FPS (industry benchmark achieved)
+  - [ ] **Advanced Spatial Partitioning**
+    - [ ] Replace simple hash grid with hybrid quadtree + hash grid system
+    - [ ] Implement dynamic rebalancing for moving entities
+    - [ ] Optimize collision detection from O(n²) to O(n) for clustered objects
+  - [ ] **Data-Oriented Memory Optimization**
+    - [ ] Verify current SoA layout is SIMD-friendly for vectorized operations
+    - [ ] Add memory coherence profiling for cache miss optimization
+    - [ ] Implement batch processing for position/velocity updates
+  - [ ] **Adaptive Performance System**
+    - [ ] Add real-time frame time monitoring and bottleneck detection
+    - [ ] Implement dynamic IMAGE_LOAD_THRESHOLD based on performance headroom
+    - [ ] Add quality scaling system (texture resolution, effect reduction)
+  - [ ] **Modern Vulkan Features** (Advanced)
+    - [ ] Evaluate mesh shader implementation for 10x geometry performance
+    - [ ] Consider GPU-controlled texture loading via compute shaders
 
 ### LOW PRIORITY - Advanced Features
-- [ ] **Massive Scale Support** (500k+ files)
-  - [ ] Implement efficient file enumeration system
-  - [ ] Add background texture loading thread
-  - [ ] Create texture streaming system for very large asset counts
+- [ ] **Ultra-Massive Scale Support** (500k+ files) **BEYOND CURRENT SCOPE**
+  - [ ] Implement ECS-style entity management for million+ entities (Unity DOTS-inspired)
+  - [ ] Add background texture streaming with predictive loading
+  - [ ] Create hierarchical culling system with mesh shaders
+  - [ ] Research: Burst compiler equivalent for C++ SIMD optimization
 
 - [ ] **Enhanced Collision System**
   - [ ] Add collision sound effects
