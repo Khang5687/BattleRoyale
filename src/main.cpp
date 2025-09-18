@@ -23,6 +23,7 @@
 #include <atomic>
 #include <array>
 #include <algorithm>
+#include <chrono>
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../stb/stb_truetype.h"
@@ -107,6 +108,53 @@ struct HudGlyph {
 	float v1;
 	float xadvance;
 	uint32_t glyphIndex;
+};
+
+struct PerformanceMetrics {
+	static constexpr size_t SAMPLE_COUNT = 120; // 1 second at 120 FPS
+	std::array<float, SAMPLE_COUNT> frameTimes{};
+	size_t sampleIndex = 0;
+	std::chrono::high_resolution_clock::time_point lastFrameTime;
+	float rollingAverage = 0.0f;
+	bool showDiagnostics = false;
+	uint64_t totalFrames = 0;
+
+	void init() {
+		lastFrameTime = std::chrono::high_resolution_clock::now();
+		frameTimes.fill(16.67f); // Initialize to ~60 FPS
+		rollingAverage = 16.67f;
+	}
+
+	void captureFrame() {
+		auto currentTime = std::chrono::high_resolution_clock::now();
+		auto deltaTime = std::chrono::duration<float, std::milli>(currentTime - lastFrameTime);
+		float frameTimeMs = deltaTime.count();
+
+		frameTimes[sampleIndex] = frameTimeMs;
+		sampleIndex = (sampleIndex + 1) % SAMPLE_COUNT;
+		totalFrames++;
+
+		// Calculate rolling average
+		float sum = 0.0f;
+		for (float time : frameTimes) {
+			sum += time;
+		}
+		rollingAverage = sum / SAMPLE_COUNT;
+
+		lastFrameTime = currentTime;
+	}
+
+	float getFPS() const {
+		return rollingAverage > 0.0f ? 1000.0f / rollingAverage : 0.0f;
+	}
+
+	float getFrameTimeMs() const {
+		return rollingAverage;
+	}
+
+	void toggleDiagnostics() {
+		showDiagnostics = !showDiagnostics;
+	}
 };
 
 // Image avatar loading system
@@ -2188,6 +2236,9 @@ int main() {
 
 	uint32_t frameCount = 0;
 	uint32_t lastAliveCount = sim.aliveCount();
+	PerformanceMetrics metrics;
+	metrics.init();
+	std::cout << "Performance instrumentation initialized (Press F3 for diagnostics overlay)" << std::endl;
 	std::cout << "Alive count: " << lastAliveCount << std::endl; std::cout.flush();
 	std::cout << "Starting battle royale with " << lastAliveCount << " players!\n";
 	std::cout.flush();
@@ -2199,6 +2250,20 @@ int main() {
 	uint32_t currentFrame = 0;
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
+
+		// Capture frame timing at the start of each frame
+		metrics.captureFrame();
+
+		// Handle keyboard input for diagnostics toggle
+		static bool keyPressed = false;
+		if (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS) {
+			if (!keyPressed) {
+				metrics.toggleDiagnostics();
+				keyPressed = true;
+			}
+		} else {
+			keyPressed = false;
+		}
 
 		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
 		vkResetFences(device, 1, &inFlightFences[currentFrame]);
@@ -2303,7 +2368,7 @@ int main() {
 			if (winnerText.empty()) {
 				winnerText = "Winner";
 			}
-			winnerText += " wins";
+			winnerText += "thắng";
 
 			const float winnerTextSize = 96.0f;
 			float width = hudMeasureWidth(hudFont, winnerText, winnerTextSize);
@@ -2322,11 +2387,55 @@ int main() {
 			appendHudText(hudFont, hudVertices, baseX, baseY, winnerText, winnerTextSize, winnerColor);
 		} else {
 			const float hudTextSize = 36.0f;
+			const float diagTextSize = 24.0f;
 			const std::array<float, 4> hudShadowColor{0.0f, 0.0f, 0.0f, 0.6f};
 			const std::array<float, 4> hudMainColor{1.0f, 1.0f, 1.0f, 1.0f};
+			const std::array<float, 4> diagColor{0.8f, 1.0f, 0.8f, 1.0f}; // Light green for diagnostics
+			const std::array<float, 4> diagShadow{0.0f, 0.0f, 0.0f, 0.8f};
+
+			// Regular players left text
 			std::string playersLeftText = "Players left: " + std::to_string(currentAlive);
 			appendHudText(hudFont, hudVertices, 24.0f + 2.0f, 32.0f + 2.0f, playersLeftText, hudTextSize, hudShadowColor);
 			appendHudText(hudFont, hudVertices, 24.0f, 32.0f, playersLeftText, hudTextSize, hudMainColor);
+
+			// Performance diagnostics overlay (toggleable with F3)
+			if (metrics.showDiagnostics) {
+				float yOffset = 80.0f; // Start below the "Players left" text
+
+				// FPS and frame time
+				std::string fpsText = "FPS: " + std::to_string(static_cast<int>(metrics.getFPS() + 0.5f)) +
+									  " (" + std::to_string(metrics.getFrameTimeMs()) + "ms)";
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, fpsText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, fpsText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
+				// Image loading stats
+				std::string imageText = "Images: " + std::to_string(imageManager.loadSuccessCount.load()) +
+									   " loaded, " + std::to_string(imageManager.loadFailCount.load()) + " failed";
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, imageText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, imageText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
+				// Atlas usage stats (calculate used layers from imageIdToLayer size)
+				uint32_t usedLayers = static_cast<uint32_t>(imageManager.atlas.imageIdToLayer.size());
+				std::string atlasText = "Atlas layers: " + std::to_string(usedLayers) +
+									   " / " + std::to_string(TextureAtlas::MAX_LAYERS);
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, atlasText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, atlasText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
+				// Total frames counter
+				std::string frameText = "Total frames: " + std::to_string(metrics.totalFrames);
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, frameText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, frameText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
+				// Help text
+				std::string helpText = "Press F3 to toggle diagnostics";
+				const std::array<float, 4> helpColor{0.7f, 0.7f, 0.7f, 0.8f};
+				appendHudText(hudFont, hudVertices, 24.0f + 1.0f, yOffset + 1.0f, helpText, diagTextSize * 0.8f, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, helpText, diagTextSize * 0.8f, helpColor);
+			}
 		}
 	}
 

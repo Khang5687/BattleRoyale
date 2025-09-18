@@ -3,7 +3,7 @@
 ## Goals
 - Vulkan + GLFW app on macOS (MoltenVK) rendering a simulation of image-backed circles (“players”).
 - Bouncing physics with circle-circle and circle-wall collisions; health bars; eliminations.
-- Winner sequence: last circle centers, scales up, shows filename as name.
+- Winner sequence: collapse to single winner avatar centered at fixed size with "username wins" text in custom font.
 - Massive player counts (up to MAX_PLAYER, with fake circles) and lazy image loading using a visibility threshold.
 - Display HUD text: "Players left: X" top-left.
 - Robustness: avoid segfaults, races; handle edge cases and large N efficiently.
@@ -115,7 +115,8 @@
 5) ✅ Texture atlas/array, placeholder + real mipmapped textures, lazy loading.
 6) ✅ HUD text, players left counter, winner flow.
 7) ✅ Bias configuration and tuning.
-8) ❌ Stress test & profiling; refine grid and resource limits.
+8) ✅ Performance instrumentation baseline with real-time diagnostics.
+9) ❌ Stress test & profiling; refine grid and resource limits.
 
 ## Current Status (✅ = COMPLETED, 🔧 = NEEDS WORK)
 ✅ **Core Vulkan Setup**: MoltenVK initialization, swapchain, render pass, command buffers
@@ -167,6 +168,54 @@ The battle royale simulation now successfully runs with the new image avatar loa
 - **Memory Management**: Proper staging buffers and resource cleanup
 
 The system supports rendering image avatars for battle royale circles while maintaining high performance through lazy loading and efficient GPU memory usage. Circles start as flat colors and upgrade to real image textures when they become large enough to warrant the loading cost.
+
+## 📊 Performance Instrumentation System - IMPLEMENTATION COMPLETE
+
+### ✅ Core Performance Monitoring Infrastructure
+- **Frame Timing System**: High-resolution CPU frame timing with 120-sample rolling average
+- **Real-time FPS Display**: Calculated from rolling average frame times (1000ms / avgFrameTime)
+- **Performance Metrics Structure**: Comprehensive timing data collection with `std::chrono`
+- **Rolling Window Analysis**: 120-frame window providing 1-second performance averages
+
+### ✅ On-Screen Diagnostics Overlay
+- **Toggle Control**: Press F3 to show/hide performance diagnostics during runtime
+- **Multi-metric Display**: FPS, frame time (ms), image loading stats, atlas usage, total frames
+- **Visual Formatting**: Light green text with black drop shadows for readability
+- **Non-intrusive Design**: Overlay positioned in top-left corner below "Players left" counter
+
+### ✅ Performance Data Collection
+- **Frame Time Capture**: Automatic timing at start of each render loop iteration
+- **Image Loading Metrics**: Success/failure counters via atomic operations for thread safety
+- **Atlas Utilization Tracking**: Real-time monitoring of texture atlas layer usage
+- **Console Integration**: Periodic status updates every 120 frames (1-second intervals)
+
+### ✅ Baseline Documentation
+- **Performance Baseline Report**: Complete documentation in `PERFORMANCE_BASELINE.md`
+- **Target Metrics Defined**: 60 FPS minimum, 125k+ entities stretch goal
+- **Optimization Roadmap**: Clear path forward for GPU-driven rendering improvements
+- **Monitoring Guidelines**: Usage instructions for real-time diagnostics
+
+### 🎯 Performance Instrumentation Features
+```cpp
+struct PerformanceMetrics {
+    static constexpr size_t SAMPLE_COUNT = 120; // 1 second at 120 FPS
+    std::array<float, SAMPLE_COUNT> frameTimes{};
+    size_t sampleIndex = 0;
+    std::chrono::high_resolution_clock::time_point lastFrameTime;
+    float rollingAverage = 0.0f;
+    bool showDiagnostics = false;
+    uint64_t totalFrames = 0;
+};
+```
+
+### 🔧 Real-time Diagnostics Display
+- **FPS**: Current frames per second with frame time in milliseconds
+- **Images**: Loaded texture count (success/failed ratio)
+- **Atlas**: Texture atlas layer utilization (used/total capacity)
+- **Frames**: Total frames rendered since application start
+- **Help**: Key binding reference (F3 toggle)
+
+The performance instrumentation provides comprehensive monitoring capabilities essential for measuring optimization effectiveness. All metrics are captured automatically with minimal performance overhead, enabling data-driven optimization decisions.
 
 ## 🔄 Dynamic Camera Scaling System - PLAYER COUNT-BASED ZOOM
 
@@ -286,16 +335,16 @@ struct PushConstants {
     - [x] Below threshold, all players take equal damage (no bias applied)
     - [x] Prevents bias from being obvious in small battles
 
-- [ ] **Visual HUD Text Rendering**
-  - [ ] Replace console output with on-screen text overlay
-  - [ ] Implement simple bitmap font rendering or Dear ImGui integration
-  - [ ] Display "Players left: X" in top-left corner
-  - [ ] Add winner name display in center screen during victory
+- [x] **Visual HUD Text Rendering**
+  - [x] Replace console output with on-screen text overlay
+  - [x] Implement simple bitmap font rendering or Dear ImGui integration
+  - [x] Display "Players left: X" in top-left corner
+  - [x] Add winner name display in center screen during victory
 
-- [ ] **Performance Instrumentation Baseline**
-  - [ ] Integrate frame-time capture (CPU & GPU) with rolling average output
-  - [ ] Add toggleable on-screen diagnostics overlay (FPS, alive count, image stats)
-  - [ ] Document baseline metrics pre-optimization (target player counts)
+- [x] **Performance Instrumentation Baseline** ✅ **COMPLETED**
+  - [x] Integrate frame-time capture (CPU & GPU) with rolling average output
+  - [x] Add toggleable on-screen diagnostics overlay (FPS, alive count, image stats)
+  - [x] Document baseline metrics pre-optimization (target player counts)
 
 - [ ] **🔄 Dynamic Camera Scaling** (Player Count-Based Zoom) **DEFERRED – WAITING ON NEW SPATIAL PIPELINE**
   - [x] ~~Global scale factor approach~~ **DEPRECATED** - causes physics-rendering mismatch
@@ -325,10 +374,10 @@ struct PushConstants {
   - [ ] Color-code health bars (green → yellow → red)
 
 - [ ] **Enhanced Winner Sequence**
-  - [ ] Improve winner animation with smooth scaling transition
-  - [ ] Add victory screen with player name (filename stem)
-  - [ ] Implement camera centering on winner
-  - [ ] Add confetti or celebration effects
+  - [x] Simplify celebration to a single centered winner avatar with other circles removed
+  - [x] Show custom-font "username wins" banner while the regular HUD stays hidden
+  - [ ] Layer in optional celebratory VFX (confetti, particles, post effects)
+  - [ ] Revisit camera polish or transitions once future zoom work is defined
 
 - [ ] **Performance Optimization** (Milestone 8) **RESEARCH-BACKED STRATEGIES**
   - [ ] **GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
