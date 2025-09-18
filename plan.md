@@ -286,9 +286,23 @@ struct PushConstants {
     - [x] Below threshold, all players take equal damage (no bias applied)
     - [x] Prevents bias from being obvious in small battles
 
-- [ ] **🔄 Dynamic Camera Scaling** (Player Count-Based Zoom) **READY FOR IMPLEMENTATION**
+- [ ] **Visual HUD Text Rendering**
+  - [ ] Replace console output with on-screen text overlay
+  - [ ] Implement simple bitmap font rendering or Dear ImGui integration
+  - [ ] Display "Players left: X" in top-left corner
+  - [ ] Add winner name display in center screen during victory
+
+- [ ] **Performance Instrumentation Baseline**
+  - [ ] Integrate frame-time capture (CPU & GPU) with rolling average output
+  - [ ] Add toggleable on-screen diagnostics overlay (FPS, alive count, image stats)
+  - [ ] Document baseline metrics pre-optimization (target player counts)
+
+- [ ] **🔄 Dynamic Camera Scaling** (Player Count-Based Zoom) **DEFERRED – WAITING ON NEW SPATIAL PIPELINE**
   - [x] ~~Global scale factor approach~~ **DEPRECATED** - causes physics-rendering mismatch
-  - [ ] **Implement player count-driven camera zoom** (RECOMMENDED APPROACH)
+  - [ ] **Prep work only**: define `CameraState` (min/max zoom, smoothing, winner focus)
+  - [ ] Blocked: implement zoom logic after advanced spatial partitioning lands
+  - [ ] Coordinate final implementation with **Enhanced Winner Sequence** tasks for shared camera polish
+  - [ ] Post-blocker checklist (unlocked once new spatial system ships)
     - [ ] Add zoom factor calculation: `zoomFactor = calculateZoomFromPlayerCount(aliveCount)`
     - [ ] Add min/max zoom constants (MIN_ZOOM_FACTOR = 0.5f, MAX_ZOOM_FACTOR = 3.0f)
     - [ ] Calculate effective world boundaries: `effectiveWorld = worldSize / zoomFactor`
@@ -299,16 +313,10 @@ struct PushConstants {
     - [ ] Update vertex shader to use pc.effectiveViewport for world-to-NDC conversion
     - [ ] Keep circle physics unchanged at fixed 40px radius
     - [ ] Test smooth scaling with proper wall collision alignment from 50k players to winner
-  - [ ] **Constraint validation**
+  - [ ] **Constraint validation (post-blocker)**
     - [ ] Verify minimum zoom (0.5x) handles massive player counts without over-zooming
     - [ ] Verify maximum zoom (3.0x) provides dramatic final battle view
     - [ ] Test smooth interpolation between zoom levels
-
-- [ ] **Visual HUD Text Rendering**
-  - [ ] Replace console output with on-screen text overlay
-  - [ ] Implement simple bitmap font rendering or Dear ImGui integration
-  - [ ] Display "Players left: X" in top-left corner
-  - [ ] Add winner name display in center screen during victory
 
 ### MEDIUM PRIORITY - Polish & Performance
 - [ ] **Health Bar Rendering**
@@ -323,15 +331,23 @@ struct PushConstants {
   - [ ] Add confetti or celebration effects
 
 - [ ] **Performance Optimization** (Milestone 8) **RESEARCH-BACKED STRATEGIES**
-  - [ ] **GPU-Driven Rendering Implementation**
-    - [ ] Convert to compute shader-based frustum culling
-    - [ ] Implement `vkCmdDrawIndexedIndirect` for CPU overhead elimination
-    - [ ] Add Hi-Z buffer occlusion culling using previous frame depth
+  - [ ] **GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
+    - [ ] Stand up compute pass that frustum-culls instance data into a GPU-visible list
+    - [ ] Define shared visibility buffer layout (include hook for future `CameraState` zoom factor)
+    - [ ] Validate correctness against CPU path using instrumentation metrics
+  - [ ] **GPU-Driven Rendering – Stage 2 (Indirect Draw Integration)**
+    - [ ] Replace direct draws with `vkCmdDrawIndexedIndirect`
+    - [ ] Add GPU-side instance count readback guards or fallback path
+    - [ ] Benchmark draw-call reduction using new baseline instrumentation
+  - [ ] **GPU-Driven Rendering – Stage 3 (Hi-Z Occlusion & Refinement)**
+    - [ ] Build Hi-Z buffer from prior frame depth
+    - [ ] Integrate occlusion test into compute culling
     - [ ] Target: 125k+ entities at 60+ FPS (industry benchmark achieved)
   - [ ] **Advanced Spatial Partitioning**
     - [ ] Replace simple hash grid with hybrid quadtree + hash grid system
     - [ ] Implement dynamic rebalancing for moving entities
     - [ ] Optimize collision detection from O(n²) to O(n) for clustered objects
+    - [ ] Expose spatial bounds API consumed by deferred camera zoom feature
   - [ ] **Data-Oriented Memory Optimization**
     - [ ] Verify current SoA layout is SIMD-friendly for vectorized operations
     - [ ] Add memory coherence profiling for cache miss optimization
@@ -373,4 +389,3 @@ struct PushConstants {
 - Descriptor indexing/bindless is limited; plan on atlas array + indirection buffer.
 - Avoid geometry shaders; use instancing + SDF.
 - Prefer fewer pipelines; Metal backend likes stable pipelines and small descriptor sets.
-
