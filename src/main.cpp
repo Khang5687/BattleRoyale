@@ -225,6 +225,9 @@ struct ImageManager {
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 };
 
+// Forward declarations
+class AdaptiveCircleSimulation;
+
 struct HudFont {
 	float basePixelHeight = 48.0f;
 	float ascent = 0.0f;
@@ -600,7 +603,410 @@ struct Simulation {
 			out.push_back(inst);
 		}
 	}
+
+	// Density-based rendering system with LOD thresholds - declaration only
+	void writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, const AdaptiveCircleSimulation& adaptiveSim, float zoomFactor) const;
 };
+
+// Simple vector types for adaptive simulation
+struct vec2 {
+	float x, y;
+	vec2() : x(0.0f), y(0.0f) {}
+	vec2(float x, float y) : x(x), y(y) {}
+};
+
+struct vec3 {
+	float x, y, z;
+	vec3() : x(0.0f), y(0.0f), z(0.0f) {}
+	vec3(float x, float y, float z) : x(x), y(y), z(z) {}
+};
+
+// Adaptive Simulation Architecture Foundation for 1M+ Entity Scaling
+enum class CircleSimulationTier {
+	INDIVIDUAL,    // >10 pixels: Full circle rendering + physics
+	CLUSTERED,     // 2-10 pixels: Group nearby circles into density blobs
+	STATISTICAL,   // 0.5-2 pixels: Statistical cluster simulation
+	INVISIBLE      // <0.5 pixels: Position tracking only
+};
+
+// Statistical cluster for dust-level circles (100k-1M+ entities)
+struct StatisticalCluster {
+	vec2 centerOfMass{0.0f, 0.0f};        // Cluster position
+	float totalMass = 0.0f;               // Combined physics mass
+	vec2 averageVelocity{0.0f, 0.0f};     // Average movement direction
+	uint32_t aliveCount = 0;              // Circles in cluster
+	vec3 dominantColor{1.0f, 0.0f, 0.0f}; // Most common circle color
+	float effectiveRadius = 20.0f;        // Cluster effective collision radius
+
+	// Entity indices that belong to this cluster
+	std::vector<uint32_t> memberIndices;
+
+	// Simplified physics: treat cluster as single large circle
+	void updatePhysics(float dt, float worldWidth, float worldHeight) {
+		// Integrate cluster position
+		centerOfMass.x += averageVelocity.x * dt;
+		centerOfMass.y += averageVelocity.y * dt;
+
+		// Wall collisions for cluster
+		bool wallHit = false;
+		if (centerOfMass.x - effectiveRadius < 0.0f) {
+			centerOfMass.x = effectiveRadius;
+			averageVelocity.x = -averageVelocity.x;
+			wallHit = true;
+		}
+		if (centerOfMass.x + effectiveRadius > worldWidth) {
+			centerOfMass.x = worldWidth - effectiveRadius;
+			averageVelocity.x = -averageVelocity.x;
+			wallHit = true;
+		}
+		if (centerOfMass.y - effectiveRadius < 0.0f) {
+			centerOfMass.y = effectiveRadius;
+			averageVelocity.y = -averageVelocity.y;
+			wallHit = true;
+		}
+		if (centerOfMass.y + effectiveRadius > worldHeight) {
+			centerOfMass.y = worldHeight - effectiveRadius;
+			averageVelocity.y = -averageVelocity.y;
+			wallHit = true;
+		}
+
+		// Normalize velocity to maintain constant speed after wall collisions
+		if (wallHit) {
+			float speed = std::sqrt(averageVelocity.x * averageVelocity.x + averageVelocity.y * averageVelocity.y);
+			if (speed > 0.0f) {
+				const float constantSpeed = 140.0f * 2.0f; // Match simulation constant speed
+				averageVelocity.x = (averageVelocity.x / speed) * constantSpeed;
+				averageVelocity.y = (averageVelocity.y / speed) * constantSpeed;
+			}
+		}
+	}
+
+	// Statistical elimination within cluster
+	void processEliminations(float damage) {
+		if (aliveCount == 0) return;
+
+		// Apply statistical damage - some percentage of entities die
+		float eliminationRate = std::min(0.1f, damage * 10.0f); // Max 10% elimination per frame
+		uint32_t eliminations = static_cast<uint32_t>(aliveCount * eliminationRate);
+		aliveCount = (eliminations >= aliveCount) ? 0 : aliveCount - eliminations;
+
+		// Update effective radius based on remaining count
+		if (aliveCount > 0) {
+			effectiveRadius = std::sqrt(static_cast<float>(aliveCount)) * 4.0f + 10.0f;
+		} else {
+			effectiveRadius = 0.0f;
+		}
+	}
+};
+
+// Density cluster for medium-scale circles (10k-100k entities)
+struct DensityCluster {
+	vec2 centerOfMass{0.0f, 0.0f};
+	float averageRadius = 20.0f;
+	uint32_t memberCount = 0;
+	vec3 averageColor{1.0f, 0.0f, 0.0f};
+	std::vector<uint32_t> memberIndices;
+
+	void updateFromMembers(const Simulation& sim) {
+		if (memberIndices.empty()) return;
+
+		vec2 sumPos{0.0f, 0.0f};
+		float sumRadius = 0.0f;
+		vec3 sumColor{0.0f, 0.0f, 0.0f};
+		uint32_t count = 0;
+
+		for (uint32_t idx : memberIndices) {
+			if (idx < sim.alive.size() && sim.alive[idx]) {
+				sumPos.x += sim.posX[idx];
+				sumPos.y += sim.posY[idx];
+				sumRadius += sim.radius[idx];
+
+				// Calculate color from health
+				float h = std::clamp(sim.health[idx], 0.0f, 1.0f);
+				sumColor.x += 1.0f - h; // Red component
+				sumColor.y += h;       // Green component
+				sumColor.z += 0.2f;    // Blue component
+				count++;
+			}
+		}
+
+		if (count > 0) {
+			centerOfMass = {sumPos.x / count, sumPos.y / count};
+			averageRadius = sumRadius / count;
+			averageColor = {sumColor.x / count, sumColor.y / count, sumColor.z / count};
+			memberCount = count;
+		}
+	}
+};
+
+// Adaptive simulation class for tier-based entity management
+class AdaptiveCircleSimulation {
+public:
+	// Simulation tier constants
+	static constexpr float INDIVIDUAL_PROMOTION_THRESHOLD = 10.0f;  // Min apparent radius for individual simulation
+	static constexpr float CLUSTER_DEMOTION_THRESHOLD = 2.0f;       // Max apparent radius for cluster demotion
+	static constexpr float DUST_THRESHOLD = 0.5f;                   // Min apparent radius for any rendering
+	static constexpr uint32_t CLUSTER_BREAKUP_THRESHOLD = 10;       // Min cluster size before breakup
+	static constexpr uint32_t MIN_CLUSTER_SIZE = 50;                // Min circles needed to form cluster
+	static constexpr float TARGET_FRAME_TIME = 16.67f;              // 60 FPS target for adaptive thresholds
+
+	// Entity containers for different tiers
+	std::vector<uint32_t> individualCircles;        // <10k: Full simulation
+	std::vector<DensityCluster> mediumClusters;     // 10k-100k: Grouped simulation
+	std::vector<StatisticalCluster> dustClusters;   // 100k-1M: Statistical simulation
+
+	// Tier assignment for each entity
+	std::vector<CircleSimulationTier> entityTiers;
+
+	// Camera/zoom state for tier calculations
+	float currentZoomFactor = 1.0f;
+	float lastFrameTime = 16.67f;
+
+	// Performance-adaptive thresholds
+	float adaptiveDustThreshold = DUST_THRESHOLD;
+
+	void initialize(uint32_t entityCount) {
+		entityTiers.resize(entityCount, CircleSimulationTier::INDIVIDUAL);
+		individualCircles.clear();
+		mediumClusters.clear();
+		dustClusters.clear();
+
+		// Initially, all entities are individual
+		for (uint32_t i = 0; i < entityCount; ++i) {
+			individualCircles.push_back(i);
+		}
+	}
+
+	// Calculate apparent screen size for dynamic detail selection
+	float calculateApparentRadius(float physicalRadius, float zoomFactor, float distanceFromCamera = 1.0f) const {
+		return physicalRadius * zoomFactor / distanceFromCamera;
+	}
+
+	// Update simulation tiers based on current zoom and performance
+	void updateSimulationTiers(const Simulation& sim, float zoomFactor) {
+		currentZoomFactor = zoomFactor;
+
+		// Adaptive threshold adjustment based on performance
+		if (lastFrameTime > TARGET_FRAME_TIME) {
+			adaptiveDustThreshold *= 1.1f;     // More aggressive clustering
+		} else {
+			adaptiveDustThreshold *= 0.99f;    // More detailed rendering
+		}
+		adaptiveDustThreshold = std::clamp(adaptiveDustThreshold, 0.1f, 2.0f);
+
+		// Promote clusters to individuals when zooming in
+		for (auto it = dustClusters.begin(); it != dustClusters.end();) {
+			bool shouldPromote = false;
+			for (uint32_t idx : it->memberIndices) {
+				if (idx < sim.radius.size()) {
+					float apparentRadius = calculateApparentRadius(sim.radius[idx], zoomFactor);
+					if (apparentRadius > INDIVIDUAL_PROMOTION_THRESHOLD) {
+						shouldPromote = true;
+						break;
+					}
+				}
+			}
+
+			if (shouldPromote) {
+				promoteClusterToIndividuals(*it);
+				it = dustClusters.erase(it);
+			} else {
+				++it;
+			}
+		}
+
+		// Demote individuals to clusters when zooming out
+		std::vector<uint32_t> demotionCandidates;
+		for (auto it = individualCircles.begin(); it != individualCircles.end();) {
+			uint32_t idx = *it;
+			if (idx < sim.radius.size() && sim.alive[idx]) {
+				float apparentRadius = calculateApparentRadius(sim.radius[idx], zoomFactor);
+				if (apparentRadius < CLUSTER_DEMOTION_THRESHOLD) {
+					demotionCandidates.push_back(idx);
+					entityTiers[idx] = CircleSimulationTier::STATISTICAL;
+					it = individualCircles.erase(it);
+				} else {
+					++it;
+				}
+			} else {
+				++it;
+			}
+		}
+
+		// Create new clusters from demotion candidates
+		if (demotionCandidates.size() >= MIN_CLUSTER_SIZE) {
+			createClustersFromIndices(sim, demotionCandidates);
+		} else {
+			// Not enough for cluster, put back to individuals
+			for (uint32_t idx : demotionCandidates) {
+				individualCircles.push_back(idx);
+				entityTiers[idx] = CircleSimulationTier::INDIVIDUAL;
+			}
+		}
+
+		// Break up small clusters into individuals for dramatic finale
+		for (auto it = dustClusters.begin(); it != dustClusters.end();) {
+			if (it->aliveCount < CLUSTER_BREAKUP_THRESHOLD) {
+				promoteClusterToIndividuals(*it);
+				it = dustClusters.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	void setFrameTime(float frameTimeMs) {
+		lastFrameTime = frameTimeMs;
+	}
+
+	uint32_t getTotalAliveCount() const {
+		uint32_t total = individualCircles.size();
+		for (const auto& cluster : dustClusters) {
+			total += cluster.aliveCount;
+		}
+		return total;
+	}
+
+private:
+	void promoteClusterToIndividuals(const StatisticalCluster& cluster) {
+		for (uint32_t idx : cluster.memberIndices) {
+			if (idx < entityTiers.size()) {
+				individualCircles.push_back(idx);
+				entityTiers[idx] = CircleSimulationTier::INDIVIDUAL;
+			}
+		}
+	}
+
+	void createClustersFromIndices(const Simulation& sim, const std::vector<uint32_t>& indices) {
+		// Simple clustering: group nearby entities
+		// For now, create one cluster per group of MIN_CLUSTER_SIZE entities
+		for (size_t i = 0; i < indices.size(); i += MIN_CLUSTER_SIZE) {
+			StatisticalCluster cluster;
+
+			vec2 centerSum{0.0f, 0.0f};
+			vec2 velocitySum{0.0f, 0.0f};
+			uint32_t count = 0;
+
+			size_t endIdx = std::min(i + MIN_CLUSTER_SIZE, indices.size());
+			for (size_t j = i; j < endIdx; ++j) {
+				uint32_t idx = indices[j];
+				if (idx < sim.posX.size() && sim.alive[idx]) {
+					cluster.memberIndices.push_back(idx);
+					centerSum.x += sim.posX[idx];
+					centerSum.y += sim.posY[idx];
+					velocitySum.x += sim.velX[idx];
+					velocitySum.y += sim.velY[idx];
+					count++;
+				}
+			}
+
+			if (count > 0) {
+				cluster.centerOfMass = {centerSum.x / count, centerSum.y / count};
+				cluster.averageVelocity = {velocitySum.x / count, velocitySum.y / count};
+				cluster.aliveCount = count;
+				cluster.totalMass = static_cast<float>(count);
+				cluster.effectiveRadius = std::sqrt(static_cast<float>(count)) * 4.0f + 10.0f;
+				dustClusters.push_back(cluster);
+			}
+		}
+	}
+};
+
+// Implementation of density-based rendering system with LOD thresholds
+void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, const AdaptiveCircleSimulation& adaptiveSim, float zoomFactor) const {
+	out.clear();
+	out.reserve(posX.size() + adaptiveSim.dustClusters.size());
+
+	// Render individual circles (full detail)
+	for (uint32_t idx : adaptiveSim.individualCircles) {
+		if (idx >= posX.size() || !alive[idx]) continue;
+
+		float apparentRadius = adaptiveSim.calculateApparentRadius(radius[idx], zoomFactor);
+
+		InstanceLayoutCPU inst{};
+		inst.center[0] = posX[idx];
+		inst.center[1] = posY[idx];
+		float h = std::clamp(health[idx], 0.0f, 1.0f);
+
+		// Density-Based Rendering Optimization based on apparent screen size
+		if (apparentRadius < 0.5f) {
+			// SUB-PIXEL: Single colored pixel (minimal radius)
+			inst.radius = 1.0f;
+			inst.imageLayer = -1.0f;
+			// Average color for dust-level
+			inst.color[0] = 0.6f; inst.color[1] = 0.4f; inst.color[2] = 0.2f; inst.color[3] = 0.8f;
+		} else if (apparentRadius < 2.0f) {
+			// TINY: Simple colored square
+			inst.radius = std::max(2.0f, radius[idx] * 0.5f);
+			inst.imageLayer = -1.0f;
+			// Health-based color but simplified
+			inst.color[0] = 1.0f - h * 0.7f;
+			inst.color[1] = h * 0.8f;
+			inst.color[2] = 0.3f;
+			inst.color[3] = 1.0f;
+		} else if (apparentRadius < 10.0f) {
+			// SMALL: Simplified SDF circle
+			inst.radius = radius[idx];
+			inst.imageLayer = -1.0f;
+			// Full health-based color
+			inst.color[0] = 1.0f - h;
+			inst.color[1] = h;
+			inst.color[2] = 0.2f;
+			inst.color[3] = 1.0f;
+		} else {
+			// LARGE: Full detail + texture
+			inst.radius = radius[idx];
+
+			// Set image layer based on tier (original logic)
+			if (imageTier[idx] == 0 || imageId[idx] == UINT32_MAX) {
+				inst.imageLayer = -1.0f;
+				inst.color[0] = 1.0f - h; inst.color[1] = h; inst.color[2] = 0.2f; inst.color[3] = 1.0f;
+			} else if (imageTier[idx] >= 2 && imageManager) {
+				int32_t layer = getAtlasLayerForImage(*imageManager, imageId[idx]);
+				if (layer >= 0) {
+					inst.imageLayer = static_cast<float>(layer);
+					inst.color[0] = 1.0f - h * 0.5f;
+					inst.color[1] = 1.0f - h * 0.5f;
+					inst.color[2] = 1.0f - h * 0.5f;
+					inst.color[3] = 1.0f;
+				} else {
+					inst.imageLayer = -1.0f;
+					inst.color[0] = 1.0f - h; inst.color[1] = h; inst.color[2] = 0.2f; inst.color[3] = 1.0f;
+				}
+			} else {
+				inst.imageLayer = -1.0f;
+				inst.color[0] = 1.0f - h; inst.color[1] = h; inst.color[2] = 0.2f; inst.color[3] = 1.0f;
+			}
+		}
+
+		// Winner highlighting
+		if (inVictory && static_cast<int>(idx) == winnerIndex) {
+			inst.color[0] = 1.0f; inst.color[1] = 1.0f; inst.color[2] = 1.0f; inst.color[3] = 1.0f;
+		}
+
+		out.push_back(inst);
+	}
+
+	// Render statistical clusters as single entities
+	for (const auto& cluster : adaptiveSim.dustClusters) {
+		if (cluster.aliveCount == 0) continue;
+
+		InstanceLayoutCPU inst{};
+		inst.center[0] = cluster.centerOfMass.x;
+		inst.center[1] = cluster.centerOfMass.y;
+		inst.radius = cluster.effectiveRadius;
+		inst.imageLayer = -1.0f;
+
+		// Cluster color based on dominant color and alive count
+		float intensity = std::min(1.0f, static_cast<float>(cluster.aliveCount) / 100.0f);
+		inst.color[0] = cluster.dominantColor.x * intensity;
+		inst.color[1] = cluster.dominantColor.y * intensity;
+		inst.color[2] = cluster.dominantColor.z * intensity;
+		inst.color[3] = 0.8f; // Slightly transparent to show it's a cluster
+
+		out.push_back(inst);
+	}
+}
 
 static VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) {
 	for (const auto& f : formats) {
@@ -2234,6 +2640,12 @@ int main() {
 	sim.initializeFromAssets("assets", sim.maxPlayers);
 	std::cout << "Simulation initialized!" << std::endl; std::cout.flush();
 
+	// Initialize adaptive simulation architecture
+	std::cout << "Initializing adaptive simulation architecture..." << std::endl; std::cout.flush();
+	AdaptiveCircleSimulation adaptiveSim{};
+	adaptiveSim.initialize(sim.maxPlayers);
+	std::cout << "Adaptive simulation architecture initialized!" << std::endl; std::cout.flush();
+
 	uint32_t frameCount = 0;
 	uint32_t lastAliveCount = sim.aliveCount();
 	PerformanceMetrics metrics;
@@ -2356,7 +2768,15 @@ int main() {
 		updateImageManager(imageManager); // Process pending texture uploads
 		sim.step(dt);
 		sim.updateImageTiers(); // Update image loading tiers based on radius
-		sim.writeInstances(cpuInstances);
+
+		// Update adaptive simulation architecture
+		// For now, use a default zoom factor of 1.0f (will be dynamic when camera scaling is implemented)
+		float currentZoomFactor = 1.0f;
+		adaptiveSim.updateSimulationTiers(sim, currentZoomFactor);
+		adaptiveSim.setFrameTime(metrics.rollingAverage);
+
+		// Use LOD-based rendering system
+		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, currentZoomFactor);
 
 		// Print status updates periodically
 		frameCount++;
