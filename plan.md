@@ -635,20 +635,24 @@ struct PushConstants {
   - [ ] Layer in optional celebratory VFX (confetti, particles, post effects)
   - [ ] Revisit camera polish or transitions once the zoom work ships
 
-### Stage 3 – GPU-Driven Rendering Pipeline (start once Stage 2 stabilizes)
-- [ ] **GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
+### Stage 3 – Performance & GPU-Driven Rendering (start once Stage 2 stabilizes)
+- [ ] **P0: CPU Frame-Stability Hotfixes**
+  - [ ] Cache the per-frame alive count and reuse it inside collision loops to avoid O(n²) rescans.
+  - [ ] Feed the real `sim.currentZoomFactor` into `adaptiveSim.updateSimulationTiers()` so demotion/promotion logic actually reacts to camera distance.
+  - [ ] Re-profile the 50k-entity start (target ≤16 ms frame) and capture notes for regression tracking.
+- [ ] **P1: GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
   - [ ] Stand up a compute pass that frustum-culls instance data into a GPU-visible list
   - [ ] Define the shared visibility buffer layout (hook in future `CameraState` zoom factor)
   - [ ] Validate correctness against the CPU path with instrumentation metrics
-- [ ] **GPU-Driven Rendering – Stage 2 (Indirect Draw Integration)**
+- [ ] **P2: GPU-Driven Rendering – Stage 2 (Indirect Draw Integration)**
   - [ ] Replace direct draws with `vkCmdDrawIndexedIndirect`
   - [ ] Add GPU-side instance-count readback guards or a CPU fallback path
   - [ ] Benchmark draw-call reduction using the performance instrumentation baseline
-- [ ] **GPU-Driven Rendering – Stage 3 (Hi-Z Occlusion & Refinement)**
+- [ ] **P3: GPU-Driven Rendering – Stage 3 (Hi-Z Occlusion & Refinement)**
   - [ ] Build a Hi-Z buffer from the prior frame depth
   - [ ] Integrate the occlusion test into the compute culling pass
   - [ ] Hit the target of 125k+ entities at 60+ FPS
-- [ ] **Modern Vulkan Features (Advanced)**
+- [ ] **P4: Modern Vulkan Features (Advanced)**
   - [ ] Evaluate mesh shader adoption for potential 10× geometry throughput
   - [ ] Investigate GPU-controlled texture loading via compute shaders
 
