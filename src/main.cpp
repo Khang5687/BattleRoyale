@@ -2490,15 +2490,19 @@ static bool loadHudFont(HudFont& font, VkPhysicalDevice physical, VkDevice devic
 		int count;
 	};
 
-	const std::array<RangeConfig, 8> ranges = {
+	const std::array<RangeConfig, 12> ranges = {
 		RangeConfig{0x0020, 95},   // Basic Latin
 		RangeConfig{0x00A0, 96},   // Latin-1 Supplement
 		RangeConfig{0x0100, 128},  // Latin Extended-A
 		RangeConfig{0x0180, 208},  // Latin Extended-B
+		RangeConfig{0x0300, 112},  // Combining Diacritical Marks
 		RangeConfig{0x0370, 112},  // Greek & Coptic
 		RangeConfig{0x0400, 256},  // Cyrillic
+		RangeConfig{0x1E00, 256},  // Latin Extended Additional (includes Vietnamese)
 		RangeConfig{0x2000, 112},  // General punctuation
-		RangeConfig{0x20A0, 32}    // Currency symbols
+		RangeConfig{0x20A0, 32},   // Currency symbols
+		RangeConfig{0x4E00, 512},  // CJK Unified Ideographs (basic subset)
+		RangeConfig{0x1F300, 256}  // Miscellaneous Symbols and Pictographs (includes some emoji)
 	};
 
 	struct PackAttempt {
@@ -3388,6 +3392,12 @@ int main() {
 				const std::array<float, 4> helpColor{0.7f, 0.7f, 0.7f, 0.8f};
 				appendHudText(hudFont, hudVertices, 24.0f + 1.0f, yOffset + 1.0f, helpText, diagTextSize * 0.8f, diagShadow);
 				appendHudText(hudFont, hudVertices, 24.0f, yOffset, helpText, diagTextSize * 0.8f, helpColor);
+				yOffset += 30.0f;
+				// UTF-8 test text
+				std::string utf8Test = "UTF-8: Việt Nam thắng! ★ Héllö ★";
+				const std::array<float, 4> utf8Color{0.5f, 0.8f, 1.0f, 0.9f};
+				appendHudText(hudFont, hudVertices, 24.0f + 1.0f, yOffset + 1.0f, utf8Test, diagTextSize * 0.7f, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, utf8Test, diagTextSize * 0.7f, utf8Color);
 			}
 		}
 	}
