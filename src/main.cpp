@@ -542,9 +542,11 @@ struct Simulation {
 			}
 		} else {
 			if (!victorySetupDone && winnerIndex >= 0) {
-				const float centerX = worldWidth * 0.5f;
-				const float centerY = worldHeight * 0.5f;
-				const float displayRadius = std::max(fixedRadius, std::min(worldWidth, worldHeight) * 0.35f);
+				// Position winner at center of effective world bounds (accounts for zoom)
+				const float centerX = effectiveWorldWidth * 0.5f;
+				const float centerY = effectiveWorldHeight * 0.5f;
+				// Winner radius should be proportional to effective world size and zoom-appropriate
+				const float displayRadius = std::max(fixedRadius * 1.5f, std::min(effectiveWorldWidth, effectiveWorldHeight) * 0.15f);
 
 				for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
 					velX[i] = 0.0f;
@@ -3275,11 +3277,11 @@ int main() {
 		// Bind descriptor set for texture atlas
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
 
-		// Push constants: effective viewport size (adjusted for zoom)
+		// Push constants for circles: effective viewport size (adjusted for zoom)
 		float effectiveViewportWidth = static_cast<float>(sc.extent.width) / sim.currentZoomFactor;
 		float effectiveViewportHeight = static_cast<float>(sc.extent.height) / sim.currentZoomFactor;
-		float vp[2] = { effectiveViewportWidth, effectiveViewportHeight };
-		vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), vp);
+		float circleViewport[2] = { effectiveViewportWidth, effectiveViewportHeight };
+		vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(circleViewport), circleViewport);
 
 		// Update simulation and instance buffer
 		const float dt = 1.0f / 120.0f; // fixed step
@@ -3318,11 +3320,19 @@ int main() {
 			float height = hudMeasureHeight(hudFont, winnerText, winnerTextSize);
 
 			// Position text above the winner's circle like a nametag
+			// Convert world coordinates to screen coordinates accounting for zoom
 			float circleX = sim.posX[sim.winnerIndex];
 			float circleY = sim.posY[sim.winnerIndex];
 			float circleRadius = sim.radius[sim.winnerIndex];
-			float baseX = circleX - (width * 0.5f);
-			float baseY = circleY - circleRadius - height - 20.0f; // 20px offset above circle
+
+			// Transform world coordinates to screen coordinates
+			// World position relative to effective world bounds -> screen position
+			float screenX = (circleX / sim.effectiveWorldWidth) * static_cast<float>(sc.extent.width);
+			float screenY = (circleY / sim.effectiveWorldHeight) * static_cast<float>(sc.extent.height);
+			float screenRadius = (circleRadius / sim.effectiveWorldWidth) * static_cast<float>(sc.extent.width);
+
+			float baseX = screenX - (width * 0.5f);
+			float baseY = screenY - screenRadius - height - 20.0f; // 20px offset above circle
 
 			const std::array<float, 4> winnerShadow{0.0f, 0.0f, 0.0f, 0.65f};
 			const std::array<float, 4> winnerColor{1.0f, 1.0f, 1.0f, 1.0f};
@@ -3443,7 +3453,9 @@ int main() {
 		if (hudFont.ready && hudFont.descriptorSet != VK_NULL_HANDLE && !hudVertices.empty()) {
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline.pipeline);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline.layout, 0, 1, &hudFont.descriptorSet, 0, nullptr);
-			vkCmdPushConstants(cmd, textPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vp), vp);
+			// Push constants for text: actual framebuffer size (UI should not scale with zoom)
+			float textViewport[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
+			vkCmdPushConstants(cmd, textPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(textViewport), textViewport);
 			VkBuffer hudVbs[] = { hud.vertexBuffer.buffer };
 			VkDeviceSize hudOffs[] = { 0 };
 			vkCmdBindVertexBuffers(cmd, 0, 1, hudVbs, hudOffs);
