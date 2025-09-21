@@ -255,14 +255,14 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 500;
+	uint32_t maxPlayers = 10000;
 	float minRadius = 12.0f;
 	float maxRadius = 28.0f;
 	float fixedRadius = 40.0f; // All circles have uniform size
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
-	float damageMultiplier = 0.001f;
-	float minDamage = 0.0001f;
+	float damageMultiplier = 0.0001f;
+	float minDamage = 0.005f;
 	float gridCellSize = 64.0f;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
 	float constantSpeed = 140.0f * speedMultiplier; // Fixed speed magnitude for all circles
@@ -663,21 +663,27 @@ struct Simulation {
 									float impulse = std::abs(dvI) + std::abs(dvJ);
 									float baseDamage = std::max(minDamage, impulse * damageMultiplier * 0.001f);
 									
+									// Apply population-based damage scaling - less damage as fewer players remain
+									uint32_t currentAlive = aliveCount();
+									float populationScale = static_cast<float>(currentAlive) / static_cast<float>(maxPlayers);
+									populationScale = std::max(0.1f, populationScale); // Minimum 10% damage to prevent zero damage
+
+									float scaledBaseDamage = baseDamage * populationScale;
+									float finalDamageI = scaledBaseDamage;
+									float finalDamageJ = scaledBaseDamage;
+
 									// Apply bias damage reduction if bias is active (enough players)
-									float finalDamageI = baseDamage;
-									float finalDamageJ = baseDamage;
-									
-									if (aliveCount() >= BIAS_ACTIVE_THRESHOLD) {
+									if (currentAlive >= BIAS_ACTIVE_THRESHOLD) {
 										// Apply bias reduction for player i
 										auto itI = biasReductions.find(names[i]);
 										if (itI != biasReductions.end()) {
-											finalDamageI = baseDamage * (1.0f - itI->second);
+											finalDamageI = scaledBaseDamage * (1.0f - itI->second);
 										}
-										
+
 										// Apply bias reduction for player j
 										auto itJ = biasReductions.find(names[j]);
 										if (itJ != biasReductions.end()) {
-											finalDamageJ = baseDamage * (1.0f - itJ->second);
+											finalDamageJ = scaledBaseDamage * (1.0f - itJ->second);
 										}
 									}
 									
@@ -886,11 +892,16 @@ struct StatisticalCluster {
 	}
 
 	// Statistical elimination within cluster
-	void processEliminations(float damage) {
+	void processEliminations(float damage, uint32_t totalPopulation = 10000) {
 		if (aliveCount == 0) return;
 
-		// Apply statistical damage - some percentage of entities die
-		float eliminationRate = std::min(0.1f, damage * 10.0f); // Max 10% elimination per frame
+		// Apply population-based damage scaling - clusters also scale with total population
+		float populationScale = static_cast<float>(totalPopulation) / 10000.0f; // Normalize to initial population
+		populationScale = std::max(0.1f, populationScale); // Minimum 10% to prevent zero damage
+
+		// Apply statistical damage - much more gradual elimination
+		float scaledDamage = damage * populationScale;
+		float eliminationRate = std::min(0.001f, scaledDamage * 0.1f); // Max 0.1% elimination per frame
 		uint32_t eliminations = static_cast<uint32_t>(aliveCount * eliminationRate);
 		aliveCount = (eliminations >= aliveCount) ? 0 : aliveCount - eliminations;
 
@@ -1262,7 +1273,7 @@ public:
 		processIndividualToClusterCollisions(dt, sim);
 
 		// Phase 2: Cluster-to-cluster collisions (statistical tier)
-		processClusterToClusterCollisions(dt);
+		processClusterToClusterCollisions(dt, sim.aliveCount());
 
 		// Phase 3: Update cluster physics after all collisions
 		updateClusterPhysics(dt, sim.effectiveWorldWidth, sim.effectiveWorldHeight);
@@ -1303,7 +1314,7 @@ private:
 					// Statistical damage to cluster from individual collision
 					float collisionIntensity = overlap / collisionDistance;
 					float baseDamage = std::max(0.02f, collisionIntensity * 0.1f);
-					cluster.processEliminations(baseDamage);
+					cluster.processEliminations(baseDamage, sim.aliveCount());
 
 					// If cluster becomes too small, it should be promoted to individuals
 					if (cluster.aliveCount < CLUSTER_BREAKUP_THRESHOLD / 2) {
@@ -1316,7 +1327,7 @@ private:
 	}
 
 	// Optimized cluster-to-cluster collision detection
-	void processClusterToClusterCollisions(float dt) {
+	void processClusterToClusterCollisions(float dt, uint32_t totalAlive) {
 		// Process collisions between statistical clusters
 		for (size_t i = 0; i < dustClusters.size(); ++i) {
 			if (dustClusters[i].aliveCount == 0) continue;
@@ -1389,8 +1400,8 @@ private:
 					float collisionIntensity = std::abs(vrelNormal) * 0.001f;
 					float baseDamage = std::max(0.01f, collisionIntensity);
 
-					clusterA.processEliminations(baseDamage);
-					clusterB.processEliminations(baseDamage);
+					clusterA.processEliminations(baseDamage, totalAlive);
+					clusterB.processEliminations(baseDamage, totalAlive);
 				}
 			}
 		}
