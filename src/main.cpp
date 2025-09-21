@@ -261,8 +261,8 @@ struct Simulation {
 	float fixedRadius = 40.0f; // All circles have uniform size
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
-	float damageMultiplier = 0.02f;
-	float minDamage = 0.005f;
+	float damageMultiplier = 0.001f;
+	float minDamage = 0.0001f;
 	float gridCellSize = 64.0f;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
 	float constantSpeed = 140.0f * speedMultiplier; // Fixed speed magnitude for all circles
@@ -3223,6 +3223,8 @@ int main() {
 	hudVertices.reserve(1024);
 
 	uint32_t currentFrame = 0;
+	bool isPaused = true; // Start paused by default
+
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
 
@@ -3230,14 +3232,25 @@ int main() {
 		metrics.captureFrame();
 
 		// Handle keyboard input for diagnostics toggle
-		static bool keyPressed = false;
+		static bool f3KeyPressed = false;
 		if (glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS) {
-			if (!keyPressed) {
+			if (!f3KeyPressed) {
 				metrics.toggleDiagnostics();
-				keyPressed = true;
+				f3KeyPressed = true;
 			}
 		} else {
-			keyPressed = false;
+			f3KeyPressed = false;
+		}
+
+		// Handle spacebar for pause/unpause toggle
+		static bool spaceKeyPressed = false;
+		if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+			if (!spaceKeyPressed) {
+				isPaused = !isPaused;
+				spaceKeyPressed = true;
+			}
+		} else {
+			spaceKeyPressed = false;
 		}
 
 		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
@@ -3331,22 +3344,23 @@ int main() {
 		// Update simulation and instance buffer
 		const float dt = 1.0f / 120.0f; // fixed step
 		updateImageManager(imageManager); // Process pending texture uploads
-		sim.step(dt);
-		sim.updateImageTiers(); // Update image loading tiers based on radius
 
-		// Update adaptive simulation architecture
-		// For now, use a default zoom factor of 1.0f (will be dynamic when camera scaling is implemented)
-		float currentZoomFactor = 1.0f;
+		// Only update simulation if not paused
+		if (!isPaused) {
+			sim.step(dt);
+			sim.updateImageTiers(); // Update image loading tiers based on radius
 
-		// Integrate performance monitoring for adaptive thresholds
-		adaptiveSim.setFrameTime(metrics.rollingAverage);
-		adaptiveSim.updateSimulationTiers(sim, currentZoomFactor);
+			// Update adaptive simulation architecture
+			// Integrate performance monitoring for adaptive thresholds
+			adaptiveSim.setFrameTime(metrics.rollingAverage);
+			adaptiveSim.updateSimulationTiers(sim, sim.currentZoomFactor);
 
-		// Process optimized collision detection for clustered vs individual entities
-		adaptiveSim.processClusterCollisions(dt, sim);
+			// Process optimized collision detection for clustered vs individual entities
+			adaptiveSim.processClusterCollisions(dt, sim);
+		}
 
 		// Use LOD-based rendering system
-		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, currentZoomFactor);
+		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, sim.currentZoomFactor);
 
 		// Print status updates periodically
 		frameCount++;
