@@ -255,7 +255,7 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 50000;
+	uint32_t maxPlayers = 500;
 	float minRadius = 12.0f;
 	float maxRadius = 28.0f;
 	float fixedRadius = 40.0f; // All circles have uniform size
@@ -274,18 +274,25 @@ struct Simulation {
 	static constexpr uint32_t MAX_PLAYERS_FOR_MIN_ZOOM = 50000;
 	static constexpr uint32_t MIN_PLAYERS_FOR_MAX_ZOOM = 1;
 
+	// Speed increase system constants
+	static constexpr float SPEED_INCREASE_TIMEOUT = 1.0f;    // Seconds before speed increases start
+	static constexpr float SPEED_INCREASE_MULTIPLIER = 1.05f; // 5% increase per application
+	static constexpr float SPEED_INCREASE_INTERVAL = 0.5f;   // Seconds between speed applications
+	static constexpr float MAX_SPEED_MULTIPLIER = 3.0f;      // Maximum total speed multiplier
+
 	// Bias system - now uses damage reduction instead of health multipliers
 	std::map<std::string, float> biasReductions; // 0.0 = no reduction, 0.5 = 50% damage reduction
 
-	// Helper function to normalize velocity to constant speed
+	// Helper function to normalize velocity to dynamic speed (with speed boost)
 	void normalizeVelocity(size_t i) {
 		if (!alive[i]) return;
 		float vx = velX[i];
 		float vy = velY[i];
 		float currentSpeed = std::sqrt(vx * vx + vy * vy);
 		if (currentSpeed > 0.0f) {
-			velX[i] = (vx / currentSpeed) * constantSpeed;
-			velY[i] = (vy / currentSpeed) * constantSpeed;
+			float effectiveSpeed = constantSpeed * currentSpeedBoost;
+			velX[i] = (vx / currentSpeed) * effectiveSpeed;
+			velY[i] = (vy / currentSpeed) * effectiveSpeed;
 		}
 	}
 
@@ -297,6 +304,12 @@ struct Simulation {
 	float effectiveWorldWidth = 800.0f;
 	float effectiveWorldHeight = 600.0f;
 	float currentZoomFactor = 1.0f;
+
+	// Speed increase system state
+	float lastCircleCollisionTime = 0.0f;     // Time since last circle-to-circle collision
+	float currentSpeedBoost = 1.0f;           // Current accumulated speed multiplier
+	float nextSpeedIncreaseTime = 0.0f;       // Time when next speed increase should occur
+	float simulationTime = 0.0f;              // Total elapsed simulation time
 
 	// State arrays
 	std::vector<float> posX, posY;
@@ -426,9 +439,32 @@ struct Simulation {
 		effectiveWorldHeight = worldHeight / currentZoomFactor;
 	}
 
+	void updateSpeedIncrease() {
+		// Check if enough time has passed since last collision to trigger speed increases
+		float timeSinceLastCollision = simulationTime - lastCircleCollisionTime;
+
+		// If we've waited long enough and haven't hit max speed
+		if (timeSinceLastCollision >= SPEED_INCREASE_TIMEOUT &&
+		    currentSpeedBoost < MAX_SPEED_MULTIPLIER &&
+		    simulationTime >= nextSpeedIncreaseTime) {
+
+			// Apply speed increase
+			currentSpeedBoost = std::min(currentSpeedBoost * SPEED_INCREASE_MULTIPLIER, MAX_SPEED_MULTIPLIER);
+
+			// Schedule next speed increase
+			nextSpeedIncreaseTime = simulationTime + SPEED_INCREASE_INTERVAL;
+		}
+	}
+
 	void step(float dt) {
+		// Update simulation time
+		simulationTime += dt;
+
 		// Update effective world boundaries based on current player count
 		updateEffectiveWorldBounds();
+
+		// Update speed increase system
+		updateSpeedIncrease();
 
 		// Integrate and wall collisions
 		for (size_t i = 0; i < posX.size(); ++i) {
@@ -477,6 +513,11 @@ struct Simulation {
 								float rr = radius[i] + radius[j];
 								float dist2 = dx*dx + dy*dy;
 								if (dist2 < rr*rr) {
+									// Circle-to-circle collision detected - reset speed increase timer
+									lastCircleCollisionTime = simulationTime;
+									currentSpeedBoost = 1.0f; // Stop speed increases (don't revert)
+									nextSpeedIncreaseTime = simulationTime + SPEED_INCREASE_TIMEOUT;
+
 									float dist = std::sqrt(std::max(dist2, 1e-6f));
 									float nx2 = dx / dist;
 									float ny2 = dy / dist;
@@ -3317,7 +3358,7 @@ int main() {
 			if (winnerText.empty()) {
 				winnerText = "Winner";
 			}
-			winnerText += "thắng";
+			winnerText += " thắng";
 
 			const float winnerTextSize = 96.0f;
 			float width = hudMeasureWidth(hudFont, winnerText, winnerTextSize);
@@ -3385,6 +3426,14 @@ int main() {
 				std::string frameText = "Total frames: " + std::to_string(metrics.totalFrames);
 				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, frameText, diagTextSize, diagShadow);
 				appendHudText(hudFont, hudVertices, 24.0f, yOffset, frameText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
+				// Speed boost information
+				float timeSinceCollision = sim.simulationTime - sim.lastCircleCollisionTime;
+				std::string speedText = "Speed boost: " + std::to_string(static_cast<int>((sim.currentSpeedBoost - 1.0f) * 100.0f + 0.5f)) + "%" +
+										" (no collision: " + std::to_string(static_cast<int>(timeSinceCollision + 0.5f)) + "s)";
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, speedText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, speedText, diagTextSize, diagColor);
 				yOffset += 35.0f;
 
 				// Help text
