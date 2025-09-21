@@ -269,10 +269,12 @@ struct Simulation {
 	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
 
 	// Camera zoom constants for dynamic scaling
-	static constexpr float MIN_ZOOM_FACTOR = 0.1f;  // Max zoom out (50k players)
 	static constexpr float MAX_ZOOM_FACTOR = 3.0f;  // Max zoom in (final players)
-	static constexpr uint32_t MAX_PLAYERS_FOR_MIN_ZOOM = 50000;
 	static constexpr uint32_t MIN_PLAYERS_FOR_MAX_ZOOM = 1;
+
+	// Dynamic zoom calculation parameters
+	static constexpr float MIN_VISIBLE_RADIUS = 8.0f;  // Minimum circle radius on screen
+	static constexpr float ZOOM_PADDING_FACTOR = 1.2f; // Extra space factor for comfortable viewing
 
 	// Speed increase system constants
 	static constexpr float SPEED_INCREASE_TIMEOUT = 1.0f;    // Seconds before speed increases start
@@ -383,13 +385,52 @@ struct Simulation {
 		imageTier.resize(targetCount);
 		names.resize(targetCount);
 
-		std::uniform_real_distribution<float> distX(40.0f, worldWidth - 40.0f);
-		std::uniform_real_distribution<float> distY(40.0f, worldHeight - 40.0f);
-		std::uniform_real_distribution<float> distAngle(0.0f, 2.0f * 3.14159f); // Random angle for direction
+		// Calculate initial zoom factor to determine effective world size
+		float initialZoom = calculateZoomFromPlayerCount(targetCount);
+		float effectiveWidth = worldWidth / initialZoom;
+		float effectiveHeight = worldHeight / initialZoom;
+
+		// Grid-based positioning to prevent overlaps
+		float minSpacing = fixedRadius * 2.2f; // 10% extra space between circles
+		float margin = fixedRadius + 10.0f; // Margin from effective world edges
+
+		// Calculate optimal grid dimensions within effective world
+		float availableWidth = effectiveWidth - 2 * margin;
+		float availableHeight = effectiveHeight - 2 * margin;
+
+		// Determine grid size that can fit all circles
+		uint32_t gridCols = std::max(1u, static_cast<uint32_t>(std::sqrt(targetCount * availableWidth / availableHeight)));
+		uint32_t gridRows = std::max(1u, (targetCount + gridCols - 1) / gridCols);
+
+		// Adjust grid spacing to fit within available space
+		float gridSpacingX = availableWidth / std::max(1u, gridCols - 1);
+		float gridSpacingY = availableHeight / std::max(1u, gridRows - 1);
+
+		// If spacing is too tight, reduce it but ensure minimum spacing
+		if (gridSpacingX < minSpacing) gridSpacingX = minSpacing;
+		if (gridSpacingY < minSpacing) gridSpacingY = minSpacing;
+
+		std::uniform_real_distribution<float> distAngle(0.0f, 2.0f * 3.14159f);
+		std::uniform_real_distribution<float> jitter(-minSpacing * 0.2f, minSpacing * 0.2f);
 
 		for (uint32_t i = 0; i < targetCount; ++i) {
-			posX[i] = distX(rng);
-			posY[i] = distY(rng);
+			// Calculate grid position
+			uint32_t gridX = i % gridCols;
+			uint32_t gridY = i / gridCols;
+
+			// Calculate position within effective world, then center it in actual world
+			float effectiveX = margin + gridX * gridSpacingX;
+			float effectiveY = margin + gridY * gridSpacingY;
+
+			// Center the effective world within the actual world
+			float offsetX = (worldWidth - effectiveWidth) / 2.0f;
+			float offsetY = (worldHeight - effectiveHeight) / 2.0f;
+
+			// Add small random jitter and position in actual world coordinates
+			posX[i] = std::clamp(offsetX + effectiveX + jitter(rng),
+			                    offsetX + margin, offsetX + effectiveWidth - margin);
+			posY[i] = std::clamp(offsetY + effectiveY + jitter(rng),
+			                    offsetY + margin, offsetY + effectiveHeight - margin);
 			// Set velocity with constant speed and random direction
 			float angle = distAngle(rng);
 			velX[i] = std::cos(angle) * constantSpeed;
@@ -415,22 +456,54 @@ struct Simulation {
 	}
 
 	float calculateZoomFromPlayerCount(uint32_t count) const {
-		// Smooth interpolation between min and max zoom based on player count
-		if (count >= MAX_PLAYERS_FOR_MIN_ZOOM) {
-			return MIN_ZOOM_FACTOR;
-		}
+		// For very few players, use max zoom
 		if (count <= MIN_PLAYERS_FOR_MAX_ZOOM) {
 			return MAX_ZOOM_FACTOR;
 		}
 
-		// Logarithmic interpolation for more natural scaling
+		// Calculate dynamic minimum zoom based on circle distribution
+		float minZoom = calculateMinZoomForCount(count);
+
+		// For initial count, use the calculated minimum zoom
+		if (count >= maxPlayers * 0.9f) { // 90% or more of max players
+			return minZoom;
+		}
+
+		// Smooth interpolation between min and max zoom
 		float normalizedCount = static_cast<float>(count - MIN_PLAYERS_FOR_MAX_ZOOM) /
-		                       static_cast<float>(MAX_PLAYERS_FOR_MIN_ZOOM - MIN_PLAYERS_FOR_MAX_ZOOM);
+		                       static_cast<float>(maxPlayers - MIN_PLAYERS_FOR_MAX_ZOOM);
 
 		// Use logarithmic scaling for more dramatic zoom during finale
 		float logNormalized = std::log(normalizedCount * (std::exp(1.0f) - 1.0f) + 1.0f);
 
-		return MIN_ZOOM_FACTOR + (MAX_ZOOM_FACTOR - MIN_ZOOM_FACTOR) * (1.0f - logNormalized);
+		return minZoom + (MAX_ZOOM_FACTOR - minZoom) * (1.0f - logNormalized);
+	}
+
+	float calculateMinZoomForCount(uint32_t count) const {
+		// Calculate required world dimensions to fit all circles comfortably
+		float circleSpacing = fixedRadius * 2.2f; // Same spacing as used in positioning
+
+		// Estimate grid dimensions for circle distribution
+		float aspectRatio = worldWidth / worldHeight;
+		uint32_t gridCols = std::max(1u, static_cast<uint32_t>(std::sqrt(count * aspectRatio)));
+		uint32_t gridRows = std::max(1u, (count + gridCols - 1) / gridCols);
+
+		// Calculate required world size to fit all circles
+		float requiredWidth = gridCols * circleSpacing * ZOOM_PADDING_FACTOR;
+		float requiredHeight = gridRows * circleSpacing * ZOOM_PADDING_FACTOR;
+
+		// Calculate zoom factors needed for width and height
+		float zoomForWidth = worldWidth / requiredWidth;
+		float zoomForHeight = worldHeight / requiredHeight;
+
+		// Use the smaller zoom to ensure everything fits
+		float minZoomNeeded = std::min(zoomForWidth, zoomForHeight);
+
+		// Also ensure circles don't become too small
+		float minZoomForVisibility = MIN_VISIBLE_RADIUS / fixedRadius;
+
+		// Return the larger of the two constraints
+		return std::max(minZoomNeeded, minZoomForVisibility);
 	}
 
 	void updateEffectiveWorldBounds() {
@@ -459,9 +532,6 @@ struct Simulation {
 	void step(float dt) {
 		// Update simulation time
 		simulationTime += dt;
-
-		// Update effective world boundaries based on current player count
-		updateEffectiveWorldBounds();
 
 		// Update speed increase system
 		updateSpeedIncrease();
@@ -3345,15 +3415,17 @@ int main() {
 		const float dt = 1.0f / 120.0f; // fixed step
 		updateImageManager(imageManager); // Process pending texture uploads
 
-		// Only update simulation if not paused
+		// Always update zoom factor to prevent teleportation on unpause
+		sim.updateEffectiveWorldBounds();
+
+		// Update adaptive simulation architecture with current zoom
+		adaptiveSim.setFrameTime(metrics.rollingAverage);
+		adaptiveSim.updateSimulationTiers(sim, sim.currentZoomFactor);
+
+		// Only update simulation physics if not paused
 		if (!isPaused) {
 			sim.step(dt);
 			sim.updateImageTiers(); // Update image loading tiers based on radius
-
-			// Update adaptive simulation architecture
-			// Integrate performance monitoring for adaptive thresholds
-			adaptiveSim.setFrameTime(metrics.rollingAverage);
-			adaptiveSim.updateSimulationTiers(sim, sim.currentZoomFactor);
 
 			// Process optimized collision detection for clustered vs individual entities
 			adaptiveSim.processClusterCollisions(dt, sim);

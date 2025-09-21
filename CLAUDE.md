@@ -1,0 +1,31 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+- `src/` holds the C++20 gameplay, renderer, and simulation code; `main.cpp` drives both Vulkan setup and the circle battle logic.
+- `shaders/` contains GLSL sources compiled to SPIR-V during the CMake build; compiled outputs land in `build/shaders/`.
+- `assets/` stores textures and data streamed at runtime; `bias.txt` configures balance tweaks and is copied into `build/` by the runner.
+- `stb/` provides vendored headers used for image resizing; avoid modifying upstream files unless syncing a new version.
+
+## Build, Test, and Development Commands
+- `./run.sh` checks dependencies, configures CMake, builds, syncs assets, and launches the game; prefer this for an end-to-end loop.
+- `cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo` performs a one-time or refreshed configure if you need manual control.
+- `cmake --build build --target battleroyale5` rebuilds after code or shader edits; use `-j` cautiously on laptops to avoid thermal throttling.
+- `./build/battleroyale5` runs the latest binary; launch from the repo root so relative asset paths resolve.
+
+## Coding Style & Naming Conventions
+- Match the existing tab-based indentation and brace style (`if (...) {`); prefer descriptive PascalCase for structs and camelCase for members.
+- Keep headers self-contained; include `<...>` before quotes and gate new compile-time constants with `constexpr` when possible.
+- Run `clang-format` with the project defaults if a `.clang-format` appears; otherwise, mimic the current layout to avoid noisy diffs.
+
+## Testing Guidelines
+- No automated test suite yet; smoke test with `./run.sh` and validate gameplay pacing, texture loading counts, and shader output.
+- When adding simulation logic, log anomalies with guarded `std::cout` toggles and document manual test steps in the PR description.
+
+## Commit & Pull Request Guidelines
+- Follow Conventional Commits (`fix:`, `chore:`, `feat:`) as in recent history (`fix: image not loading properly`).
+- For each PR, provide a concise summary, reproduction or validation steps, and attach screenshots/video when UI or rendering changes.
+- Reference related issues or TODOs from `plan.md` and note any shader or asset updates that require a clean rebuild.
+
+## Shader & Asset Notes
+- Re-run the build when touching GLSL files; CMake regenerates `.spv` variants automatically but ensure `glslc` or `glslangValidator` is installed.
+- Keep asset filenames lowercase with underscores to align with current atlas expectations and avoid cross-platform casing bugs.
