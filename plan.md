@@ -488,113 +488,144 @@ struct PerformanceMetrics {
 
 The performance instrumentation provides comprehensive monitoring capabilities essential for measuring optimization effectiveness. All metrics are captured automatically with minimal performance overhead, enabling data-driven optimization decisions.
 
-## 🔄 Dynamic Camera Scaling System - PLAYER COUNT-BASED ZOOM
+## 🎯 Hybrid Count + Spatial Zoom System - NEXT IMPLEMENTATION PRIORITY
 
-**DESIGN GOAL**: Seamless camera scaling that makes circles appear larger as player count decreases, with physics remaining unchanged.
+**DESIGN GOAL**: Intelligent camera system that combines player count with spatial distribution while maintaining stable, centered zoom that prevents circle clipping.
 
-### 🎯 Core Concept: Player Count-Driven Camera Zoom
+### 🧠 Core Concept: Smart Zoom with Spatial Awareness
 
 **Visual Effect**:
-- **50,000 players**: Camera zoomed out → circles appear small but all visible
-- **Decreasing count**: Camera gradually zooms in → circles appear progressively larger
-- **Final players**: Camera zoomed in → circles appear large and dramatic
-- **Seamless transition**: Viewers perceive circles as "growing" naturally
+- **Camera always centers on action**: Zoom focuses on centroid of remaining circles
+- **Spatial-aware scaling**: Considers both player count AND how spread out they are
+- **No circle clipping**: Zoom adjusts to keep all circles visible
+- **Smooth, stable movement**: Interpolated camera prevents jarring jumps
 
-### 🎮 Implementation Approach: Viewport Scaling with Constraints
+### 🏗️ Technical Implementation Strategy
 
-**Camera Zoom Factor Calculation**:
+**Step 1: Camera Centering System**
 ```cpp
-// Zoom boundaries
-static constexpr float MIN_ZOOM_FACTOR = 0.5f;  // Max zoom out (50k players)
-static constexpr float MAX_ZOOM_FACTOR = 3.0f;  // Max zoom in (final players)
-static constexpr uint32_t MAX_PLAYERS_FOR_MIN_ZOOM = 50000;
-static constexpr uint32_t MIN_PLAYERS_FOR_MAX_ZOOM = 1;
+// Calculate centroid of alive circles
+vec2 calculateCentroid() {
+    vec2 sum = {0, 0};
+    uint32_t count = 0;
+    for (auto& circle : circles) {
+        if (alive[i]) {
+            sum += circle.position;
+            count++;
+        }
+    }
+    return count > 0 ? sum / count : vec2{worldWidth/2, worldHeight/2};
+}
 
-float zoomFactor = calculateZoomFromPlayerCount(aliveCount);
-vec2 effectiveViewport = realViewport / zoomFactor;
+// Smooth camera interpolation
+vec2 targetCameraCenter = calculateCentroid();
+cameraCenter = lerp(cameraCenter, targetCameraCenter, CAMERA_SMOOTH_FACTOR);
 ```
 
-**Zoom Calculation Logic**:
-- **High player count** (≥50k): Minimum zoom factor (0.5x) → maximum world area visible
-- **Low player count** (≤1): Maximum zoom factor (3.0x) → minimum world area visible
-- **Between counts**: Smooth interpolation for seamless scaling experience
-- **Bounded range**: Min/max constraints prevent extreme zoom levels
-
-### 🏗️ Technical Implementation
-
-**Vertex Shader Modification**:
-- Replace `pc.viewport` with `pc.effectiveViewport` in world-to-NDC conversion
-- Physics world space remains unchanged at fixed 800x600 dimensions
-- Collision walls stay at original `worldWidth/worldHeight` boundaries
-
-**Push Constants Update**:
+**Step 2: Spatial Distribution Analysis**
 ```cpp
+// Calculate circle spread (standard deviation from centroid)
+float calculateCircleSpread(vec2 centroid) {
+    float sumDistanceSquared = 0.0f;
+    uint32_t count = 0;
+    for (auto& circle : circles) {
+        if (alive[i]) {
+            float dist = distance(circle.position, centroid);
+            sumDistanceSquared += dist * dist;
+            count++;
+        }
+    }
+    return count > 0 ? sqrt(sumDistanceSquared / count) : 0.0f;
+}
+```
+
+**Step 3: Hybrid Zoom Factor Calculation**
+```cpp
+float calculateHybridZoomFactor(uint32_t aliveCount, float currentSpread) {
+    // Base zoom from player count (existing system)
+    float baseZoom = calculateZoomFromPlayerCount(aliveCount);
+
+    // Spatial adjustment factor
+    static float maxObservedSpread = 200.0f; // Track maximum spread seen
+    maxObservedSpread = std::max(maxObservedSpread, currentSpread);
+
+    float spreadRatio = maxObservedSpread / std::max(currentSpread, 1.0f);
+    float spatialFactor = std::clamp(spreadRatio, 0.5f, 2.0f);
+
+    // Combine factors
+    return baseZoom * spatialFactor;
+}
+```
+
+**Step 4: Updated Shader Integration**
+```cpp
+// Push constants with camera offset
 struct PushConstants {
-    vec2 effectiveViewport;  // Scaled viewport for zoom effect
-    // Physics uses original worldWidth/worldHeight unchanged
+    vec2 effectiveViewport;  // Scaled viewport
+    vec2 cameraOffset;       // Camera center position
 };
+
+// Vertex shader transformation
+void main() {
+    vec2 world = inCenter + inPos * inRadius;
+    vec2 centered = world - pc.cameraOffset;  // Apply camera centering
+    vec2 ndc = (centered / pc.effectiveViewport) * 2.0 - 1.0;
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
 ```
 
-**Collision System**:
-- **Wall boundaries must scale** - collision walls need to match visible viewport area
-- **Effective world boundaries**: `effectiveWorldWidth/Height = worldWidth/Height / zoomFactor`
-- Circle physics continues at 40px radius with existing collision detection
-- Spatial grid dimensions scale with effective world size for consistency
+### ✨ Key Advantages Over Current System
 
-### ✨ Key Advantages
+**Spatial Intelligence**:
+- **Clustered battles**: Zooms in when circles are grouped together
+- **Scattered battles**: Zooms out to keep all circles visible
+- **Dynamic adaptation**: Responds to both count AND distribution changes
 
-**Visual Benefits**:
-- Circles appear to "grow" as battle progresses toward finale
-- Smooth, cinematic zoom effect enhances drama
-- No jarring scale jumps - continuous interpolation
+**Centering Benefits**:
+- **No corner zoom**: Always centers on the action, not top-left corner
+- **No circle clipping**: Intelligent zoom prevents circles from disappearing
+- **Stable viewing**: Smooth interpolation prevents camera oscillation
 
-**Technical Benefits**:
-- **Consistent collision boundaries** - walls match visible screen edges
-- **O(1) performance** - single calculation per frame for zoom factor
-- **Proper viewport-collision alignment** - no invisible wall bouncing
-- **Industry standard approach** - camera scaling with matched collision boundaries
+**Performance Benefits**:
+- **O(n) centroid calculation**: Single pass through alive circles
+- **Cached spread calculation**: Only recalculated when needed
+- **Minimal overhead**: Spatial analysis adds negligible cost
 
-**Constraint Benefits**:
-- **Minimum zoom** prevents over-zooming with massive player counts
-- **Maximum zoom** prevents excessive close-up with few players
-- **Bounded experience** ensures consistent visual quality range
+### 🎯 Implementation Phases
 
-### 🎯 Implementation Priority
+**Phase 1: Camera Centering (Primary Fix)**
+1. Add centroid calculation for alive circles
+2. Implement smooth camera position interpolation
+3. Update push constants to include camera offset
+4. Modify vertex shader for centered transformation
+5. Test centering behavior with various circle distributions
 
-**IMPLEMENTATION STEPS**:
-1. Add zoom factor calculation based on `sim.aliveCount()`
-2. Calculate effective world boundaries: `effectiveWorld = worldSize / zoomFactor`
-3. Update wall collision detection to use effective boundaries instead of fixed world size
-4. Update spatial grid dimensions to match effective world size
-5. Modify push constants to send `effectiveViewport` instead of `viewport`
-6. Update vertex shader to use effective viewport for world-to-NDC conversion
-7. Add min/max zoom factor constants for bounded scaling
-8. Test smooth scaling behavior with proper wall collision alignment
+**Phase 2: Spatial Distribution Integration**
+1. Add circle spread calculation (standard deviation)
+2. Implement hybrid zoom factor combining count + spread
+3. Add max spread tracking for relative scaling
+4. Test with clustered vs scattered scenarios
 
-**Expected Outcome**: Seamless camera zoom where circles appear to grow as the battle progresses, with collision walls properly aligned to visible screen edges, maintaining consistent 40px circle physics.
+**Phase 3: Collision Boundary Adaptation**
+1. Update effective world bounds to account for camera offset
+2. Ensure wall collisions respect camera-centered boundaries
+3. Validate collision walls stay aligned with visible edges
 
-### 📋 Stage 2 Implementation Notes
+**Phase 4: Validation & Polish**
+1. Test edge cases (single circle, scattered circles, clustered finale)
+2. Performance profiling to ensure O(n) overhead
+3. Smooth interpolation tuning to prevent oscillation
 
-**Integration with Spatial System**:
-- Use `SpatialBounds` APIs from Stage 1 for camera-spatial coordination
-- Call `spatialManager.updateWorldBounds(effectiveWorld)` when zoom changes
-- Leverage existing spatial grid resizing for performance consistency
+### 📋 Technical Integration Notes
 
-**Performance Considerations**:
-- Zoom factor calculation is O(1) - single interpolation per frame
-- Spatial grid resize only occurs when zoom thresholds crossed (not every frame)
-- Use existing performance instrumentation to monitor zoom impact on FPS
+**Constants to Add**:
+```cpp
+static constexpr float CAMERA_SMOOTH_FACTOR = 0.1f;  // Camera interpolation speed
+static constexpr float MIN_SPATIAL_FACTOR = 0.5f;    // Min spatial zoom adjustment
+static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustment
+```
 
-**Testing Strategy**:
-- Validate collision walls stay aligned with visible screen edges
-- Test smooth interpolation across full player count range (1-50k)
-- Verify spatial grid efficiency maintained across all zoom levels
-- Ensure no physics drift or collision anomalies during zoom transitions
-
-**Future Integration Points**:
-- Camera state will feed into Stage 3 GPU culling for viewport frustum
-- Zoom factor affects Stage 2 health bar positioning and scaling
-- Winner sequence camera focus builds on this zoom foundation
+**Expected Outcome**: Intelligent camera system that centers on action, prevents circle clipping, and adapts zoom based on both player count and spatial distribution, providing a superior viewing experience.
 
   ---
 
@@ -616,24 +647,33 @@ struct PushConstants {
   - [x] SIMD vectorization verification with 4x theoretical speedup measurement
   - [x] Cache efficiency profiling with L1/L2/L3 hit rate monitoring
 
-### Stage 2 – Camera & Presentation ✅ DYNAMIC CAMERA SCALING COMPLETE
+### Stage 2 – Intelligent Camera System ✅ CURRENT IMPLEMENTATION NEEDS UPGRADE
+- [ ] **🎯 PRIORITY: Hybrid Count + Spatial Zoom System (Rating: 10/10)**
+  - [ ] **Camera Centering**: Calculate centroid of alive circles each frame for dynamic camera center
+  - [ ] **Spatial Distribution Tracking**: Calculate circle spread (standard deviation from centroid)
+  - [ ] **Hybrid Zoom Factor**: Combine player count with spatial distribution
+    - Base zoom factor from current player count system
+    - Adjust with spread factor: `finalZoom = baseZoom * clamp(maxSpread/currentSpread, 0.5, 2.0)`
+  - [ ] **Camera Offset System**: Modify push constants to include camera position offset
+  - [ ] **Shader Integration**: Update `shaders/circle.vert` to use `((world - cameraOffset) / viewport) * 2.0 - 1.0`
+  - [ ] **Smooth Interpolation**: Add camera position interpolation toward centroid to prevent oscillation
+  - [ ] **Collision Boundary Tracking**: Ensure collision walls match visible viewport area with camera offset
+  - [ ] **Validation Testing**: Test with scattered vs clustered circle distributions
 - [ ] **Health Bar Rendering**
   - [ ] Add visual health bars above or below each circle
   - [ ] Implement a second instanced rendering pass dedicated to the health overlay
   - [ ] Color-code the bars so they transition green → yellow → red as health drops
-- [x] **Dynamic Camera Scaling** ✅ IMPLEMENTATION COMPLETE
-  - [x] Define `CameraState` covering min/max zoom, smoothing, and winner focus behavior
-  - [x] Add zoom factor calculation: `zoomFactor = calculateZoomFromPlayerCount(aliveCount)`
-  - [x] Add min/max zoom constants (MIN_ZOOM_FACTOR = 0.5f, MAX_ZOOM_FACTOR = 3.0f)
-  - [x] Calculate effective world bounds: `effectiveWorld = worldSize / zoomFactor`
-  - [x] Update wall collision detection to respect effective bounds instead of fixed world size
-  - [x] Update spatial grid dimensions to track the effective world size
-  - [x] Modify push constants to send `effectiveViewport`
-  - [x] Update the vertex shader to consume `effectiveViewport` for world-to-NDC conversion
-  - [x] Validate smooth zoom behavior across the 0.5×–3.0× range with collision alignment tests
+- [x] **Basic Dynamic Camera Scaling** ✅ BASELINE IMPLEMENTATION COMPLETE
+  - [x] Player count-based zoom factor calculation
+  - [x] Min/max zoom constants (0.5×–3.0× range)
+  - [x] Effective world bounds calculation
+  - [x] Wall collision detection with effective bounds
+  - [x] Push constants with effective viewport
+  - [x] Vertex shader viewport scaling
+  - ⚠️ **ISSUES IDENTIFIED**: Top-left corner centering, circle clipping, pure count-based scaling
 - [ ] **Winner Sequence Polish**
   - [ ] Layer in optional celebratory VFX (confetti, particles, post effects)
-  - [ ] Revisit camera polish or transitions once the zoom work ships
+  - [ ] Camera focus transitions for winner reveal
 
 ### Stage 3 – Performance & GPU-Driven Rendering (start once Stage 2 stabilizes)
 - [ ] **P0: CPU Frame-Stability Hotfixes**
