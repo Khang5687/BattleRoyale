@@ -385,52 +385,90 @@ struct Simulation {
 		imageTier.resize(targetCount);
 		names.resize(targetCount);
 
-		// Calculate initial zoom factor to determine effective world size
-		float initialZoom = calculateZoomFromPlayerCount(targetCount);
-		float effectiveWidth = worldWidth / initialZoom;
-		float effectiveHeight = worldHeight / initialZoom;
+		// Calculate effective world bounds FIRST, before positioning
+		// During initialization, use targetCount instead of aliveCount() since alive[] isn't set yet
+		currentZoomFactor = calculateZoomFromPlayerCount(targetCount);
+		effectiveWorldWidth = worldWidth / currentZoomFactor;
+		effectiveWorldHeight = worldHeight / currentZoomFactor;
+		// Debug: std::cout << "Initial zoom for " << targetCount << " players: " << currentZoomFactor
+		//           << ", effective world: " << effectiveWorldWidth << "x" << effectiveWorldHeight << std::endl;
 
-		// Grid-based positioning to prevent overlaps
-		float minSpacing = fixedRadius * 2.2f; // 10% extra space between circles
-		float margin = fixedRadius + 10.0f; // Margin from effective world edges
+		// Performance-first random positioning with spatial hash grid
+		float margin = fixedRadius; // Margin from screen edges
+		float minDistance = fixedRadius * 2.1f; // Minimum distance between circle centers
+		float minDistanceSquared = minDistance * minDistance;
 
-		// Calculate optimal grid dimensions within effective world
-		float availableWidth = effectiveWidth - 2 * margin;
-		float availableHeight = effectiveHeight - 2 * margin;
+		// Create spatial hash grid for fast collision detection
+		float cellSize = minDistance; // Each cell is one minimum distance
+		int gridWidth = static_cast<int>((effectiveWorldWidth + cellSize - 1) / cellSize);
+		int gridHeight = static_cast<int>((effectiveWorldHeight + cellSize - 1) / cellSize);
+		std::vector<std::vector<uint32_t>> spatialGrid(gridWidth * gridHeight);
 
-		// Determine grid size that can fit all circles
-		uint32_t gridCols = std::max(1u, static_cast<uint32_t>(std::sqrt(targetCount * availableWidth / availableHeight)));
-		uint32_t gridRows = std::max(1u, (targetCount + gridCols - 1) / gridCols);
+		// Helper function to get grid cell index
+		auto getGridIndex = [&](float x, float y) -> int {
+			int cellX = std::clamp(static_cast<int>(x / cellSize), 0, gridWidth - 1);
+			int cellY = std::clamp(static_cast<int>(y / cellSize), 0, gridHeight - 1);
+			return cellY * gridWidth + cellX;
+		};
 
-		// Adjust grid spacing to fit within available space
-		float gridSpacingX = availableWidth / std::max(1u, gridCols - 1);
-		float gridSpacingY = availableHeight / std::max(1u, gridRows - 1);
+		// Helper function to check if position overlaps with existing circles
+		auto hasOverlap = [&](float x, float y, uint32_t excludeIndex) -> bool {
+			int cellX = static_cast<int>(x / cellSize);
+			int cellY = static_cast<int>(y / cellSize);
 
-		// If spacing is too tight, reduce it but ensure minimum spacing
-		if (gridSpacingX < minSpacing) gridSpacingX = minSpacing;
-		if (gridSpacingY < minSpacing) gridSpacingY = minSpacing;
+			// Check 3x3 neighborhood of cells
+			for (int dy = -1; dy <= 1; ++dy) {
+				for (int dx = -1; dx <= 1; ++dx) {
+					int checkX = cellX + dx;
+					int checkY = cellY + dy;
+					if (checkX >= 0 && checkX < gridWidth && checkY >= 0 && checkY < gridHeight) {
+						int cellIndex = checkY * gridWidth + checkX;
+						for (uint32_t otherIndex : spatialGrid[cellIndex]) {
+							if (otherIndex != excludeIndex) {
+								float dx = x - posX[otherIndex];
+								float dy = y - posY[otherIndex];
+								if (dx * dx + dy * dy < minDistanceSquared) {
+									return true;
+								}
+							}
+						}
+					}
+				}
+			}
+			return false;
+		};
 
+		// Random distributions for positioning
+		std::uniform_real_distribution<float> distX(margin, effectiveWorldWidth - margin);
+		std::uniform_real_distribution<float> distY(margin, effectiveWorldHeight - margin);
 		std::uniform_real_distribution<float> distAngle(0.0f, 2.0f * 3.14159f);
-		std::uniform_real_distribution<float> jitter(-minSpacing * 0.2f, minSpacing * 0.2f);
 
+		// Place circles with rejection sampling
+		const int maxAttempts = 50; // Limit attempts to prevent infinite loops
 		for (uint32_t i = 0; i < targetCount; ++i) {
-			// Calculate grid position
-			uint32_t gridX = i % gridCols;
-			uint32_t gridY = i / gridCols;
+			bool placed = false;
+			for (int attempt = 0; attempt < maxAttempts && !placed; ++attempt) {
+				float candidateX = distX(rng);
+				float candidateY = distY(rng);
 
-			// Calculate position within effective world, then center it in actual world
-			float effectiveX = margin + gridX * gridSpacingX;
-			float effectiveY = margin + gridY * gridSpacingY;
+				if (!hasOverlap(candidateX, candidateY, i)) {
+					posX[i] = candidateX;
+					posY[i] = candidateY;
 
-			// Center the effective world within the actual world
-			float offsetX = (worldWidth - effectiveWidth) / 2.0f;
-			float offsetY = (worldHeight - effectiveHeight) / 2.0f;
+					// Add to spatial grid
+					int cellIndex = getGridIndex(candidateX, candidateY);
+					spatialGrid[cellIndex].push_back(i);
+					placed = true;
+				}
+			}
 
-			// Add small random jitter and position in actual world coordinates
-			posX[i] = std::clamp(offsetX + effectiveX + jitter(rng),
-			                    offsetX + margin, offsetX + effectiveWidth - margin);
-			posY[i] = std::clamp(offsetY + effectiveY + jitter(rng),
-			                    offsetY + margin, offsetY + effectiveHeight - margin);
+			// Fallback: if we couldn't place after max attempts, place anyway
+			if (!placed) {
+				posX[i] = distX(rng);
+				posY[i] = distY(rng);
+				int cellIndex = getGridIndex(posX[i], posY[i]);
+				spatialGrid[cellIndex].push_back(i);
+			}
 			// Set velocity with constant speed and random direction
 			float angle = distAngle(rng);
 			velX[i] = std::cos(angle) * constantSpeed;
@@ -456,27 +494,29 @@ struct Simulation {
 	}
 
 	float calculateZoomFromPlayerCount(uint32_t count) const {
-		// For very few players, use max zoom
+		// For very few players, use max zoom (zoom in)
 		if (count <= MIN_PLAYERS_FOR_MAX_ZOOM) {
 			return MAX_ZOOM_FACTOR;
 		}
 
-		// Calculate dynamic minimum zoom based on circle distribution
-		float minZoom = calculateMinZoomForCount(count);
+		// Calculate dynamic minimum zoom needed to fit all circles
+		float minZoomNeeded = calculateMinZoomForCount(count);
 
-		// For initial count, use the calculated minimum zoom
+		// For many players, use minimum zoom (zoom out to fit everyone)
 		if (count >= maxPlayers * 0.9f) { // 90% or more of max players
-			return minZoom;
+			// Debug: if (count == 500) std::cout << "Using minZoomNeeded: " << minZoomNeeded << std::endl;
+			return minZoomNeeded;
 		}
 
-		// Smooth interpolation between min and max zoom
+		// Smooth interpolation between min zoom (many players) and max zoom (few players)
 		float normalizedCount = static_cast<float>(count - MIN_PLAYERS_FOR_MAX_ZOOM) /
-		                       static_cast<float>(maxPlayers - MIN_PLAYERS_FOR_MAX_ZOOM);
+		                       static_cast<float>(maxPlayers * 0.9f - MIN_PLAYERS_FOR_MAX_ZOOM);
 
 		// Use logarithmic scaling for more dramatic zoom during finale
 		float logNormalized = std::log(normalizedCount * (std::exp(1.0f) - 1.0f) + 1.0f);
 
-		return minZoom + (MAX_ZOOM_FACTOR - minZoom) * (1.0f - logNormalized);
+		// Interpolate from minZoom (many players) to maxZoom (few players)
+		return minZoomNeeded + (MAX_ZOOM_FACTOR - minZoomNeeded) * (1.0f - logNormalized);
 	}
 
 	float calculateMinZoomForCount(uint32_t count) const {
@@ -499,11 +539,21 @@ struct Simulation {
 		// Use the smaller zoom to ensure everything fits
 		float minZoomNeeded = std::min(zoomForWidth, zoomForHeight);
 
+		// Debug: if (count == 500) {
+		//     std::cout << "Debug: count=" << count << ", grid=" << gridCols << "x" << gridRows
+		//               << ", required=" << requiredWidth << "x" << requiredHeight
+		//               << ", minZoom=" << minZoomNeeded << std::endl;
+		// }
+
 		// Also ensure circles don't become too small
 		float minZoomForVisibility = MIN_VISIBLE_RADIUS / fixedRadius;
 
 		// Return the larger of the two constraints
-		return std::max(minZoomNeeded, minZoomForVisibility);
+		float result = std::max(minZoomNeeded, minZoomForVisibility);
+		// Debug: if (count == 500) {
+		//     std::cout << "MinZoom calc: needed=" << minZoomNeeded << ", visibility=" << minZoomForVisibility << ", result=" << result << std::endl;
+		// }
+		return result;
 	}
 
 	void updateEffectiveWorldBounds() {
