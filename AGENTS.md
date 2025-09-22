@@ -29,3 +29,12 @@
 ## Shader & Asset Notes
 - Re-run the build when touching GLSL files; CMake regenerates `.spv` variants automatically but ensure `glslc` or `glslangValidator` is installed.
 - Keep asset filenames lowercase with underscores to align with current atlas expectations and avoid cross-platform casing bugs.
+
+## Plan Management & Implementation Tracking
+- When implementing features from `plan.md`, ALWAYS update the plan with implementation status and technical notes.
+- Mark completed items with ✅ and add implementation details that will help future development.
+- Add technical implementation notes, file locations, and integration points for completed features.
+- Update status indicators (✅ COMPLETED, 🔧 NEEDS WORK, ❌ REMOVED) to reflect current state.
+- Include performance measurements, architectural decisions, and lessons learned in the plan documentation.
+- Cross-reference implemented code with plan sections using file:line notation (e.g., `main.cpp:619-1009`).
+- Document constants, thresholds, and configuration parameters added during implementation.
