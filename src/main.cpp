@@ -276,7 +276,7 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 10;
+	uint32_t maxPlayers = 50000;
 
 	// Stage 2 – dynamic circle scaling parameters
 	static constexpr float MIN_CIRCLE_RADIUS = 2.0f;
@@ -683,6 +683,15 @@ struct Simulation {
 	// TODO: Placeholder for new camera calculation functions
 
 	void updateSpeedIncrease() {
+		uint32_t alivePlayers = aliveCount();
+		if (alivePlayers > 2) {
+			if (currentSpeedBoost != 1.0f) {
+				currentSpeedBoost = 1.0f;
+			}
+			nextSpeedIncreaseTime = simulationTime + SPEED_INCREASE_TIMEOUT;
+			return;
+		}
+
 		// Check if enough time has passed since last collision to trigger speed increases
 		float timeSinceLastCollision = simulationTime - lastCircleCollisionTime;
 
