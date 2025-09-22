@@ -625,6 +625,8 @@ struct Simulation {
 
 		for (size_t i = 0; i < posX.size(); ++i) {
 			if (!alive[i]) continue;
+			// Skip health bar for winner during victory announcement
+			if (inVictory && static_cast<int>(i) == winnerIndex) continue;
 			float circleRadius = radius[i];
 			float apparentRadius = circleRadius * zoomFactor;
 			CircleRenderTier tier = classifyRenderTier(apparentRadius);
