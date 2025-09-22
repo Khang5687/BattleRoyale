@@ -320,8 +320,8 @@ struct Simulation {
 
 
 	// Speed increase system constants
-	static constexpr float SPEED_INCREASE_TIMEOUT = 1.0f;    // Seconds before speed increases start
-	static constexpr float SPEED_INCREASE_MULTIPLIER = 1.05f; // 5% increase per application
+	static constexpr float SPEED_INCREASE_TIMEOUT = 1.5f;    // Seconds before speed increases start
+	static constexpr float SPEED_INCREASE_MULTIPLIER = 1.2f; // 5% increase per application
 	static constexpr float SPEED_INCREASE_INTERVAL = 0.5f;   // Seconds between speed applications
 	static constexpr float MAX_SPEED_MULTIPLIER = 3.0f;      // Maximum total speed multiplier
 
@@ -750,9 +750,8 @@ struct Simulation {
 								float rr = radius[i] + radius[j];
 								float dist2 = dx*dx + dy*dy;
 								if (dist2 < rr*rr) {
-									// Circle-to-circle collision detected - reset speed increase timer
+									// Circle-to-circle collision detected - reset timer but keep current boost level
 									lastCircleCollisionTime = simulationTime;
-									currentSpeedBoost = 1.0f; // Stop speed increases (don't revert)
 									nextSpeedIncreaseTime = simulationTime + SPEED_INCREASE_TIMEOUT;
 
 									float dist = std::sqrt(std::max(dist2, 1e-6f));
