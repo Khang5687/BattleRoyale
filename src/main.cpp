@@ -3396,7 +3396,7 @@ int main() {
 
 		// Update adaptive simulation architecture with current zoom
 		adaptiveSim.setFrameTime(metrics.rollingAverage);
-		// TODO: adaptiveSim.updateSimulationTiers will use new camera system
+		adaptiveSim.updateSimulationTiers(sim, 1.0f); // Fixed zoom factor for now
 
 		// Only update simulation physics if not paused
 		if (!isPaused) {
@@ -3407,8 +3407,8 @@ int main() {
 			adaptiveSim.processClusterCollisions(dt, sim);
 		}
 
-		// Use LOD-based rendering system
-		// TODO: sim.writeInstancesWithLOD will use new camera system
+		// Use LOD-based rendering system with fixed zoom factor
+		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, 1.0f); // Fixed zoom factor
 
 		// Print status updates periodically
 		frameCount++;
