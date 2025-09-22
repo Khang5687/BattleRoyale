@@ -294,16 +294,20 @@ struct Simulation {
 	static constexpr float BASIC_TEXTURE_THRESHOLD = 12.0f;
 	static constexpr float TEXTURE_LOAD_THRESHOLD = 4.0f;
 	static constexpr float DETAIL_THRESHOLD = 12.0f;
-	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 2.0f;
-	static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 1.6f;
-	static constexpr float HEALTH_BAR_HEIGHT_MULTIPLIER = 0.2f;
+	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 1.0f;
+	static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 0.6f; // Reduced from 1.6f
+	static constexpr float HEALTH_BAR_HEIGHT_MULTIPLIER = 0.1f; // Reduced from 0.2f
 	static constexpr float HEALTH_BAR_OFFSET_MULTIPLIER = 1.3f;
 	static constexpr float HEALTH_BAR_MIN_HEIGHT = 1.0f;
+	static constexpr float HEALTH_BAR_MIN_WIDTH = 0.25f;
+	static constexpr float HEALTH_BAR_SIMPLE_SHAPE_WIDTH_SCALE = 0.75f;
+	static constexpr float HEALTH_BAR_BASIC_TEXTURE_WIDTH_SCALE = 1.875f;
+	static constexpr float HEALTH_BAR_FULL_DETAIL_WIDTH_SCALE = 2.5f;
 
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
-	float damageMultiplier = 0.0001f;
-	float minDamage = 0.005f;
+	float damageMultiplier = 0.0002f; // Increased for more visible damage
+	float minDamage = 0.004f; // Increased minimum damage for better visibility
 	float gridCellSize = GRID_CELL_MIN;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
 	float constantSpeed = 240.0f * speedMultiplier; // Fixed speed magnitude for all circles
@@ -644,19 +648,21 @@ struct Simulation {
 			switch (tier) {
 				case CircleRenderTier::SIMPLE_SHAPE:
 					height = HEALTH_BAR_MIN_HEIGHT;
-					width = std::max(circleRadius * 1.2f, 6.0f);
+					width *= HEALTH_BAR_SIMPLE_SHAPE_WIDTH_SCALE;
 					break;
 				case CircleRenderTier::BASIC_TEXTURE:
 					height = std::max(circleRadius * (HEALTH_BAR_HEIGHT_MULTIPLIER * 0.75f), HEALTH_BAR_MIN_HEIGHT + 1.0f);
-					width = std::max(circleRadius * HEALTH_BAR_WIDTH_MULTIPLIER, circleRadius * 3.0f);
+					width *= HEALTH_BAR_BASIC_TEXTURE_WIDTH_SCALE;
 					break;
 				case CircleRenderTier::FULL_DETAIL:
 					height = std::max(circleRadius * (HEALTH_BAR_HEIGHT_MULTIPLIER * 1.1f), HEALTH_BAR_MIN_HEIGHT + 2.0f);
-					width = std::max(circleRadius * (HEALTH_BAR_WIDTH_MULTIPLIER + 0.2f), circleRadius * 4.0f);
+					width *= HEALTH_BAR_FULL_DETAIL_WIDTH_SCALE;
 					break;
 				case CircleRenderTier::PIXEL_DUST:
 					break; // already handled
 			}
+
+			width = std::max(width, HEALTH_BAR_MIN_WIDTH);
 
 			inst.center[0] = posX[i];
 			inst.center[1] = posY[i] + circleRadius * offsetMultiplier;
@@ -769,9 +775,12 @@ struct Simulation {
 									// Normalize velocities to maintain constant speed instead of damping
 									normalizeVelocity(i);
 									normalizeVelocity(j);
-									// Damage based on impulse magnitude
-									float impulse = std::abs(dvI) + std::abs(dvJ);
-									float baseDamage = std::max(minDamage, impulse * damageMultiplier * 0.001f);
+									// Improved damage calculation using both impact and penetration
+									float impactDamage = std::abs(dvI) + std::abs(dvJ); // Velocity impact component
+									float penetrationDamage = penetration * 0.01f; // Overlap-based damage for consistency
+									float relativeDamage = std::abs(vi - vj) * 0.02f; // Relative velocity component
+									float totalImpact = impactDamage + penetrationDamage + relativeDamage;
+									float baseDamage = std::max(minDamage, totalImpact * damageMultiplier);
 									
 									// Apply population-based damage scaling - less damage as fewer players remain
 									uint32_t currentAlive = aliveCount();
@@ -784,21 +793,32 @@ struct Simulation {
 
 									// Apply bias damage reduction if bias is active (enough players)
 									if (currentAlive >= BIAS_ACTIVE_THRESHOLD) {
-										// Apply bias reduction for player i
+										// Apply bias reduction for player i (capped at 80% reduction to ensure damage)
 										auto itI = biasReductions.find(names[i]);
 										if (itI != biasReductions.end()) {
-											finalDamageI = scaledBaseDamage * (1.0f - itI->second);
+											float clampedReduction = std::min(itI->second, 0.8f); // Max 80% reduction
+											finalDamageI = scaledBaseDamage * (1.0f - clampedReduction);
 										}
 
-										// Apply bias reduction for player j
+										// Apply bias reduction for player j (capped at 80% reduction to ensure damage)
 										auto itJ = biasReductions.find(names[j]);
 										if (itJ != biasReductions.end()) {
-											finalDamageJ = scaledBaseDamage * (1.0f - itJ->second);
+											float clampedReduction = std::min(itJ->second, 0.8f); // Max 80% reduction
+											finalDamageJ = scaledBaseDamage * (1.0f - clampedReduction);
 										}
 									}
 									
-									health[i] -= finalDamageI; 
+									health[i] -= finalDamageI;
 									health[j] -= finalDamageJ;
+
+									// Debug logging for collision damage (uncomment for debugging)
+									// static uint32_t debugCollisionCount = 0;
+									// if (++debugCollisionCount % 60 == 0) { // Log every 60th collision to avoid spam
+									//     std::cout << "Collision " << debugCollisionCount << ": Player " << i << " took "
+									//              << finalDamageI << " damage (health: " << health[i] << "), Player " << j
+									//              << " took " << finalDamageJ << " damage (health: " << health[j] << ")" << std::endl;
+									// }
+
 									if (health[i] <= 0.0f) { alive[i] = 0; }
 									if (health[j] <= 0.0f) { alive[j] = 0; }
 								}
