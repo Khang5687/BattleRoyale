@@ -661,36 +661,12 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   - ✅ **Frame-Rate Independent Scaling** — interpolation scales with `deltaTime` via `RADIUS_TRANSITION_SPEED * dt` (`src/main.cpp:565`).
   - ✅ **Collision Boundary Updates** — `updateGridForRadius` retunes the spatial hash grid during init and finale to respect the new radius (`src/main.cpp:388`, `src/main.cpp:544`, `src/main.cpp:752`).
 
-- [ ] **🎯 Performance Optimization for Massive Entity Counts**
-  - [ ] **Integrated LOD System: Circles + Health Bars**
-    ```cpp
-    enum CircleRenderTier {
-        PIXEL_DUST,      // < 1px: Single colored pixel, no health bar
-        SIMPLE_SHAPE,    // 1-4px: Flat colored circle + simple health line
-        BASIC_TEXTURE,   // 4-12px: Low-res texture + basic health bar
-        FULL_DETAIL      // > 12px: High-quality avatar + detailed health bar
-    };
-
-    struct HealthBarSpecs {
-        bool visible;           // Whether to render health bar
-        float widthMultiplier;  // Width = radius * multiplier
-        float heightMultiplier; // Height = radius * multiplier
-        float offsetMultiplier; // Y-offset = radius * multiplier
-        HealthBarStyle style;   // NONE, LINE, BASIC, DETAILED
-    };
-    ```
-  - [ ] **Health Bar Integration Per Tier**:
-    - **Tier 0 (< 1px)**: Circle = single pixel, Health Bar = not rendered
-    - **Tier 1 (1-4px)**: Circle = flat color, Health Bar = 1px line (starts at 2px radius)
-    - **Tier 2 (4-12px)**: Circle = placeholder texture, Health Bar = simple rectangle with health fill
-    - **Tier 3 (12px+)**: Circle = full avatar, Health Bar = detailed bar with border and gradient
-  - [ ] **Instanced Rendering Optimization**: Batch circles and health bars by tier for efficient GPU usage
-  - [ ] **Lazy Image Loading Thresholds**:
-    - Tier 0 (< 1px): No image loading, flat color only
-    - Tier 1 (1-4px): 16x16 placeholder texture
-    - Tier 2 (4-12px): 64x64 compressed texture
-    - Tier 3 (12px+): Full 256x256 atlas texture
-  - [ ] **GPU Culling Integration**: Use existing spatial system for off-screen culling
+- [x] **🎯 Performance Optimization for Massive Entity Counts**
+  - [x] **Integrated LOD System: Circles + Health Bars** — runtime tiering derives from `Simulation::classifyRenderTier` and updated LOD writers (`src/main.cpp:534`, `src/main.cpp:1652`).
+  - [x] **Health Bar Integration Per Tier** — `Simulation::buildHealthBarInstances` promotes tier-aware bar geometry while the new health-bar pipeline handles rendering (`src/main.cpp:619`, `src/main.cpp:2087`, `src/main.cpp:3966`).
+  - [x] **Instanced Rendering Optimization** — dedicated buffers and draw calls batch circle and health-bar quads per frame (`src/main.cpp:3937`, `src/main.cpp:3966`).
+  - [x] **Lazy Image Loading Thresholds** — radius-based tier downgrades now gate texture promotion (`src/main.cpp:854`).
+  - [ ] **GPU Culling Integration** — reuse the spatial system for off-screen rejection (pending follow-up once cluster culling hooks land).
 
 - [ ] **🎯 O(1) Complexity Implementation**
   - [ ] **Batch Radius Updates**: Single formula calculates target radius for all circles
@@ -704,11 +680,11 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
         targetRadius[i] = globalTargetRadius;
     }
     ```
-  - [ ] **Threshold-Based Decisions**: Use simple comparisons, not searches
-  - [ ] **Spatial Grid Efficiency**: Leverage existing O(n) spatial partitioning
+  - [x] **Threshold-Based Decisions**: Use simple comparisons, not searches
+  - [x] **Spatial Grid Efficiency**: Leverage existing O(n) spatial partitioning
   - [ ] **Memory Layout Optimization**: SIMD-friendly radius updates in structure-of-arrays
 
-- [ ] **🎯 Constants and Tuning Parameters**
+- [x] **🎯 Constants and Tuning Parameters**
   ```cpp
   // Circle Size Constants
   static constexpr float MIN_CIRCLE_RADIUS = 2.0f;      // Minimum visible size

@@ -68,6 +68,8 @@ include CMakeFiles/battleroyale5_shaders.dir/progress.make
 
 CMakeFiles/battleroyale5_shaders: shaders/circle.vert.spv
 CMakeFiles/battleroyale5_shaders: shaders/circle.frag.spv
+CMakeFiles/battleroyale5_shaders: shaders/health_bar.vert.spv
+CMakeFiles/battleroyale5_shaders: shaders/health_bar.frag.spv
 CMakeFiles/battleroyale5_shaders: shaders/text.vert.spv
 CMakeFiles/battleroyale5_shaders: shaders/text.frag.spv
 
@@ -81,13 +83,23 @@ shaders/circle.vert.spv: /Users/khangnguyen/working/projects/battleroyale/battle
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=vert /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/circle.vert -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/circle.vert.spv
 
+shaders/health_bar.frag.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/health_bar.frag
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Generating shaders/health_bar.frag.spv"
+	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
+	/usr/local/bin/glslc -fshader-stage=frag /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/health_bar.frag -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/health_bar.frag.spv
+
+shaders/health_bar.vert.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/health_bar.vert
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Generating shaders/health_bar.vert.spv"
+	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
+	/usr/local/bin/glslc -fshader-stage=vert /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/health_bar.vert -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/health_bar.vert.spv
+
 shaders/text.frag.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.frag
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Generating shaders/text.frag.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Generating shaders/text.frag.spv"
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=frag /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.frag -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/text.frag.spv
 
 shaders/text.vert.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.vert
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Generating shaders/text.vert.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Generating shaders/text.vert.spv"
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=vert /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.vert -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/text.vert.spv
 
@@ -97,6 +109,8 @@ CMakeFiles/battleroyale5_shaders.dir/codegen:
 battleroyale5_shaders: CMakeFiles/battleroyale5_shaders
 battleroyale5_shaders: shaders/circle.frag.spv
 battleroyale5_shaders: shaders/circle.vert.spv
+battleroyale5_shaders: shaders/health_bar.frag.spv
+battleroyale5_shaders: shaders/health_bar.vert.spv
 battleroyale5_shaders: shaders/text.frag.spv
 battleroyale5_shaders: shaders/text.vert.spv
 battleroyale5_shaders: CMakeFiles/battleroyale5_shaders.dir/build.make

@@ -76,6 +76,12 @@ struct GeometryBuffers {
 	uint32_t instanceCount = 0;
 };
 
+struct HealthBarBuffers {
+	BufferWithMemory instanceBuffer;
+	VkDeviceSize instanceBufferCapacity = 0;
+	uint32_t instanceCount = 0;
+};
+
 struct HudGeometry {
 	BufferWithMemory vertexBuffer;
 	VkDeviceSize bufferSize = 0;
@@ -88,10 +94,24 @@ static constexpr float HUD_FONT_PIXEL_HEIGHT = 48.0f;
 struct InstanceLayoutCPU {
 	float center[2];
 	float radius;
-	float pad;
+	float lodTier;
 	float color[4];
 	float imageLayer; // Atlas layer index, -1 for flat color
 	float pad2[3];    // Alignment padding
+};
+
+struct HealthBarInstance {
+	float center[2];
+	float size[2];
+	float fillRatio;
+	float tier;
+};
+
+enum class CircleRenderTier : uint32_t {
+	PIXEL_DUST = 0,
+	SIMPLE_SHAPE = 1,
+	BASIC_TEXTURE = 2,
+	FULL_DETAIL = 3
 };
 
 struct TextVertex {
@@ -269,6 +289,16 @@ struct Simulation {
 	static constexpr float GRID_CELL_MIN = 32.0f;
 	static constexpr float GRID_CELL_MAX = 2048.0f;
 	static constexpr float PI = 3.14159265358979323846f;
+	static constexpr float PIXEL_DUST_THRESHOLD = 1.0f;
+	static constexpr float SIMPLE_SHAPE_THRESHOLD = 4.0f;
+	static constexpr float BASIC_TEXTURE_THRESHOLD = 12.0f;
+	static constexpr float TEXTURE_LOAD_THRESHOLD = 4.0f;
+	static constexpr float DETAIL_THRESHOLD = 12.0f;
+	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 2.0f;
+	static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 1.6f;
+	static constexpr float HEALTH_BAR_HEIGHT_MULTIPLIER = 0.2f;
+	static constexpr float HEALTH_BAR_OFFSET_MULTIPLIER = 1.3f;
+	static constexpr float HEALTH_BAR_MIN_HEIGHT = 1.0f;
 
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
@@ -276,7 +306,7 @@ struct Simulation {
 	float minDamage = 0.005f;
 	float gridCellSize = GRID_CELL_MIN;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
-	float constantSpeed = 140.0f * speedMultiplier; // Fixed speed magnitude for all circles
+	float constantSpeed = 240.0f * speedMultiplier; // Fixed speed magnitude for all circles
 	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
 
 	float initialCircleRadius = 12.0f;
@@ -284,7 +314,6 @@ struct Simulation {
 	float globalCurrentRadius = 12.0f;
 	float globalTargetRadius = 12.0f;
 
-	// TODO: Placeholder for new camera system implementation
 
 	// Speed increase system constants
 	static constexpr float SPEED_INCREASE_TIMEOUT = 1.0f;    // Seconds before speed increases start
@@ -501,6 +530,19 @@ struct Simulation {
 		uint32_t c = 0; for (auto a : alive) if (a) ++c; return c;
 	}
 
+	CircleRenderTier classifyRenderTier(float apparentRadius) const {
+		if (apparentRadius < PIXEL_DUST_THRESHOLD) {
+			return CircleRenderTier::PIXEL_DUST;
+		}
+		if (apparentRadius < SIMPLE_SHAPE_THRESHOLD) {
+			return CircleRenderTier::SIMPLE_SHAPE;
+		}
+		if (apparentRadius < BASIC_TEXTURE_THRESHOLD) {
+			return CircleRenderTier::BASIC_TEXTURE;
+		}
+		return CircleRenderTier::FULL_DETAIL;
+	}
+
 	float calculateInitialRadius(uint32_t totalPlayers) const {
 		if (totalPlayers == 0) {
 			return MIN_CIRCLE_RADIUS;
@@ -571,6 +613,58 @@ struct Simulation {
 		}
 
 		updateGridForRadius(globalCurrentRadius);
+	}
+
+	void buildHealthBarInstances(std::vector<HealthBarInstance>& out, float zoomFactor) const {
+		out.clear();
+		out.reserve(alive.size());
+
+		for (size_t i = 0; i < posX.size(); ++i) {
+			if (!alive[i]) continue;
+			float circleRadius = radius[i];
+			float apparentRadius = circleRadius * zoomFactor;
+			CircleRenderTier tier = classifyRenderTier(apparentRadius);
+
+			if (tier == CircleRenderTier::PIXEL_DUST) {
+				continue; // Skip pixel dust entities entirely
+			}
+
+			if (apparentRadius < HEALTH_BAR_VISIBILITY_THRESHOLD) {
+				continue;
+			}
+
+			HealthBarInstance inst{};
+			inst.fillRatio = std::clamp(health[i], 0.0f, 1.0f);
+			inst.tier = static_cast<float>(static_cast<uint32_t>(tier));
+
+			float width = circleRadius * HEALTH_BAR_WIDTH_MULTIPLIER;
+			float height = std::max(circleRadius * HEALTH_BAR_HEIGHT_MULTIPLIER, HEALTH_BAR_MIN_HEIGHT);
+			float offsetMultiplier = HEALTH_BAR_OFFSET_MULTIPLIER;
+
+			switch (tier) {
+				case CircleRenderTier::SIMPLE_SHAPE:
+					height = HEALTH_BAR_MIN_HEIGHT;
+					width = std::max(circleRadius * 1.2f, 6.0f);
+					break;
+				case CircleRenderTier::BASIC_TEXTURE:
+					height = std::max(circleRadius * (HEALTH_BAR_HEIGHT_MULTIPLIER * 0.75f), HEALTH_BAR_MIN_HEIGHT + 1.0f);
+					width = std::max(circleRadius * HEALTH_BAR_WIDTH_MULTIPLIER, circleRadius * 3.0f);
+					break;
+				case CircleRenderTier::FULL_DETAIL:
+					height = std::max(circleRadius * (HEALTH_BAR_HEIGHT_MULTIPLIER * 1.1f), HEALTH_BAR_MIN_HEIGHT + 2.0f);
+					width = std::max(circleRadius * (HEALTH_BAR_WIDTH_MULTIPLIER + 0.2f), circleRadius * 4.0f);
+					break;
+				case CircleRenderTier::PIXEL_DUST:
+					break; // already handled
+			}
+
+			inst.center[0] = posX[i];
+			inst.center[1] = posY[i] + circleRadius * offsetMultiplier;
+			inst.size[0] = width;
+			inst.size[1] = height;
+
+			out.push_back(inst);
+		}
 	}
 
 	// TODO: Placeholder for new camera calculation functions
@@ -762,17 +856,26 @@ struct Simulation {
 		for (size_t i = 0; i < posX.size(); ++i) {
 			if (!alive[i] || imageId[i] == UINT32_MAX) continue;
 
-			float currentRadius = radius[i];
+			float apparentRadius = radius[i];
+			CircleRenderTier tier = classifyRenderTier(apparentRadius);
 
-			// Upgrade tier based on radius threshold
-			if (currentRadius >= ImageManager::IMAGE_LOAD_THRESHOLD_RADIUS) {
-				if (imageTier[i] < 2) {
-					imageTier[i] = 2; // Request real image
-					// Queue for loading if not already loaded
-					// This will be handled by the image manager
-				}
-			} else if (currentRadius >= 8.0f && imageTier[i] < 1) {
-				imageTier[i] = 1; // Use placeholder
+			switch (tier) {
+				case CircleRenderTier::PIXEL_DUST:
+				case CircleRenderTier::SIMPLE_SHAPE:
+					imageTier[i] = 0;
+					break;
+				case CircleRenderTier::BASIC_TEXTURE:
+					if (imageTier[i] > 1) {
+						imageTier[i] = 1;
+					} else if (imageTier[i] < 1) {
+						imageTier[i] = 1;
+					}
+					break;
+				case CircleRenderTier::FULL_DETAIL:
+					if (imageTier[i] < 2) {
+						imageTier[i] = 2;
+					}
+					break;
 			}
 		}
 	}
@@ -785,6 +888,7 @@ struct Simulation {
 			InstanceLayoutCPU inst{};
 			inst.center[0] = posX[i]; inst.center[1] = posY[i];
 			inst.radius = radius[i];
+			inst.lodTier = static_cast<float>(static_cast<uint32_t>(classifyRenderTier(radius[i])));
 			float h = std::clamp(health[i], 0.0f, 1.0f);
 
 			// Set image layer based on tier
@@ -1232,7 +1336,7 @@ public:
 			if (idx >= sim.posX.size() || !sim.alive[idx]) continue;
 
 			float apparentRadius = calculateApparentRadius(sim.radius[idx], zoomFactor);
-			if (apparentRadius < 2.0f) { // Sub-pixel and tiny entities
+			if (sim.classifyRenderTier(apparentRadius) == CircleRenderTier::PIXEL_DUST) {
 				dustEntities.push_back(idx);
 			}
 		}
@@ -1613,7 +1717,7 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 	for (uint32_t idx : adaptiveSim.individualCircles) {
 		if (idx >= posX.size() || !alive[idx]) continue;
 		float apparentRadius = adaptiveSim.calculateApparentRadius(radius[idx], zoomFactor);
-		if (apparentRadius < 2.0f) { // Sub-pixel and tiny entities get aggregated
+		if (classifyRenderTier(apparentRadius) == CircleRenderTier::PIXEL_DUST) {
 			aggregatedEntities.insert(idx);
 		}
 	}
@@ -1625,6 +1729,7 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.center[1] = pixelCluster.position.y;
 		inst.radius = std::max(1.0f, static_cast<float>(pixelCluster.entityCount) * 0.5f); // Scale with entity count
 		inst.imageLayer = -1.0f;
+		inst.lodTier = static_cast<float>(static_cast<uint32_t>(CircleRenderTier::PIXEL_DUST));
 
 		// Use aggregated color with intensity
 		inst.color[0] = pixelCluster.aggregatedColor.x * pixelCluster.intensity;
@@ -1645,47 +1750,55 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		}
 
 		float apparentRadius = adaptiveSim.calculateApparentRadius(radius[idx], zoomFactor);
+		CircleRenderTier tier = classifyRenderTier(apparentRadius);
+
+		if (tier == CircleRenderTier::PIXEL_DUST) {
+			continue; // Already aggregated
+		}
 
 		InstanceLayoutCPU inst{};
 		inst.center[0] = posX[idx];
 		inst.center[1] = posY[idx];
 		float h = std::clamp(health[idx], 0.0f, 1.0f);
+		inst.radius = radius[idx];
+		inst.lodTier = static_cast<float>(static_cast<uint32_t>(tier));
 
-		// Density-Based Rendering Optimization based on apparent screen size
-		// Note: Sub-pixel and tiny entities (< 2.0f) are handled by pixel aggregation above
-		if (apparentRadius < 10.0f) {
-			// SMALL: Simplified SDF circle
-			inst.radius = radius[idx];
-			inst.imageLayer = -1.0f;
-			// Full health-based color
-			inst.color[0] = 1.0f - h;
-			inst.color[1] = h;
-			inst.color[2] = 0.2f;
-			inst.color[3] = 1.0f;
-		} else {
-			// LARGE: Full detail + texture
-			inst.radius = radius[idx];
-
-			// Set image layer based on tier (original logic)
-			if (imageTier[idx] == 0 || imageId[idx] == UINT32_MAX) {
+		switch (tier) {
+			case CircleRenderTier::SIMPLE_SHAPE:
 				inst.imageLayer = -1.0f;
-				inst.color[0] = 1.0f - h; inst.color[1] = h; inst.color[2] = 0.2f; inst.color[3] = 1.0f;
-			} else if (imageTier[idx] >= 2 && imageManager) {
-				int32_t layer = getAtlasLayerForImage(*imageManager, imageId[idx]);
-				if (layer >= 0) {
-					inst.imageLayer = static_cast<float>(layer);
-					inst.color[0] = 1.0f - h * 0.5f;
-					inst.color[1] = 1.0f - h * 0.5f;
-					inst.color[2] = 1.0f - h * 0.5f;
-					inst.color[3] = 1.0f;
-				} else {
-					inst.imageLayer = -1.0f;
-					inst.color[0] = 1.0f - h; inst.color[1] = h; inst.color[2] = 0.2f; inst.color[3] = 1.0f;
+				inst.color[0] = 1.0f - h;
+				inst.color[1] = h;
+				inst.color[2] = 0.2f;
+				inst.color[3] = 1.0f;
+				break;
+			case CircleRenderTier::BASIC_TEXTURE:
+				inst.imageLayer = -1.0f;
+				inst.color[0] = std::lerp(0.4f, 1.0f - h, 0.7f);
+				inst.color[1] = std::lerp(0.4f, h, 0.7f);
+				inst.color[2] = 0.25f;
+				inst.color[3] = 1.0f;
+				break;
+			case CircleRenderTier::FULL_DETAIL:
+				if (imageTier[idx] >= 2 && imageManager) {
+					int32_t layer = getAtlasLayerForImage(*imageManager, imageId[idx]);
+					if (layer >= 0) {
+						inst.imageLayer = static_cast<float>(layer);
+						inst.color[0] = 1.0f - h * 0.5f;
+						inst.color[1] = 1.0f - h * 0.5f;
+						inst.color[2] = 1.0f - h * 0.5f;
+						inst.color[3] = 1.0f;
+						break;
+					}
 				}
-			} else {
+				// Fallback to flat color if texture unavailable
 				inst.imageLayer = -1.0f;
-				inst.color[0] = 1.0f - h; inst.color[1] = h; inst.color[2] = 0.2f; inst.color[3] = 1.0f;
-			}
+				inst.color[0] = 1.0f - h;
+				inst.color[1] = h;
+				inst.color[2] = 0.2f;
+				inst.color[3] = 1.0f;
+				break;
+			case CircleRenderTier::PIXEL_DUST:
+				break;
 		}
 
 		// Winner highlighting
@@ -1705,6 +1818,7 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.center[1] = cluster.centerOfMass.y;
 		inst.radius = cluster.effectiveRadius;
 		inst.imageLayer = -1.0f;
+		inst.lodTier = static_cast<float>(static_cast<uint32_t>(CircleRenderTier::PIXEL_DUST));
 
 		// Cluster color based on dominant color and alive count
 		float intensity = std::min(1.0f, static_cast<float>(cluster.aliveCount) / 100.0f);
@@ -1963,6 +2077,145 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 		vkDestroyShaderModule(device, vert, nullptr);
 		throw std::runtime_error("Failed to create graphics pipeline");
 	}
+
+	vkDestroyShaderModule(device, frag, nullptr);
+	vkDestroyShaderModule(device, vert, nullptr);
+	return po;
+}
+
+static PipelineObjects createHealthBarPipeline(VkDevice device, VkFormat colorFormat, VkRenderPass renderPass) {
+	std::string baseDir = std::string(BR5_SHADER_DIR);
+	std::string vertPath = baseDir + "/health_bar.vert.spv";
+	std::string fragPath = baseDir + "/health_bar.frag.spv";
+	auto vertCode = readBinaryFile(vertPath);
+	auto fragCode = readBinaryFile(fragPath);
+	VkShaderModule vert = createShaderModule(device, vertCode);
+	VkShaderModule frag = createShaderModule(device, fragCode);
+
+	VkPipelineShaderStageCreateInfo vs{};
+	vs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	vs.stage = VK_SHADER_STAGE_VERTEX_BIT;
+	vs.module = vert;
+	vs.pName = "main";
+	VkPipelineShaderStageCreateInfo fs{};
+	fs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	fs.module = frag;
+	fs.pName = "main";
+	VkPipelineShaderStageCreateInfo stages[] = { vs, fs };
+
+	VkVertexInputBindingDescription bindings[2]{};
+	bindings[0].binding = 0;
+	bindings[0].stride = sizeof(float) * 2;
+	bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+	bindings[1].binding = 1;
+	bindings[1].stride = sizeof(HealthBarInstance);
+	bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+	VkVertexInputAttributeDescription attrs[4]{};
+	attrs[0].location = 0; attrs[0].binding = 0; attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0; // inPos
+	attrs[1].location = 1; attrs[1].binding = 1; attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = offsetof(HealthBarInstance, center); // inCenter
+	attrs[2].location = 2; attrs[2].binding = 1; attrs[2].format = VK_FORMAT_R32G32_SFLOAT; attrs[2].offset = offsetof(HealthBarInstance, size);   // inSize
+	attrs[3].location = 3; attrs[3].binding = 1; attrs[3].format = VK_FORMAT_R32_SFLOAT;        attrs[3].offset = offsetof(HealthBarInstance, fillRatio); // inFill
+
+	VkPipelineVertexInputStateCreateInfo vi{};
+	vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vi.vertexBindingDescriptionCount = 2;
+	vi.pVertexBindingDescriptions = bindings;
+	vi.vertexAttributeDescriptionCount = 4;
+	vi.pVertexAttributeDescriptions = attrs;
+
+	VkPipelineInputAssemblyStateCreateInfo ia{};
+	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkViewport vp{};
+	vp.x = 0.0f; vp.y = 0.0f; vp.width = 1.0f; vp.height = 1.0f; vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+	VkRect2D sc{};
+	sc.offset = {0,0};
+	sc.extent = {1,1};
+
+	VkPipelineViewportStateCreateInfo vps{};
+	vps.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	vps.viewportCount = 1;
+	vps.pViewports = &vp;
+	vps.scissorCount = 1;
+	vps.pScissors = &sc;
+
+	VkPipelineRasterizationStateCreateInfo rs{};
+	rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rs.polygonMode = VK_POLYGON_MODE_FILL;
+	rs.cullMode = VK_CULL_MODE_NONE;
+	rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rs.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo ms{};
+	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineColorBlendAttachmentState cba{};
+	cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	cba.blendEnable = VK_TRUE;
+	cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	cba.colorBlendOp = VK_BLEND_OP_ADD;
+	cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	cba.alphaBlendOp = VK_BLEND_OP_ADD;
+
+	VkPipelineColorBlendStateCreateInfo cb{};
+	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	cb.attachmentCount = 1;
+	cb.pAttachments = &cba;
+
+	VkDynamicState dynamics[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dyn{};
+	dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dyn.dynamicStateCount = 2;
+	dyn.pDynamicStates = dynamics;
+
+	VkPushConstantRange pcr{};
+	pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	pcr.offset = 0;
+	pcr.size = sizeof(float) * 4; // camera offset (vec2) + viewport (vec2)
+
+	PipelineObjects po{};
+	VkPipelineLayoutCreateInfo plci{};
+	plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	plci.setLayoutCount = 0;
+	plci.pSetLayouts = nullptr;
+	plci.pushConstantRangeCount = 1;
+	plci.pPushConstantRanges = &pcr;
+	if (vkCreatePipelineLayout(device, &plci, nullptr, &po.layout) != VK_SUCCESS) {
+		vkDestroyShaderModule(device, frag, nullptr);
+		vkDestroyShaderModule(device, vert, nullptr);
+		throw std::runtime_error("Failed to create health bar pipeline layout");
+	}
+
+	VkGraphicsPipelineCreateInfo gpci{};
+	gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	gpci.stageCount = 2;
+	gpci.pStages = stages;
+	gpci.pVertexInputState = &vi;
+	gpci.pInputAssemblyState = &ia;
+	gpci.pViewportState = &vps;
+	gpci.pRasterizationState = &rs;
+	gpci.pMultisampleState = &ms;
+	gpci.pDepthStencilState = nullptr;
+	gpci.pColorBlendState = &cb;
+	gpci.pDynamicState = &dyn;
+	gpci.layout = po.layout;
+	gpci.renderPass = renderPass;
+	gpci.subpass = 0;
+
+	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &po.pipeline) != VK_SUCCESS) {
+		vkDestroyPipelineLayout(device, po.layout, nullptr);
+		vkDestroyShaderModule(device, frag, nullptr);
+		vkDestroyShaderModule(device, vert, nullptr);
+		throw std::runtime_error("Failed to create health bar pipeline");
+	}
+
+	po.descriptorSetLayout = VK_NULL_HANDLE;
 
 	vkDestroyShaderModule(device, frag, nullptr);
 	vkDestroyShaderModule(device, vert, nullptr);
@@ -3162,6 +3415,7 @@ int main() {
 
 	VkRenderPass renderPass = createRenderPass(device, sc.colorFormat);
 	PipelineObjects circlePipeline = createCirclePipeline(device, sc.colorFormat, renderPass);
+	PipelineObjects healthBarPipeline = createHealthBarPipeline(device, sc.colorFormat, renderPass);
 	PipelineObjects textPipeline = createTextPipeline(device, sc.colorFormat, renderPass);
 
 	// Create geometry buffers (quad vertices) and instance buffer
@@ -3184,6 +3438,13 @@ int main() {
 		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * 2048;
 		createBuffer(physical, device, ibSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, geom.instanceBuffer);
 		geom.instanceBufferCapacity = ibSize;
+	}
+
+	HealthBarBuffers healthGeom{};
+	{
+		VkDeviceSize ibSize = sizeof(HealthBarInstance) * 2048;
+		createBuffer(physical, device, ibSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, healthGeom.instanceBuffer);
+		healthGeom.instanceBufferCapacity = ibSize;
 	}
 
 	HudGeometry hud{};
@@ -3370,7 +3631,10 @@ int main() {
 	std::cout.flush();
 
 	std::vector<InstanceLayoutCPU> cpuInstances;
+	std::vector<HealthBarInstance> healthBarInstances;
 	std::vector<TextVertex> hudVertices;
+	cpuInstances.reserve(sim.maxPlayers);
+	healthBarInstances.reserve(sim.maxPlayers);
 	hudVertices.reserve(1024);
 
 	uint32_t currentFrame = 0;
@@ -3512,6 +3776,7 @@ int main() {
 
 		// Use LOD-based rendering system with fixed zoom factor
 		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, 1.0f); // Fixed zoom factor
+		sim.buildHealthBarInstances(healthBarInstances, 1.0f);
 
 		// Print status updates periodically
 		frameCount++;
@@ -3668,11 +3933,44 @@ int main() {
 			unmapMemory(device, geom.instanceBuffer.memory);
 		}
 
+		healthGeom.instanceCount = static_cast<uint32_t>(healthBarInstances.size());
+		VkDeviceSize hbSize = sizeof(HealthBarInstance) * healthBarInstances.size();
+		if (hbSize > healthGeom.instanceBufferCapacity) {
+			if (healthGeom.instanceBuffer.buffer != VK_NULL_HANDLE) {
+				vkDestroyBuffer(device, healthGeom.instanceBuffer.buffer, nullptr);
+				healthGeom.instanceBuffer.buffer = VK_NULL_HANDLE;
+			}
+			if (healthGeom.instanceBuffer.memory != VK_NULL_HANDLE) {
+				vkFreeMemory(device, healthGeom.instanceBuffer.memory, nullptr);
+				healthGeom.instanceBuffer.memory = VK_NULL_HANDLE;
+			}
+			VkDeviceSize newSize = std::max<VkDeviceSize>(hbSize, healthGeom.instanceBufferCapacity ? healthGeom.instanceBufferCapacity * 2 : hbSize);
+			createBuffer(physical, device, newSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				healthGeom.instanceBuffer);
+			healthGeom.instanceBufferCapacity = newSize;
+		}
+		if (hbSize > 0) {
+			void* ptr = mapMemory(device, healthGeom.instanceBuffer.memory, hbSize);
+			std::memcpy(ptr, healthBarInstances.data(), static_cast<size_t>(hbSize));
+			unmapMemory(device, healthGeom.instanceBuffer.memory);
+		}
+
 		// Bind vertex buffers and draw instanced quads
 		VkBuffer vbs[] = { geom.quadVertexBuffer.buffer, geom.instanceBuffer.buffer };
 		VkDeviceSize offs[] = { 0, 0 };
 		vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
 		vkCmdDraw(cmd, 6, geom.instanceCount, 0, 0);
+
+		if (healthGeom.instanceCount > 0) {
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, healthBarPipeline.pipeline);
+			float healthPush[4] = { 0.0f, 0.0f, sim.worldWidth, sim.worldHeight };
+			vkCmdPushConstants(cmd, healthBarPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(healthPush), healthPush);
+			VkBuffer hbVbs[] = { geom.quadVertexBuffer.buffer, healthGeom.instanceBuffer.buffer };
+			VkDeviceSize hbOffs[] = { 0, 0 };
+			vkCmdBindVertexBuffers(cmd, 0, 2, hbVbs, hbOffs);
+			vkCmdDraw(cmd, 6, healthGeom.instanceCount, 0, 0);
+		}
 
 		if (hudFont.ready && hudFont.descriptorSet != VK_NULL_HANDLE && !hudVertices.empty()) {
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline.pipeline);
@@ -3723,16 +4021,21 @@ int main() {
 	for (auto f : inFlightFences) vkDestroyFence(device, f, nullptr);
 	for (auto s : renderFinishedSemaphores) vkDestroySemaphore(device, s, nullptr);
 	for (auto s : imageAvailableSemaphores) vkDestroySemaphore(device, s, nullptr);
-	vkDestroyBuffer(device, geom.instanceBuffer.buffer, nullptr);
-	vkFreeMemory(device, geom.instanceBuffer.memory, nullptr);
+	if (geom.instanceBuffer.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, geom.instanceBuffer.buffer, nullptr);
+	if (geom.instanceBuffer.memory != VK_NULL_HANDLE) vkFreeMemory(device, geom.instanceBuffer.memory, nullptr);
 	geom.instanceBuffer.buffer = VK_NULL_HANDLE;
 	geom.instanceBuffer.memory = VK_NULL_HANDLE;
 	geom.instanceBufferCapacity = 0;
-	vkDestroyBuffer(device, geom.quadVertexBuffer.buffer, nullptr);
-	vkFreeMemory(device, geom.quadVertexBuffer.memory, nullptr);
-	vkDestroyPipeline(device, circlePipeline.pipeline, nullptr);
-	vkDestroyPipelineLayout(device, circlePipeline.layout, nullptr);
-	vkDestroyDescriptorSetLayout(device, circlePipeline.descriptorSetLayout, nullptr);
+	if (healthGeom.instanceBuffer.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, healthGeom.instanceBuffer.buffer, nullptr);
+	if (healthGeom.instanceBuffer.memory != VK_NULL_HANDLE) vkFreeMemory(device, healthGeom.instanceBuffer.memory, nullptr);
+	if (geom.quadVertexBuffer.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, geom.quadVertexBuffer.buffer, nullptr);
+	if (geom.quadVertexBuffer.memory != VK_NULL_HANDLE) vkFreeMemory(device, geom.quadVertexBuffer.memory, nullptr);
+	if (circlePipeline.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, circlePipeline.pipeline, nullptr);
+	if (circlePipeline.layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, circlePipeline.layout, nullptr);
+	if (circlePipeline.descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, circlePipeline.descriptorSetLayout, nullptr);
+	if (healthBarPipeline.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, healthBarPipeline.pipeline, nullptr);
+	if (healthBarPipeline.layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, healthBarPipeline.layout, nullptr);
+	if (healthBarPipeline.descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, healthBarPipeline.descriptorSetLayout, nullptr);
 	if (textPipeline.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, textPipeline.pipeline, nullptr);
 	if (textPipeline.layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, textPipeline.layout, nullptr);
 	if (textPipeline.descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, textPipeline.descriptorSetLayout, nullptr);

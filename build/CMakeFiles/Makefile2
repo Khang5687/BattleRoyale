@@ -91,7 +91,7 @@ CMakeFiles/battleroyale5.dir/all: CMakeFiles/battleroyale5_shaders.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/battleroyale5.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles 6
+	$(CMAKE_COMMAND) -E cmake_progress_start /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles 8
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/battleroyale5.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles 0
 .PHONY : CMakeFiles/battleroyale5.dir/rule
@@ -118,12 +118,12 @@ CMakeFiles/battleroyale5.dir/clean:
 CMakeFiles/battleroyale5_shaders.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5_shaders.dir/build.make CMakeFiles/battleroyale5_shaders.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5_shaders.dir/build.make CMakeFiles/battleroyale5_shaders.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=3,4,5,6 "Built target battleroyale5_shaders"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=3,4,5,6,7,8 "Built target battleroyale5_shaders"
 .PHONY : CMakeFiles/battleroyale5_shaders.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/battleroyale5_shaders.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles 4
+	$(CMAKE_COMMAND) -E cmake_progress_start /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles 6
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/battleroyale5_shaders.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles 0
 .PHONY : CMakeFiles/battleroyale5_shaders.dir/rule
@@ -135,7 +135,7 @@ battleroyale5_shaders: CMakeFiles/battleroyale5_shaders.dir/rule
 # codegen rule for target.
 CMakeFiles/battleroyale5_shaders.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5_shaders.dir/build.make CMakeFiles/battleroyale5_shaders.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=3,4,5,6 "Finished codegen for target battleroyale5_shaders"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=3,4,5,6,7,8 "Finished codegen for target battleroyale5_shaders"
 .PHONY : CMakeFiles/battleroyale5_shaders.dir/codegen
 
 # clean rule for target.
