@@ -297,8 +297,8 @@ struct Simulation {
 	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 1.0f;
 	static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 0.6f; // Reduced from 1.6f
 	static constexpr float HEALTH_BAR_HEIGHT_MULTIPLIER = 0.1f; // Reduced from 0.2f
-	static constexpr float HEALTH_BAR_OFFSET_MULTIPLIER = 1.3f;
 	static constexpr float HEALTH_BAR_MIN_HEIGHT = 1.0f;
+	static constexpr float HEALTH_BAR_VERTICAL_PADDING = 20.0f;
 	static constexpr float HEALTH_BAR_MIN_WIDTH = 0.25f;
 	static constexpr float HEALTH_BAR_SIMPLE_SHAPE_WIDTH_SCALE = 0.75f;
 	static constexpr float HEALTH_BAR_BASIC_TEXTURE_WIDTH_SCALE = 1.875f;
@@ -643,7 +643,6 @@ struct Simulation {
 
 			float width = circleRadius * HEALTH_BAR_WIDTH_MULTIPLIER;
 			float height = std::max(circleRadius * HEALTH_BAR_HEIGHT_MULTIPLIER, HEALTH_BAR_MIN_HEIGHT);
-			float offsetMultiplier = HEALTH_BAR_OFFSET_MULTIPLIER;
 
 			switch (tier) {
 				case CircleRenderTier::SIMPLE_SHAPE:
@@ -663,9 +662,11 @@ struct Simulation {
 			}
 
 			width = std::max(width, HEALTH_BAR_MIN_WIDTH);
+			float barHalfHeight = height * 0.5f;
+			float verticalOffset = circleRadius + barHalfHeight + HEALTH_BAR_VERTICAL_PADDING;
 
 			inst.center[0] = posX[i];
-			inst.center[1] = posY[i] + circleRadius * offsetMultiplier;
+			inst.center[1] = posY[i] - verticalOffset;
 			inst.size[0] = width;
 			inst.size[1] = height;
 
