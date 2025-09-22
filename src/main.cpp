@@ -360,6 +360,8 @@ struct Simulation {
 	std::vector<uint8_t> alive; // 0/1
 	std::vector<uint32_t> imageId; // Index into image files array
 	std::vector<uint8_t> imageTier; // 0=fake/flat color, 1=placeholder, 2=real image
+	std::vector<uint64_t> lastDamageTick; // Track recent damage order for tie breaks
+	uint64_t damageEventCounter = 0;
 
 	// Names for winner display
 	std::vector<std::string> names;
@@ -429,6 +431,8 @@ struct Simulation {
 		alive.resize(targetCount);
 		imageId.resize(targetCount);
 		imageTier.resize(targetCount);
+		lastDamageTick.assign(targetCount, 0);
+		damageEventCounter = 0;
 		names.resize(targetCount);
 
 		// TODO: New camera system will initialize here
@@ -705,6 +709,28 @@ struct Simulation {
 		// Update global circle radius based on elimination progress
 		updateRadiusScaling(dt);
 
+		uint32_t aliveBeforeStep = aliveCount();
+		std::array<int, 2> finalists{ -1, -1 };
+		uint32_t finalistCount = 0;
+		if (aliveBeforeStep <= 2) {
+			for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
+				if (!alive[i]) continue;
+				if (finalistCount < finalists.size()) {
+					finalists[finalistCount++] = i;
+				}
+			}
+		}
+
+		std::vector<int> eliminatedThisStep;
+		eliminatedThisStep.reserve(8);
+		auto recordElimination = [&](int idx) {
+			if (idx < 0 || idx >= static_cast<int>(alive.size())) return;
+			if (alive[idx]) {
+				alive[idx] = 0;
+				eliminatedThisStep.push_back(idx);
+			}
+		};
+
 		// Integrate and wall collisions
 		for (size_t i = 0; i < posX.size(); ++i) {
 			if (!alive[i]) continue;
@@ -812,6 +838,12 @@ struct Simulation {
 									
 									health[i] -= finalDamageI;
 									health[j] -= finalDamageJ;
+									if (finalDamageI > 0.0f) {
+										lastDamageTick[i] = ++damageEventCounter;
+									}
+									if (finalDamageJ > 0.0f) {
+										lastDamageTick[j] = ++damageEventCounter;
+									}
 
 									// Debug logging for collision damage (uncomment for debugging)
 									// static uint32_t debugCollisionCount = 0;
@@ -821,8 +853,12 @@ struct Simulation {
 									//              << " took " << finalDamageJ << " damage (health: " << health[j] << ")" << std::endl;
 									// }
 
-									if (health[i] <= 0.0f) { alive[i] = 0; }
-									if (health[j] <= 0.0f) { alive[j] = 0; }
+									if (health[i] <= 0.0f) {
+										recordElimination(i);
+									}
+									if (health[j] <= 0.0f) {
+										recordElimination(j);
+									}
 								}
 							}
 						}
@@ -838,6 +874,50 @@ struct Simulation {
 				inVictory = true;
 				winnerIndex = last;
 				victorySetupDone = false;
+			} else if (cnt == 0 && aliveBeforeStep > 0) {
+				auto pickBestByDamage = [&](const auto& container, size_t count) -> int {
+					int best = -1;
+					for (size_t idx = 0; idx < count; ++idx) {
+						int candidate = container[idx];
+						if (candidate < 0 || static_cast<size_t>(candidate) >= lastDamageTick.size()) continue;
+						if (best < 0) {
+							best = candidate;
+						} else if (lastDamageTick[candidate] > lastDamageTick[best]) {
+							best = candidate;
+						}
+					}
+					return best;
+				};
+
+				int tieWinner = -1;
+				if (finalistCount > 0) {
+					tieWinner = pickBestByDamage(finalists, finalistCount);
+				}
+				if (tieWinner < 0 && !eliminatedThisStep.empty()) {
+					tieWinner = pickBestByDamage(eliminatedThisStep, eliminatedThisStep.size());
+				}
+				if (tieWinner < 0) {
+					for (int i = 0; i < static_cast<int>(lastDamageTick.size()); ++i) {
+						if (lastDamageTick[i] == 0) continue;
+						if (tieWinner < 0) {
+							tieWinner = i;
+						} else if (lastDamageTick[i] > lastDamageTick[tieWinner]) {
+							tieWinner = i;
+						}
+					}
+				}
+				if (tieWinner < 0 && !alive.empty()) {
+					tieWinner = 0;
+				}
+				if (tieWinner >= 0) {
+					inVictory = true;
+					winnerIndex = tieWinner;
+					victorySetupDone = false;
+					alive[winnerIndex] = 1;
+					if (health[winnerIndex] <= 0.0f) {
+						health[winnerIndex] = 0.01f;
+					}
+				}
 			}
 		} else {
 			if (!victorySetupDone && winnerIndex >= 0) {
