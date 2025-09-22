@@ -25,6 +25,7 @@
 #include <array>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../stb/stb_truetype.h"
@@ -256,17 +257,32 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 struct Simulation {
 	// Constants
 	uint32_t maxPlayers = 10;
-	float minRadius = 12.0f;
-	float maxRadius = 28.0f;
-	float fixedRadius = 40.0f; // All circles have uniform size
+
+	// Stage 2 – dynamic circle scaling parameters
+	static constexpr float MIN_CIRCLE_RADIUS = 2.0f;
+	static constexpr float MAX_CIRCLE_RADIUS = 200.0f;
+	static constexpr float INITIAL_DENSITY_FACTOR = 0.6f;
+	static constexpr float FINAL_SIZE_FACTOR = 0.15f;
+	static constexpr float RADIUS_TRANSITION_SPEED = 2.0f; // Units per second toward target radius
+	static constexpr float RADIUS_SNAP_EPSILON = 0.05f;
+	static constexpr float GRID_CELL_SCALE = 2.2f;
+	static constexpr float GRID_CELL_MIN = 32.0f;
+	static constexpr float GRID_CELL_MAX = 2048.0f;
+	static constexpr float PI = 3.14159265358979323846f;
+
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
 	float damageMultiplier = 0.0001f;
 	float minDamage = 0.005f;
-	float gridCellSize = 64.0f;
+	float gridCellSize = GRID_CELL_MIN;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
 	float constantSpeed = 140.0f * speedMultiplier; // Fixed speed magnitude for all circles
 	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
+
+	float initialCircleRadius = 12.0f;
+	float finalCircleRadius = 48.0f;
+	float globalCurrentRadius = 12.0f;
+	float globalTargetRadius = 12.0f;
 
 	// TODO: Placeholder for new camera system implementation
 
@@ -364,6 +380,13 @@ struct Simulation {
 		uint32_t count = std::min<uint32_t>(targetCount, static_cast<uint32_t>(files.size()));
 		if (count == 0) count = targetCount; // fallback to fakes
 
+		maxPlayers = targetCount;
+		initialCircleRadius = calculateInitialRadius(maxPlayers);
+		finalCircleRadius = calculateFinalRadius();
+		globalCurrentRadius = initialCircleRadius;
+		globalTargetRadius = initialCircleRadius;
+		updateGridForRadius(globalCurrentRadius);
+
 		posX.resize(targetCount);
 		posY.resize(targetCount);
 		velX.resize(targetCount);
@@ -378,8 +401,9 @@ struct Simulation {
 		// TODO: New camera system will initialize here
 
 		// Performance-first random positioning with spatial hash grid
-		float margin = fixedRadius; // Margin from screen edges
-		float minDistance = fixedRadius * 2.1f; // Minimum distance between circle centers
+		float spawnRadius = globalCurrentRadius;
+		float margin = spawnRadius; // Margin from screen edges
+		float minDistance = spawnRadius * 2.1f; // Minimum distance between circle centers
 		float minDistanceSquared = minDistance * minDistance;
 
 		// Create spatial hash grid for fast collision detection
@@ -457,7 +481,7 @@ struct Simulation {
 			float angle = distAngle(rng);
 			velX[i] = std::cos(angle) * constantSpeed;
 			velY[i] = std::sin(angle) * constantSpeed;
-			radius[i] = fixedRadius; // All circles have uniform size
+			radius[i] = globalCurrentRadius;
 			health[i] = 1.0f; // All players start with same health
 			alive[i] = 1;
 			if (i < files.size()) {
@@ -475,6 +499,78 @@ struct Simulation {
 
 	uint32_t aliveCount() const {
 		uint32_t c = 0; for (auto a : alive) if (a) ++c; return c;
+	}
+
+	float calculateInitialRadius(uint32_t totalPlayers) const {
+		if (totalPlayers == 0) {
+			return MIN_CIRCLE_RADIUS;
+		}
+		float screenArea = std::max(worldWidth * worldHeight, 1.0f);
+		float circleArea = (screenArea * INITIAL_DENSITY_FACTOR) / static_cast<float>(totalPlayers);
+		float computed = std::sqrt(std::max(circleArea / PI, 0.0f));
+		return std::clamp(computed, MIN_CIRCLE_RADIUS, MAX_CIRCLE_RADIUS);
+	}
+
+	float calculateFinalRadius() const {
+		float base = std::min(worldWidth, worldHeight) * FINAL_SIZE_FACTOR;
+		return std::clamp(base, MIN_CIRCLE_RADIUS, MAX_CIRCLE_RADIUS);
+	}
+
+	static float smoothstep(float edge0, float edge1, float x) {
+		if (edge0 == edge1) {
+			return x >= edge1 ? 1.0f : 0.0f;
+		}
+		float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+		return t * t * (3.0f - 2.0f * t);
+	}
+
+	float calculateTargetRadius(uint32_t alivePlayers) const {
+		uint32_t totalPlayers = std::max(maxPlayers, 1u);
+		float aliveRatio = static_cast<float>(alivePlayers) / static_cast<float>(totalPlayers);
+		aliveRatio = std::clamp(aliveRatio, 0.0f, 1.0f);
+		float eliminationRatio = 1.0f - aliveRatio;
+		float t = smoothstep(0.0f, 1.0f, eliminationRatio);
+		float target = std::lerp(initialCircleRadius, finalCircleRadius, t);
+		return std::clamp(target, MIN_CIRCLE_RADIUS, MAX_CIRCLE_RADIUS);
+	}
+
+	void syncRadiusBuffer(float newRadius) {
+		if (radius.empty()) {
+			return;
+		}
+		std::fill(radius.begin(), radius.end(), newRadius);
+	}
+
+	void updateGridForRadius(float referenceRadius) {
+		float desired = referenceRadius * GRID_CELL_SCALE;
+		desired = std::clamp(desired, GRID_CELL_MIN, GRID_CELL_MAX);
+		float maxDimension = std::max(worldWidth, worldHeight);
+		if (maxDimension > 0.0f) {
+			desired = std::min(desired, maxDimension);
+		}
+		gridCellSize = desired;
+	}
+
+	void updateRadiusScaling(float dt) {
+		if (radius.empty()) {
+			return;
+		}
+
+		uint32_t alivePlayers = aliveCount();
+		globalTargetRadius = calculateTargetRadius(alivePlayers);
+		float delta = globalTargetRadius - globalCurrentRadius;
+		if (std::fabs(delta) <= RADIUS_SNAP_EPSILON) {
+			globalCurrentRadius = globalTargetRadius;
+		} else {
+			float lerpFactor = std::clamp(RADIUS_TRANSITION_SPEED * dt, 0.0f, 1.0f);
+			globalCurrentRadius = std::lerp(globalCurrentRadius, globalTargetRadius, lerpFactor);
+		}
+
+		if (std::fabs(radius.front() - globalCurrentRadius) > RADIUS_SNAP_EPSILON) {
+			syncRadiusBuffer(globalCurrentRadius);
+		}
+
+		updateGridForRadius(globalCurrentRadius);
 	}
 
 	// TODO: Placeholder for new camera calculation functions
@@ -502,6 +598,9 @@ struct Simulation {
 
 		// Update speed increase system
 		updateSpeedIncrease();
+
+		// Update global circle radius based on elimination progress
+		updateRadiusScaling(dt);
 
 		// Integrate and wall collisions
 		for (size_t i = 0; i < posX.size(); ++i) {
@@ -629,8 +728,7 @@ struct Simulation {
 				// Position winner at center of world
 				const float centerX = worldWidth * 0.5f;
 				const float centerY = worldHeight * 0.5f;
-				// Winner radius should be proportional to world size
-				const float displayRadius = std::max(fixedRadius * 1.5f, std::min(worldWidth, worldHeight) * 0.15f);
+				const float displayRadius = std::max(finalCircleRadius, globalCurrentRadius);
 
 				for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
 					velX[i] = 0.0f;
@@ -647,6 +745,11 @@ struct Simulation {
 					}
 					alive[i] = 0;
 				}
+
+				globalCurrentRadius = displayRadius;
+				globalTargetRadius = displayRadius;
+				syncRadiusBuffer(displayRadius);
+				updateGridForRadius(displayRadius);
 
 				victorySetupDone = true;
 			}

@@ -650,55 +650,16 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
 
 **Core Concept**: Instead of camera zoom, gradually increase circle sizes and collision radii as players are eliminated, creating natural battle progression from massive swarms to epic final duels.
 
-- [ ] **🎯 Circle Size Scaling Architecture**
-  - [ ] **Optimal Size Calculation System**
-    ```cpp
-    // Initial size: Fit all circles on screen with comfortable density
-    // Window: 1600x1200, Example: 1M players = ~0.66px radius
-    float calculateInitialRadius(uint32_t totalPlayers) {
-        float screenArea = worldWidth * worldHeight; // 1600 * 1200 = 1,920,000
-        float optimalDensity = 0.6f; // 60% screen coverage
-        float circleArea = (screenArea * optimalDensity) / totalPlayers;
-        return std::max(sqrt(circleArea / M_PI), MIN_CIRCLE_RADIUS);
-    }
+- ✅ **🎯 Circle Size Scaling Architecture** (COMPLETED)
+  - ✅ **Optimal Size Calculation System** — `Simulation::calculateInitialRadius` derives the spawn radius from screen coverage and player count (`src/main.cpp:504`).
+  - ✅ **Elimination-Based Scaling Formula** — `calculateTargetRadius` + `smoothstep` compute the global target radius based on elimination ratio (`src/main.cpp:519`, `src/main.cpp:527`).
+  - ✅ **Physics-Rendering Synchronization** — `updateRadiusScaling` and `syncRadiusBuffer` keep physics, collision, and instancing data aligned with the evolving radius (`src/main.cpp:537`, `src/main.cpp:559`, `src/main.cpp:595`).
 
-    // Final size: Dramatic finale with large, visible circles
-    // Window: 1600x1200 = 180px max radius for epic finale
-    float calculateFinalRadius() {
-        return std::min(worldWidth, worldHeight) * 0.15f; // 15% of smaller dimension
-    }
-    ```
-  - [ ] **Elimination-Based Scaling Formula**
-    ```cpp
-    // Smooth scaling based on elimination percentage
-    float calculateCurrentRadius(uint32_t aliveCount, uint32_t totalPlayers) {
-        float eliminationRatio = 1.0f - (float(aliveCount) / float(totalPlayers));
-        float scaleFactor = smoothstep(0.0f, 1.0f, eliminationRatio);
-        return lerp(initialRadius, finalRadius, scaleFactor);
-    }
-    ```
-  - [ ] **Physics-Rendering Synchronization**: Ensure collision radius matches visual radius exactly
-
-- [ ] **🎯 Smooth Scaling Interpolation System**
-  - [ ] **Anti-Teleporting Physics**
-    ```cpp
-    // Incremental radius updates to prevent physics jumps
-    struct RadiusTransition {
-        float currentRadius;
-        float targetRadius;
-        float transitionSpeed = 2.0f; // units per second
-
-        void update(float deltaTime) {
-            if (abs(targetRadius - currentRadius) > 0.1f) {
-                currentRadius = lerp(currentRadius, targetRadius,
-                                   transitionSpeed * deltaTime);
-            }
-        }
-    };
-    ```
-  - [ ] **Easing Functions**: Implement smoothstep/cubic interpolation for natural transitions
-  - [ ] **Frame-Rate Independent Scaling**: Use delta time for consistent scaling speed
-  - [ ] **Collision Boundary Updates**: Synchronize spatial grid cell assignments with radius changes
+- ✅ **🎯 Smooth Scaling Interpolation System** (COMPLETED)
+  - ✅ **Anti-Teleporting Physics** — radius growth is lerped per frame with `RADIUS_SNAP_EPSILON` guards to avoid sudden jumps (`src/main.cpp:562-571`).
+  - ✅ **Easing Functions** — inline `smoothstep` shapes the elimination progress curve feeding the radius interpolation (`src/main.cpp:519`).
+  - ✅ **Frame-Rate Independent Scaling** — interpolation scales with `deltaTime` via `RADIUS_TRANSITION_SPEED * dt` (`src/main.cpp:565`).
+  - ✅ **Collision Boundary Updates** — `updateGridForRadius` retunes the spatial hash grid during init and finale to respect the new radius (`src/main.cpp:388`, `src/main.cpp:544`, `src/main.cpp:752`).
 
 - [ ] **🎯 Performance Optimization for Massive Entity Counts**
   - [ ] **Integrated LOD System: Circles + Health Bars**
