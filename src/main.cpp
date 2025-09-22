@@ -293,8 +293,8 @@ struct Simulation {
 	}
 
 	// World
-	float worldWidth = 800.0f;
-	float worldHeight = 600.0f;
+	float worldWidth = 1600.0f;
+	float worldHeight = 1200.0f;
 
 
 	// Speed increase system state
@@ -1400,8 +1400,8 @@ private:
 				}
 
 				// Verify cluster position is within world bounds
-				if (cluster.centerOfMass.x < 0 || cluster.centerOfMass.x > 800.0f ||
-					cluster.centerOfMass.y < 0 || cluster.centerOfMass.y > 600.0f) {
+				if (cluster.centerOfMass.x < 0 || cluster.centerOfMass.x > 1600.0f ||
+					cluster.centerOfMass.y < 0 || cluster.centerOfMass.y > 1200.0f) {
 					// Physics inconsistency: cluster out of bounds
 					// In debug mode: assert or log warning
 				}
@@ -2847,7 +2847,7 @@ int main() {
 		return 1;
 	}
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	GLFWwindow* window = glfwCreateWindow(800, 600, "BattleRoyale5 Vulkan", nullptr, nullptr);
+	GLFWwindow* window = glfwCreateWindow(1600, 1200, "BattleRoyale5 Vulkan", nullptr, nullptr);
 	if (!window) {
 		std::fprintf(stderr, "Failed to create GLFW window\n");
 		glfwTerminate();

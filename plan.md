@@ -379,7 +379,7 @@ The previous dynamic camera scaling system has been completely removed to make w
 - **Zoom-based Physics**: All collision detection uses fixed world boundaries
 
 ### 🔧 Current State
-- **Fixed World Bounds**: All physics and rendering use `worldWidth = 800.0f` and `worldHeight = 600.0f`
+- **Fixed World Bounds**: All physics and rendering use `worldWidth = 1600.0f` and `worldHeight = 1200.0f`
 - **Standard Viewport**: Shaders receive actual framebuffer dimensions without scaling
 - **No Zoom Effects**: Circles maintain consistent apparent size throughout the battle
 - **Simplified Pipeline**: Removed zoom factor calculations from rendering pipeline
@@ -646,36 +646,219 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   - [x] SIMD vectorization verification with 4x theoretical speedup measurement
   - [x] Cache efficiency profiling with L1/L2/L3 hit rate monitoring
 
-### Stage 2 – Intelligent Camera System ❌ REMOVED - READY FOR REDESIGN
-- [ ] **🎯 NEW IMPLEMENTATION NEEDED: Camera System Redesign**
-  - [ ] **Define New Approach**: Determine camera strategy (fixed, following, scaling, hybrid)
-  - [ ] **Camera Constants**: Add new camera-related constants and parameters
-  - [ ] **Camera State Management**: Implement camera position and viewport state
-  - [ ] **Integration Points**: Use existing placeholder locations in main.cpp
-  - [ ] **Shader Integration**: Update push constants and shaders as needed
-  - [ ] **Physics Alignment**: Ensure camera and physics boundaries remain consistent
-  - [ ] **Performance Testing**: Validate new system maintains 60+ FPS
-- [ ] **Health Bar Rendering**
-  - [ ] Add visual health bars above or below each circle
-  - [ ] Implement a second instanced rendering pass dedicated to the health overlay
-  - [ ] Color-code the bars so they transition green → yellow → red as health drops
-- [x] **Basic Dynamic Camera Scaling** ❌ REMOVED
-  - ❌ Previous zoom-based implementation completely removed
-  - ❌ Effective world bounds system removed
-  - ❌ Dynamic viewport scaling removed
-  - ✅ Codebase cleaned and ready for new approach
-- [ ] **Winner Sequence Polish**
+### Stage 2 – Dynamic Circle Enlargement System 🎯 NEW IMPLEMENTATION
+
+**Core Concept**: Instead of camera zoom, gradually increase circle sizes and collision radii as players are eliminated, creating natural battle progression from massive swarms to epic final duels.
+
+- [ ] **🎯 Circle Size Scaling Architecture**
+  - [ ] **Optimal Size Calculation System**
+    ```cpp
+    // Initial size: Fit all circles on screen with comfortable density
+    // Window: 1600x1200, Example: 1M players = ~0.66px radius
+    float calculateInitialRadius(uint32_t totalPlayers) {
+        float screenArea = worldWidth * worldHeight; // 1600 * 1200 = 1,920,000
+        float optimalDensity = 0.6f; // 60% screen coverage
+        float circleArea = (screenArea * optimalDensity) / totalPlayers;
+        return std::max(sqrt(circleArea / M_PI), MIN_CIRCLE_RADIUS);
+    }
+
+    // Final size: Dramatic finale with large, visible circles
+    // Window: 1600x1200 = 180px max radius for epic finale
+    float calculateFinalRadius() {
+        return std::min(worldWidth, worldHeight) * 0.15f; // 15% of smaller dimension
+    }
+    ```
+  - [ ] **Elimination-Based Scaling Formula**
+    ```cpp
+    // Smooth scaling based on elimination percentage
+    float calculateCurrentRadius(uint32_t aliveCount, uint32_t totalPlayers) {
+        float eliminationRatio = 1.0f - (float(aliveCount) / float(totalPlayers));
+        float scaleFactor = smoothstep(0.0f, 1.0f, eliminationRatio);
+        return lerp(initialRadius, finalRadius, scaleFactor);
+    }
+    ```
+  - [ ] **Physics-Rendering Synchronization**: Ensure collision radius matches visual radius exactly
+
+- [ ] **🎯 Smooth Scaling Interpolation System**
+  - [ ] **Anti-Teleporting Physics**
+    ```cpp
+    // Incremental radius updates to prevent physics jumps
+    struct RadiusTransition {
+        float currentRadius;
+        float targetRadius;
+        float transitionSpeed = 2.0f; // units per second
+
+        void update(float deltaTime) {
+            if (abs(targetRadius - currentRadius) > 0.1f) {
+                currentRadius = lerp(currentRadius, targetRadius,
+                                   transitionSpeed * deltaTime);
+            }
+        }
+    };
+    ```
+  - [ ] **Easing Functions**: Implement smoothstep/cubic interpolation for natural transitions
+  - [ ] **Frame-Rate Independent Scaling**: Use delta time for consistent scaling speed
+  - [ ] **Collision Boundary Updates**: Synchronize spatial grid cell assignments with radius changes
+
+- [ ] **🎯 Performance Optimization for Massive Entity Counts**
+  - [ ] **Integrated LOD System: Circles + Health Bars**
+    ```cpp
+    enum CircleRenderTier {
+        PIXEL_DUST,      // < 1px: Single colored pixel, no health bar
+        SIMPLE_SHAPE,    // 1-4px: Flat colored circle + simple health line
+        BASIC_TEXTURE,   // 4-12px: Low-res texture + basic health bar
+        FULL_DETAIL      // > 12px: High-quality avatar + detailed health bar
+    };
+
+    struct HealthBarSpecs {
+        bool visible;           // Whether to render health bar
+        float widthMultiplier;  // Width = radius * multiplier
+        float heightMultiplier; // Height = radius * multiplier
+        float offsetMultiplier; // Y-offset = radius * multiplier
+        HealthBarStyle style;   // NONE, LINE, BASIC, DETAILED
+    };
+    ```
+  - [ ] **Health Bar Integration Per Tier**:
+    - **Tier 0 (< 1px)**: Circle = single pixel, Health Bar = not rendered
+    - **Tier 1 (1-4px)**: Circle = flat color, Health Bar = 1px line (starts at 2px radius)
+    - **Tier 2 (4-12px)**: Circle = placeholder texture, Health Bar = simple rectangle with health fill
+    - **Tier 3 (12px+)**: Circle = full avatar, Health Bar = detailed bar with border and gradient
+  - [ ] **Instanced Rendering Optimization**: Batch circles and health bars by tier for efficient GPU usage
+  - [ ] **Lazy Image Loading Thresholds**:
+    - Tier 0 (< 1px): No image loading, flat color only
+    - Tier 1 (1-4px): 16x16 placeholder texture
+    - Tier 2 (4-12px): 64x64 compressed texture
+    - Tier 3 (12px+): Full 256x256 atlas texture
+  - [ ] **GPU Culling Integration**: Use existing spatial system for off-screen culling
+
+- [ ] **🎯 O(1) Complexity Implementation**
+  - [ ] **Batch Radius Updates**: Single formula calculates target radius for all circles
+    ```cpp
+    // O(1) operation - no loops through entities
+    float globalTargetRadius = calculateCurrentRadius(aliveCount, totalPlayers);
+
+    // Vectorized update in parallel (SoA-friendly)
+    #pragma omp simd
+    for (size_t i = 0; i < circleCount; ++i) {
+        targetRadius[i] = globalTargetRadius;
+    }
+    ```
+  - [ ] **Threshold-Based Decisions**: Use simple comparisons, not searches
+  - [ ] **Spatial Grid Efficiency**: Leverage existing O(n) spatial partitioning
+  - [ ] **Memory Layout Optimization**: SIMD-friendly radius updates in structure-of-arrays
+
+- [ ] **🎯 Constants and Tuning Parameters**
+  ```cpp
+  // Circle Size Constants
+  static constexpr float MIN_CIRCLE_RADIUS = 2.0f;      // Minimum visible size
+  static constexpr float MAX_CIRCLE_RADIUS = 100.0f;    // Maximum finale size
+  static constexpr float INITIAL_DENSITY_FACTOR = 0.6f; // Screen coverage ratio
+  static constexpr float FINAL_SIZE_FACTOR = 0.15f;     // Final size vs screen
+
+  // Scaling Behavior
+  static constexpr float RADIUS_TRANSITION_SPEED = 2.0f; // Units per second
+  static constexpr float SCALE_SMOOTHING_FACTOR = 0.1f;  // Interpolation rate
+
+  // Performance Thresholds
+  static constexpr float TEXTURE_LOAD_THRESHOLD = 4.0f;  // Min radius for textures
+  static constexpr float DETAIL_THRESHOLD = 12.0f;       // Min radius for full detail
+
+  // Health Bar Constants
+  static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 2.0f;  // Min radius for health bars
+  static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 1.6f;      // Width = radius * 1.6
+  static constexpr float HEALTH_BAR_HEIGHT_MULTIPLIER = 0.2f;     // Height = radius * 0.2
+  static constexpr float HEALTH_BAR_OFFSET_MULTIPLIER = 1.3f;     // Y-offset = radius * 1.3
+  static constexpr float HEALTH_BAR_MIN_HEIGHT = 1.0f;           // Minimum visible height
+  ```
+
+- [ ] **🎯 Practical Example: 1M Players → 2 Players (1600x1200 window)**
+  ```cpp
+  // Initial State (1M players):
+  // - Circle radius: ~0.66px (barely visible specks)
+  // - Health bars: Not rendered (below 2px threshold)
+  // - Performance: 60+ FPS with pixel dust rendering
+
+  // Mid-Game (50k players):
+  // - Circle radius: ~3px (small but visible circles)
+  // - Health bars: Simple 1px colored lines above circles
+  // - Performance: 60+ FPS with flat color circles
+
+  // Late Game (1k players):
+  // - Circle radius: ~20px (clearly visible avatars)
+  // - Health bars: Detailed bars with gradients and borders
+  // - Performance: 60+ FPS with full texture loading
+
+  // Final Duel (2 players):
+  // - Circle radius: 180px (massive, epic finale)
+  // - Health bars: Large detailed bars (288px × 36px)
+  // - Performance: 120+ FPS with maximum visual detail
+  ```
+
+- [ ] **🎯 Scalable Health Bar System**
+  - [ ] **Health Bar Positioning & Scaling**
+    ```cpp
+    struct HealthBarGeometry {
+        vec2 position;      // Circle center + offset
+        float width;        // radius * HEALTH_BAR_WIDTH_MULTIPLIER
+        float height;       // max(radius * HEIGHT_MULTIPLIER, MIN_HEIGHT)
+        float healthRatio;  // 0.0 to 1.0 (current health / max health)
+    };
+
+    // Calculate health bar position above circle
+    vec2 calculateHealthBarPosition(vec2 circleCenter, float radius) {
+        return circleCenter + vec2(0, radius * HEALTH_BAR_OFFSET_MULTIPLIER);
+    }
+    ```
+  - [ ] **Health Color Interpolation System**
+    ```cpp
+    vec3 calculateHealthColor(float healthRatio) {
+        if (healthRatio > 0.75f) {
+            // Green to Yellow-Green: 100% → 75%
+            return lerp(vec3(1.0f, 1.0f, 0.0f), vec3(0.0f, 1.0f, 0.0f),
+                       (healthRatio - 0.75f) * 4.0f);
+        } else if (healthRatio > 0.25f) {
+            // Yellow-Green to Yellow: 75% → 25%
+            return lerp(vec3(1.0f, 1.0f, 0.0f), vec3(0.5f, 1.0f, 0.0f),
+                       (healthRatio - 0.25f) * 2.0f);
+        } else {
+            // Yellow to Red: 25% → 0%
+            return lerp(vec3(1.0f, 0.0f, 0.0f), vec3(1.0f, 1.0f, 0.0f),
+                       healthRatio * 4.0f);
+        }
+    }
+    ```
+  - [ ] **LOD-Based Health Bar Rendering**
+    - **Tier 0 (< 2px)**: No health bar rendered (invisible)
+    - **Tier 1 (2-4px)**: Single pixel line with health color
+    - **Tier 2 (4-12px)**: Simple rectangle: dark background + health fill
+    - **Tier 3 (12px+)**: Detailed bar: border + background + gradient fill + health text
+  - [ ] **Performance-Optimized Rendering**
+    ```cpp
+    // Instanced health bar rendering
+    struct HealthBarInstance {
+        vec2 center;        // Health bar center position
+        vec2 size;          // Width x height
+        float healthRatio;  // Health percentage for color calculation
+        uint32_t tierFlags; // LOD tier for rendering style
+    };
+    ```
+  - [ ] **Integration with Circle Scaling**: Health bars automatically scale with circle enlargement
+  - [ ] **Culling Integration**: Health bars use same spatial culling as circles for performance
+
+- [ ] **Winner Sequence Polish** (Enhanced)
   - [ ] Layer in optional celebratory VFX (confetti, particles, post effects)
-  - [ ] Camera focus transitions for winner reveal
+  - [ ] **Winner Growth Animation**: Final winner grows to maximum size with smooth animation
+  - [ ] **Camera Focus**: Center camera on winner during victory sequence
+  - [ ] **Dramatic Scaling**: Winner reaches MAX_CIRCLE_RADIUS for epic finale
 
 ### Stage 3 – Performance & GPU-Driven Rendering (start once Stage 2 stabilizes)
 - [ ] **P0: CPU Frame-Stability Hotfixes**
   - [ ] Cache the per-frame alive count and reuse it inside collision loops to avoid O(n²) rescans.
-  - [ ] Feed the real `sim.currentZoomFactor` into `adaptiveSim.updateSimulationTiers()` so demotion/promotion logic actually reacts to camera distance.
+  - [ ] Feed the real circle radius into `adaptiveSim.updateSimulationTiers()` so demotion/promotion logic reacts to actual circle size.
   - [ ] Re-profile the 50k-entity start (target ≤16 ms frame) and capture notes for regression tracking.
 - [ ] **P1: GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
   - [ ] Stand up a compute pass that frustum-culls instance data into a GPU-visible list
-  - [ ] Define the shared visibility buffer layout (hook in future `CameraState` zoom factor)
+  - [ ] Define the shared visibility buffer layout (supports dynamic circle radius scaling)
   - [ ] Validate correctness against the CPU path with instrumentation metrics
 - [ ] **P2: GPU-Driven Rendering – Stage 2 (Indirect Draw Integration)**
   - [ ] Replace direct draws with `vkCmdDrawIndexedIndirect`
