@@ -255,7 +255,7 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 10000;
+	uint32_t maxPlayers = 10;
 	float minRadius = 12.0f;
 	float maxRadius = 28.0f;
 	float fixedRadius = 40.0f; // All circles have uniform size
@@ -268,13 +268,7 @@ struct Simulation {
 	float constantSpeed = 140.0f * speedMultiplier; // Fixed speed magnitude for all circles
 	static constexpr uint32_t BIAS_ACTIVE_THRESHOLD = 50; // Minimum player count for bias to be active
 
-	// Camera zoom constants for dynamic scaling
-	static constexpr float MAX_ZOOM_FACTOR = 3.0f;  // Max zoom in (final players)
-	static constexpr uint32_t MIN_PLAYERS_FOR_MAX_ZOOM = 1;
-
-	// Dynamic zoom calculation parameters
-	static constexpr float MIN_VISIBLE_RADIUS = 8.0f;  // Minimum circle radius on screen
-	static constexpr float ZOOM_PADDING_FACTOR = 1.2f; // Extra space factor for comfortable viewing
+	// TODO: Placeholder for new camera system implementation
 
 	// Speed increase system constants
 	static constexpr float SPEED_INCREASE_TIMEOUT = 1.0f;    // Seconds before speed increases start
@@ -302,10 +296,6 @@ struct Simulation {
 	float worldWidth = 800.0f;
 	float worldHeight = 600.0f;
 
-	// Effective world boundaries for camera zoom (calculated from zoom factor)
-	float effectiveWorldWidth = 800.0f;
-	float effectiveWorldHeight = 600.0f;
-	float currentZoomFactor = 1.0f;
 
 	// Speed increase system state
 	float lastCircleCollisionTime = 0.0f;     // Time since last circle-to-circle collision
@@ -385,13 +375,7 @@ struct Simulation {
 		imageTier.resize(targetCount);
 		names.resize(targetCount);
 
-		// Calculate effective world bounds FIRST, before positioning
-		// During initialization, use targetCount instead of aliveCount() since alive[] isn't set yet
-		currentZoomFactor = calculateZoomFromPlayerCount(targetCount);
-		effectiveWorldWidth = worldWidth / currentZoomFactor;
-		effectiveWorldHeight = worldHeight / currentZoomFactor;
-		// Debug: std::cout << "Initial zoom for " << targetCount << " players: " << currentZoomFactor
-		//           << ", effective world: " << effectiveWorldWidth << "x" << effectiveWorldHeight << std::endl;
+		// TODO: New camera system will initialize here
 
 		// Performance-first random positioning with spatial hash grid
 		float margin = fixedRadius; // Margin from screen edges
@@ -400,8 +384,8 @@ struct Simulation {
 
 		// Create spatial hash grid for fast collision detection
 		float cellSize = minDistance; // Each cell is one minimum distance
-		int gridWidth = static_cast<int>((effectiveWorldWidth + cellSize - 1) / cellSize);
-		int gridHeight = static_cast<int>((effectiveWorldHeight + cellSize - 1) / cellSize);
+		int gridWidth = static_cast<int>((worldWidth + cellSize - 1) / cellSize);
+		int gridHeight = static_cast<int>((worldHeight + cellSize - 1) / cellSize);
 		std::vector<std::vector<uint32_t>> spatialGrid(gridWidth * gridHeight);
 
 		// Helper function to get grid cell index
@@ -439,8 +423,8 @@ struct Simulation {
 		};
 
 		// Random distributions for positioning
-		std::uniform_real_distribution<float> distX(margin, effectiveWorldWidth - margin);
-		std::uniform_real_distribution<float> distY(margin, effectiveWorldHeight - margin);
+		std::uniform_real_distribution<float> distX(margin, worldWidth - margin);
+		std::uniform_real_distribution<float> distY(margin, worldHeight - margin);
 		std::uniform_real_distribution<float> distAngle(0.0f, 2.0f * 3.14159f);
 
 		// Place circles with rejection sampling
@@ -493,74 +477,7 @@ struct Simulation {
 		uint32_t c = 0; for (auto a : alive) if (a) ++c; return c;
 	}
 
-	float calculateZoomFromPlayerCount(uint32_t count) const {
-		// For very few players, use max zoom (zoom in)
-		if (count <= MIN_PLAYERS_FOR_MAX_ZOOM) {
-			return MAX_ZOOM_FACTOR;
-		}
-
-		// Calculate dynamic minimum zoom needed to fit all circles
-		float minZoomNeeded = calculateMinZoomForCount(count);
-
-		// For many players, use minimum zoom (zoom out to fit everyone)
-		if (count >= maxPlayers * 0.9f) { // 90% or more of max players
-			// Debug: if (count == 500) std::cout << "Using minZoomNeeded: " << minZoomNeeded << std::endl;
-			return minZoomNeeded;
-		}
-
-		// Smooth interpolation between min zoom (many players) and max zoom (few players)
-		float normalizedCount = static_cast<float>(count - MIN_PLAYERS_FOR_MAX_ZOOM) /
-		                       static_cast<float>(maxPlayers * 0.9f - MIN_PLAYERS_FOR_MAX_ZOOM);
-
-		// Use logarithmic scaling for more dramatic zoom during finale
-		float logNormalized = std::log(normalizedCount * (std::exp(1.0f) - 1.0f) + 1.0f);
-
-		// Interpolate from minZoom (many players) to maxZoom (few players)
-		return minZoomNeeded + (MAX_ZOOM_FACTOR - minZoomNeeded) * (1.0f - logNormalized);
-	}
-
-	float calculateMinZoomForCount(uint32_t count) const {
-		// Calculate required world dimensions to fit all circles comfortably
-		float circleSpacing = fixedRadius * 2.2f; // Same spacing as used in positioning
-
-		// Estimate grid dimensions for circle distribution
-		float aspectRatio = worldWidth / worldHeight;
-		uint32_t gridCols = std::max(1u, static_cast<uint32_t>(std::sqrt(count * aspectRatio)));
-		uint32_t gridRows = std::max(1u, (count + gridCols - 1) / gridCols);
-
-		// Calculate required world size to fit all circles
-		float requiredWidth = gridCols * circleSpacing * ZOOM_PADDING_FACTOR;
-		float requiredHeight = gridRows * circleSpacing * ZOOM_PADDING_FACTOR;
-
-		// Calculate zoom factors needed for width and height
-		float zoomForWidth = worldWidth / requiredWidth;
-		float zoomForHeight = worldHeight / requiredHeight;
-
-		// Use the smaller zoom to ensure everything fits
-		float minZoomNeeded = std::min(zoomForWidth, zoomForHeight);
-
-		// Debug: if (count == 500) {
-		//     std::cout << "Debug: count=" << count << ", grid=" << gridCols << "x" << gridRows
-		//               << ", required=" << requiredWidth << "x" << requiredHeight
-		//               << ", minZoom=" << minZoomNeeded << std::endl;
-		// }
-
-		// Also ensure circles don't become too small
-		float minZoomForVisibility = MIN_VISIBLE_RADIUS / fixedRadius;
-
-		// Return the larger of the two constraints
-		float result = std::max(minZoomNeeded, minZoomForVisibility);
-		// Debug: if (count == 500) {
-		//     std::cout << "MinZoom calc: needed=" << minZoomNeeded << ", visibility=" << minZoomForVisibility << ", result=" << result << std::endl;
-		// }
-		return result;
-	}
-
-	void updateEffectiveWorldBounds() {
-		currentZoomFactor = calculateZoomFromPlayerCount(aliveCount());
-		effectiveWorldWidth = worldWidth / currentZoomFactor;
-		effectiveWorldHeight = worldHeight / currentZoomFactor;
-	}
+	// TODO: Placeholder for new camera calculation functions
 
 	void updateSpeedIncrease() {
 		// Check if enough time has passed since last collision to trigger speed increases
@@ -594,9 +511,9 @@ struct Simulation {
 			float r = radius[i];
 			bool wallHit = false;
 			if (posX[i] - r < 0.0f) { posX[i] = r; velX[i] = -velX[i]; wallHit = true; }
-			if (posX[i] + r > effectiveWorldWidth) { posX[i] = effectiveWorldWidth - r; velX[i] = -velX[i]; wallHit = true; }
+			if (posX[i] + r > worldWidth) { posX[i] = worldWidth - r; velX[i] = -velX[i]; wallHit = true; }
 			if (posY[i] - r < 0.0f) { posY[i] = r; velY[i] = -velY[i]; wallHit = true; }
-			if (posY[i] + r > effectiveWorldHeight) { posY[i] = effectiveWorldHeight - r; velY[i] = -velY[i]; wallHit = true; }
+			if (posY[i] + r > worldHeight) { posY[i] = worldHeight - r; velY[i] = -velY[i]; wallHit = true; }
 			// Normalize velocity to maintain constant speed after wall collisions
 			if (wallHit) {
 				normalizeVelocity(i);
@@ -604,8 +521,8 @@ struct Simulation {
 		}
 
 		// Spatial grid dimensions
-		const int cellsX = std::max(1, static_cast<int>(effectiveWorldWidth / gridCellSize));
-		const int cellsY = std::max(1, static_cast<int>(effectiveWorldHeight / gridCellSize));
+		const int cellsX = std::max(1, static_cast<int>(worldWidth / gridCellSize));
+		const int cellsY = std::max(1, static_cast<int>(worldHeight / gridCellSize));
 		std::vector<std::vector<int>> grid(static_cast<size_t>(cellsX * cellsY));
 		auto cellIndex = [&](float x, float y) {
 			int cx = std::clamp(static_cast<int>(x / gridCellSize), 0, cellsX - 1);
@@ -709,11 +626,11 @@ struct Simulation {
 			}
 		} else {
 			if (!victorySetupDone && winnerIndex >= 0) {
-				// Position winner at center of effective world bounds (accounts for zoom)
-				const float centerX = effectiveWorldWidth * 0.5f;
-				const float centerY = effectiveWorldHeight * 0.5f;
-				// Winner radius should be proportional to effective world size and zoom-appropriate
-				const float displayRadius = std::max(fixedRadius * 1.5f, std::min(effectiveWorldWidth, effectiveWorldHeight) * 0.15f);
+				// Position winner at center of world
+				const float centerX = worldWidth * 0.5f;
+				const float centerY = worldHeight * 0.5f;
+				// Winner radius should be proportional to world size
+				const float displayRadius = std::max(fixedRadius * 1.5f, std::min(worldWidth, worldHeight) * 0.15f);
 
 				for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
 					velX[i] = 0.0f;
@@ -852,7 +769,7 @@ struct StatisticalCluster {
 	std::vector<uint32_t> memberIndices;
 
 	// Simplified physics: treat cluster as single large circle
-	void updatePhysics(float dt, float effectiveWorldWidth, float effectiveWorldHeight) {
+	void updatePhysics(float dt, float worldWidth, float worldHeight) {
 		// Integrate cluster position
 		centerOfMass.x += averageVelocity.x * dt;
 		centerOfMass.y += averageVelocity.y * dt;
@@ -864,8 +781,8 @@ struct StatisticalCluster {
 			averageVelocity.x = -averageVelocity.x;
 			wallHit = true;
 		}
-		if (centerOfMass.x + effectiveRadius > effectiveWorldWidth) {
-			centerOfMass.x = effectiveWorldWidth - effectiveRadius;
+		if (centerOfMass.x + effectiveRadius > worldWidth) {
+			centerOfMass.x = worldWidth - effectiveRadius;
 			averageVelocity.x = -averageVelocity.x;
 			wallHit = true;
 		}
@@ -874,8 +791,8 @@ struct StatisticalCluster {
 			averageVelocity.y = -averageVelocity.y;
 			wallHit = true;
 		}
-		if (centerOfMass.y + effectiveRadius > effectiveWorldHeight) {
-			centerOfMass.y = effectiveWorldHeight - effectiveRadius;
+		if (centerOfMass.y + effectiveRadius > worldHeight) {
+			centerOfMass.y = worldHeight - effectiveRadius;
 			averageVelocity.y = -averageVelocity.y;
 			wallHit = true;
 		}
@@ -1276,7 +1193,7 @@ public:
 		processClusterToClusterCollisions(dt, sim.aliveCount());
 
 		// Phase 3: Update cluster physics after all collisions
-		updateClusterPhysics(dt, sim.effectiveWorldWidth, sim.effectiveWorldHeight);
+		updateClusterPhysics(dt, sim.worldWidth, sim.worldHeight);
 	}
 
 private:
@@ -1409,10 +1326,10 @@ private:
 	}
 
 	// Update cluster physics after all collision processing
-	void updateClusterPhysics(float dt, float effectiveWorldWidth, float effectiveWorldHeight) {
+	void updateClusterPhysics(float dt, float worldWidth, float worldHeight) {
 		for (auto& cluster : dustClusters) {
 			if (cluster.aliveCount > 0) {
-				cluster.updatePhysics(dt, effectiveWorldWidth, effectiveWorldHeight);
+				cluster.updatePhysics(dt, worldWidth, worldHeight);
 			}
 		}
 	}
@@ -3466,10 +3383,8 @@ int main() {
 		// Bind descriptor set for texture atlas
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
 
-		// Push constants for circles: effective viewport size (adjusted for zoom)
-		float effectiveViewportWidth = static_cast<float>(sc.extent.width) / sim.currentZoomFactor;
-		float effectiveViewportHeight = static_cast<float>(sc.extent.height) / sim.currentZoomFactor;
-		float circleViewport[2] = { effectiveViewportWidth, effectiveViewportHeight };
+		// Push constants for circles: actual framebuffer viewport size
+		float circleViewport[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
 		vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(circleViewport), circleViewport);
 
 		// Update simulation and instance buffer
@@ -3477,11 +3392,11 @@ int main() {
 		updateImageManager(imageManager); // Process pending texture uploads
 
 		// Always update zoom factor to prevent teleportation on unpause
-		sim.updateEffectiveWorldBounds();
+		// TODO: New camera system update will go here
 
 		// Update adaptive simulation architecture with current zoom
 		adaptiveSim.setFrameTime(metrics.rollingAverage);
-		adaptiveSim.updateSimulationTiers(sim, sim.currentZoomFactor);
+		// TODO: adaptiveSim.updateSimulationTiers will use new camera system
 
 		// Only update simulation physics if not paused
 		if (!isPaused) {
@@ -3493,7 +3408,7 @@ int main() {
 		}
 
 		// Use LOD-based rendering system
-		sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, sim.currentZoomFactor);
+		// TODO: sim.writeInstancesWithLOD will use new camera system
 
 		// Print status updates periodically
 		frameCount++;
@@ -3518,10 +3433,10 @@ int main() {
 			float circleRadius = sim.radius[sim.winnerIndex];
 
 			// Transform world coordinates to screen coordinates
-			// World position relative to effective world bounds -> screen position
-			float screenX = (circleX / sim.effectiveWorldWidth) * static_cast<float>(sc.extent.width);
-			float screenY = (circleY / sim.effectiveWorldHeight) * static_cast<float>(sc.extent.height);
-			float screenRadius = (circleRadius / sim.effectiveWorldWidth) * static_cast<float>(sc.extent.width);
+			// World position relative to world bounds -> screen position
+			float screenX = (circleX / sim.worldWidth) * static_cast<float>(sc.extent.width);
+			float screenY = (circleY / sim.worldHeight) * static_cast<float>(sc.extent.height);
+			float screenRadius = (circleRadius / sim.worldWidth) * static_cast<float>(sc.extent.width);
 
 			float baseX = screenX - (width * 0.5f);
 			float baseY = screenY - screenRadius - height - 20.0f; // 20px offset above circle

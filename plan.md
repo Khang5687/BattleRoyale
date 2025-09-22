@@ -367,42 +367,41 @@ The circle-specific optimizations have been successfully implemented, providing 
 
 The circle-specific optimizations complete the adaptive simulation architecture, providing battle royale-optimized behavior that maintains both visual drama and computational efficiency at massive scales.
 
-## 🎥 Dynamic Camera Scaling System - IMPLEMENTATION COMPLETE
+## 🎥 Camera System - REMOVED FOR REDESIGN
 
-The player count-driven camera zoom system has been successfully implemented and tested! The dynamic scaling provides seamless zoom transitions from maximum world view (50k players) to dramatic finale closeups (final player).
+The previous dynamic camera scaling system has been completely removed to make way for a new implementation approach.
 
-### ✅ Core Implementation Components (`src/main.cpp:270-425`)
-- **Zoom Constants**: MIN_ZOOM_FACTOR (0.5x), MAX_ZOOM_FACTOR (3.0x), player count thresholds
-- **Logarithmic Scaling**: `calculateZoomFromPlayerCount()` with smooth interpolation for dramatic finale zoom
-- **Effective World Boundaries**: Dynamic calculation of `effectiveWorldWidth/Height = worldSize / zoomFactor`
-- **Automatic Updates**: Zoom factor recalculated every frame based on current `sim.aliveCount()`
+### ❌ Removed Components
+- **Zoom Constants**: Removed MAX_ZOOM_FACTOR, MIN_ZOOM_FACTOR, MIN_PLAYERS_FOR_MAX_ZOOM, etc.
+- **Zoom Calculation Functions**: Removed `calculateZoomFromPlayerCount()` and `calculateMinZoomForCount()`
+- **Effective World System**: All effectiveWorld calculations reverted to fixed world bounds (worldWidth/worldHeight)
+- **Dynamic Viewport Scaling**: Push constants now use actual framebuffer size instead of effective viewport
+- **Zoom-based Physics**: All collision detection uses fixed world boundaries
 
-### ✅ Physics Integration (`src/main.cpp:430-450, 682-708`)
-- **Wall Collision Updates**: All boundary checks use `effectiveWorldWidth/effectiveWorldHeight` instead of fixed world size
-- **Spatial Grid Scaling**: Grid dimensions automatically adjust to effective world size for consistent performance
-- **Cluster Physics**: StatisticalCluster collision detection respects effective boundaries
-- **Viewport-Physics Harmony**: Collision walls perfectly aligned with visible screen edges
+### 🔧 Current State
+- **Fixed World Bounds**: All physics and rendering use `worldWidth = 800.0f` and `worldHeight = 600.0f`
+- **Standard Viewport**: Shaders receive actual framebuffer dimensions without scaling
+- **No Zoom Effects**: Circles maintain consistent apparent size throughout the battle
+- **Simplified Pipeline**: Removed zoom factor calculations from rendering pipeline
 
-### ✅ Rendering Pipeline Integration (`src/main.cpp:3276-3280, shaders/`)
-- **Effective Viewport**: Push constants send `effectiveViewport = framebufferSize / zoomFactor`
-- **Shader Updates**: Both circle.vert and text.vert consume effective viewport for proper NDC conversion
-- **Automatic Scaling**: All rendering scales seamlessly without physics disruption
-- **Consistent Behavior**: Text rendering and circle rendering use identical zoom calculations
+### 📋 Placeholder for New Camera System
+```cpp
+// TODO: Placeholder for new camera system implementation
+// Location: src/main.cpp around line 271 (constants)
+// Location: src/main.cpp around line 378 (initialization)
+// Location: src/main.cpp around line 486 (calculation functions)
+// Location: src/main.cpp around line 3397 (update calls)
+```
 
-### 🎯 Validated Test Results
-**Live Test Output**: Successfully ran 50,000 → 1 player simulation
-- **Zoom Range**: Smooth transitions across full 0.5×–3.0× zoom range
-- **Collision Alignment**: No wall collision issues or invisible barriers
-- **Winner Sequence**: Perfect finale zoom with winner "minhvu09743"
-- **Performance**: No crashes, smooth simulation completion
+**Integration Points Ready**:
+- Constants section ready for new camera parameters
+- Initialization section ready for camera setup
+- Function placeholder ready for camera calculations
+- Main loop ready for camera update calls
+- Push constants prepared to accept new camera data
+- Shaders ready to consume new viewport/camera uniforms
 
-### 📈 Visual Effect Achieved
-- **50,000 players**: Circles appear small with maximum world area visible (0.5× zoom)
-- **Mid-battle**: Progressive zoom-in as player count decreases creates mounting tension
-- **Final players**: Dramatic close-up zoom (3.0×) for finale with large, detailed circles
-- **Seamless Experience**: Viewers perceive circles as "growing" naturally throughout battle
-
-The dynamic camera scaling system provides the cinematic foundation for battle royale drama while maintaining perfect physics accuracy and collision alignment.
+The codebase is now clean and ready for a new camera implementation approach.
 
 ## 🔧 Stage 1 Spatial Foundations - IMPLEMENTATION COMPLETE
 
@@ -647,30 +646,24 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   - [x] SIMD vectorization verification with 4x theoretical speedup measurement
   - [x] Cache efficiency profiling with L1/L2/L3 hit rate monitoring
 
-### Stage 2 – Intelligent Camera System ✅ CURRENT IMPLEMENTATION NEEDS UPGRADE
-- [ ] **🎯 PRIORITY: Hybrid Count + Spatial Zoom System (Rating: 10/10)**
-  - [ ] **Camera Centering**: Calculate centroid of alive circles each frame for dynamic camera center
-  - [ ] **Spatial Distribution Tracking**: Calculate circle spread (standard deviation from centroid)
-  - [ ] **Hybrid Zoom Factor**: Combine player count with spatial distribution
-    - Base zoom factor from current player count system
-    - Adjust with spread factor: `finalZoom = baseZoom * clamp(maxSpread/currentSpread, 0.5, 2.0)`
-  - [ ] **Camera Offset System**: Modify push constants to include camera position offset
-  - [ ] **Shader Integration**: Update `shaders/circle.vert` to use `((world - cameraOffset) / viewport) * 2.0 - 1.0`
-  - [ ] **Smooth Interpolation**: Add camera position interpolation toward centroid to prevent oscillation
-  - [ ] **Collision Boundary Tracking**: Ensure collision walls match visible viewport area with camera offset
-  - [ ] **Validation Testing**: Test with scattered vs clustered circle distributions
+### Stage 2 – Intelligent Camera System ❌ REMOVED - READY FOR REDESIGN
+- [ ] **🎯 NEW IMPLEMENTATION NEEDED: Camera System Redesign**
+  - [ ] **Define New Approach**: Determine camera strategy (fixed, following, scaling, hybrid)
+  - [ ] **Camera Constants**: Add new camera-related constants and parameters
+  - [ ] **Camera State Management**: Implement camera position and viewport state
+  - [ ] **Integration Points**: Use existing placeholder locations in main.cpp
+  - [ ] **Shader Integration**: Update push constants and shaders as needed
+  - [ ] **Physics Alignment**: Ensure camera and physics boundaries remain consistent
+  - [ ] **Performance Testing**: Validate new system maintains 60+ FPS
 - [ ] **Health Bar Rendering**
   - [ ] Add visual health bars above or below each circle
   - [ ] Implement a second instanced rendering pass dedicated to the health overlay
   - [ ] Color-code the bars so they transition green → yellow → red as health drops
-- [x] **Basic Dynamic Camera Scaling** ✅ BASELINE IMPLEMENTATION COMPLETE
-  - [x] Player count-based zoom factor calculation
-  - [x] Min/max zoom constants (0.5×–3.0× range)
-  - [x] Effective world bounds calculation
-  - [x] Wall collision detection with effective bounds
-  - [x] Push constants with effective viewport
-  - [x] Vertex shader viewport scaling
-  - ⚠️ **ISSUES IDENTIFIED**: Top-left corner centering, circle clipping, pure count-based scaling
+- [x] **Basic Dynamic Camera Scaling** ❌ REMOVED
+  - ❌ Previous zoom-based implementation completely removed
+  - ❌ Effective world bounds system removed
+  - ❌ Dynamic viewport scaling removed
+  - ✅ Codebase cleaned and ready for new approach
 - [ ] **Winner Sequence Polish**
   - [ ] Layer in optional celebratory VFX (confetti, particles, post effects)
   - [ ] Camera focus transitions for winner reveal
