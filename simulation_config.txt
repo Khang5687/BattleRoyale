@@ -5,7 +5,7 @@ damage_curve_version=1.0
 curve_interpolation=spline
 
 # Control points: playerRatio:damageMultiplier (sorted by playerRatio)
-curve_points=0.00242188:1.34188,0.40208:1.66629,0.702334:2.01975,0.999434:2.53259
+curve_points=0.00971191:3.88031,0.224238:1.30329,0.593887:0.205117,0.876289:0.255402,0.990757:0.270467
 
 # Curve validation bounds
 min_damage_multiplier=0.1

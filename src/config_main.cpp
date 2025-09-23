@@ -15,6 +15,7 @@
 #include <chrono>
 #include <sstream>
 #include <fstream>
+#include <ratio>
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../stb/stb_truetype.h"
@@ -231,6 +232,11 @@ struct UIState {
     bool showValidation = true;
     DamageCurve::CurveValidationResult lastValidation;
 
+    // Status messages
+    std::string statusMessage;
+    float statusMessageTimer = 0.0f;
+    static constexpr float STATUS_MESSAGE_DURATION = 3.0f; // seconds
+
     // Dynamic UI layout (updated on window resize)
     int currentWindowWidth = INITIAL_WINDOW_WIDTH;
     int currentWindowHeight = INITIAL_WINDOW_HEIGHT;
@@ -298,12 +304,12 @@ struct UIState {
     void copyCurve() {
         clipboardPoints = curve.getPoints();
         hasClipboardData = true;
-        std::cout << "Curve copied to clipboard (" << clipboardPoints.size() << " points)" << std::endl;
+        setStatusMessage("Curve copied to clipboard (" + std::to_string(clipboardPoints.size()) + " points)");
     }
 
     void pasteCurve() {
         if (!hasClipboardData) {
-            std::cout << "No curve data in clipboard" << std::endl;
+            setStatusMessage("No curve data in clipboard");
             return;
         }
 
@@ -317,7 +323,7 @@ struct UIState {
         recordAction(ActionType::LOAD_CONFIGURATION, beforePoints, afterPoints,
                     beforePreset, currentPreset);
 
-        std::cout << "Curve pasted from clipboard (" << clipboardPoints.size() << " points)" << std::endl;
+        setStatusMessage("Curve pasted from clipboard (" + std::to_string(clipboardPoints.size()) + " points)");
     }
 
     // Bezier curve editing methods
@@ -353,14 +359,14 @@ struct UIState {
         }
 
         curve.setPoints(points);
-        std::cout << "Changed point " << pointIndex << " interpolation to " <<
-            (points[pointIndex].type == InterpolationType::LINEAR ? "LINEAR" :
-             points[pointIndex].type == InterpolationType::SPLINE ? "SPLINE" : "BEZIER") << std::endl;
+        std::string typeName = points[pointIndex].type == InterpolationType::LINEAR ? "LINEAR" :
+                              points[pointIndex].type == InterpolationType::SPLINE ? "SPLINE" : "BEZIER";
+        setStatusMessage("Point " + std::to_string(pointIndex) + " interpolation: " + typeName);
     }
 
     void toggleControlHandles() {
         showControlHandles = !showControlHandles;
-        std::cout << "Control handles " << (showControlHandles ? "shown" : "hidden") << std::endl;
+        setStatusMessage("Control handles " + std::string(showControlHandles ? "shown" : "hidden"));
     }
 
     void updateValidation() {
@@ -372,6 +378,22 @@ struct UIState {
         std::cout << "Validation display " << (showValidation ? "enabled" : "disabled") << std::endl;
     }
 
+    // Status message system
+    void setStatusMessage(const std::string& message) {
+        statusMessage = message;
+        statusMessageTimer = STATUS_MESSAGE_DURATION;
+        std::cout << message << std::endl; // Also log to console
+    }
+
+    void updateStatusMessage(float deltaTime) {
+        if (statusMessageTimer > 0.0f) {
+            statusMessageTimer -= deltaTime;
+            if (statusMessageTimer <= 0.0f) {
+                statusMessage.clear();
+            }
+        }
+    }
+
     // Snap-to-grid helper functions
     float snapValueToGrid(float value, float snapSize) {
         if (!snapToGrid) return value;
@@ -380,7 +402,7 @@ struct UIState {
 
     void toggleSnapToGrid() {
         snapToGrid = !snapToGrid;
-        std::cout << "Snap to grid " << (snapToGrid ? "enabled" : "disabled") << std::endl;
+        setStatusMessage("Snap to grid " + std::string(snapToGrid ? "enabled" : "disabled"));
     }
 
     void deleteSelectedPoint() {
@@ -393,7 +415,7 @@ struct UIState {
                         currentPreset, currentPreset, selectedPoint, beforePoints[selectedPoint]);
             selectedPoint = -1;
             selectedControlPoint = -1;
-            std::cout << "Point deleted" << std::endl;
+            setStatusMessage("Point deleted");
         }
     }
 
@@ -402,18 +424,21 @@ struct UIState {
             auto points = curve.getPoints();
             points[selectedPoint].playerRatio = std::clamp(points[selectedPoint].playerRatio + deltaX, 0.0f, 1.0f);
             points[selectedPoint].damageMultiplier = snapValueToGrid(
-                std::clamp(points[selectedPoint].damageMultiplier + deltaY, 0.1f, 5.0f), gridSnapSize);
+                std::clamp(points[selectedPoint].damageMultiplier + deltaY, 0.01f, 5.0f), gridSnapSize);
             curve.setPoints(points);
-            std::cout << "Point nudged" << std::endl;
+            setStatusMessage("Point nudged");
         }
     }
 };
 
 UIState g_uiState;
 
+// Frame timing for status message updates
+static auto g_lastFrameTime = std::chrono::high_resolution_clock::now();
+
 // Coordinate conversion functions - REWRITTEN FOR CORRECTNESS
 // Player ratio: 0.0 (left) to 1.0 (right)
-// Damage multiplier: 0.5 (bottom) to 4.5 (top)
+// Damage multiplier: 0.01 (bottom) to 5.0 (top)
 
 float screenToPlayerRatio(float screenX) {
     // Simple linear mapping: screen X to 0.0-1.0 range
@@ -422,15 +447,16 @@ float screenToPlayerRatio(float screenX) {
 }
 
 float screenToDamageMultiplier(float screenY) {
-    // Map screen Y to damage range 0.5-4.5
+    // Map screen Y to damage range 0.01-5.0
     if (g_uiState.curveHeight <= 0) return 1.0f;
 
     // Normalize screen Y to 0-1 range (0 = bottom, 1 = top)
     float normalizedY = (screenY - g_uiState.curveAreaTop) / g_uiState.curveHeight;
     normalizedY = std::clamp(normalizedY, 0.0f, 1.0f);
 
-    // Map to damage multiplier range: 0.5 (bottom) to 4.5 (top)
-    return 0.5f + normalizedY * 4.0f;
+    // Map to damage multiplier range: 0.01 (bottom) to 5.0 (top)
+    // Use logarithmic mapping for better control at low values
+    return std::pow(10.0f, -2.0f + normalizedY * 2.7f); // 0.01 to ~5.0
 }
 
 float playerRatioToScreen(float playerRatio) {
@@ -441,11 +467,18 @@ float playerRatioToScreen(float playerRatio) {
 float damageMultiplierToScreen(float damageMultiplier) {
     // Convert damage multiplier back to screen Y coordinate
 
-    // Normalize damage multiplier to 0-1 range
-    float normalizedDamage = (std::clamp(damageMultiplier, 0.5f, 4.5f) - 0.5f) / 4.0f;
+    // Clamp to our supported range
+    damageMultiplier = std::clamp(damageMultiplier, 0.01f, 5.0f);
+
+    // Convert from logarithmic scale back to linear screen coordinate
+    // damageMultiplier = 10^(-2.0 + normalizedY * 2.7)
+    // So: log10(damageMultiplier) = -2.0 + normalizedY * 2.7
+    // normalizedY = (log10(damageMultiplier) + 2.0) / 2.7
+    float normalizedY = (std::log10(damageMultiplier) + 2.0f) / 2.7f;
+    normalizedY = std::clamp(normalizedY, 0.0f, 1.0f);
 
     // Map to screen Y coordinate
-    return g_uiState.curveAreaTop + normalizedDamage * g_uiState.curveHeight;
+    return g_uiState.curveAreaTop + normalizedY * g_uiState.curveHeight;
 }
 
 bool isPointNearMouse(float screenX, float screenY, double mouseX, double mouseY, float radius) {
@@ -582,6 +615,27 @@ void drawGrid() {
 
     // Y-axis
     drawLine(centerX, g_uiState.curveAreaTop, centerX, g_uiState.curveAreaBottom, AXIS_COLOR, 2.0f);
+
+    // Y-axis numerical labels (damage multipliers)
+    const float labelColor[3] = {0.7f, 0.7f, 0.7f};
+    float labelOffsetX = -35.0f * g_uiState.dpiScaleX;
+
+    // Bottom label (0.01x)
+    drawText(centerX + labelOffsetX, g_uiState.curveAreaBottom - 5.0f * g_uiState.dpiScaleY, "0.01x", labelColor);
+
+    // Middle-bottom label (0.1x)
+    float midBottomY = g_uiState.curveAreaTop + g_uiState.curveHeight * 0.75f;
+    drawText(centerX + labelOffsetX, midBottomY, "0.1x", labelColor);
+
+    // Middle label (1.0x)
+    drawText(centerX + labelOffsetX, centerY, "1.0x", labelColor);
+
+    // Middle-top label (2.0x)
+    float midTopY = g_uiState.curveAreaTop + g_uiState.curveHeight * 0.25f;
+    drawText(centerX + labelOffsetX, midTopY, "2.0x", labelColor);
+
+    // Top label (5.0x)
+    drawText(centerX + labelOffsetX, g_uiState.curveAreaTop + 5.0f * g_uiState.dpiScaleY, "5.0x", labelColor);
 }
 
 void drawCurve() {
@@ -893,7 +947,56 @@ void drawValidationIndicators() {
     }
 }
 
+void drawStatusMessage() {
+    if (g_uiState.statusMessage.empty()) return;
+
+    // Calculate fade out effect
+    float alpha = 1.0f;
+    if (g_uiState.statusMessageTimer < 1.0f) {
+        alpha = g_uiState.statusMessageTimer; // Fade out in last second
+    }
+
+    // Draw background box
+    float boxWidth = 400.0f * g_uiState.dpiScaleX;
+    float boxHeight = 40.0f * g_uiState.dpiScaleY;
+    float boxX = (g_uiState.currentFramebufferWidth - boxWidth) / 2.0f;
+    float boxY = g_uiState.currentFramebufferHeight - 100.0f * g_uiState.dpiScaleY;
+
+    // Semi-transparent background
+    glColor4f(0.1f, 0.1f, 0.1f, 0.8f * alpha);
+    glBegin(GL_QUADS);
+    glVertex2f(boxX, boxY);
+    glVertex2f(boxX + boxWidth, boxY);
+    glVertex2f(boxX + boxWidth, boxY + boxHeight);
+    glVertex2f(boxX, boxY + boxHeight);
+    glEnd();
+
+    // Border
+    glColor4f(0.5f, 0.5f, 0.5f, alpha);
+    glBegin(GL_LINE_LOOP);
+    glVertex2f(boxX, boxY);
+    glVertex2f(boxX + boxWidth, boxY);
+    glVertex2f(boxX + boxWidth, boxY + boxHeight);
+    glVertex2f(boxX, boxY + boxHeight);
+    glEnd();
+
+    // Text
+    float textX = boxX + 20.0f * g_uiState.dpiScaleX;
+    float textY = boxY + 12.0f * g_uiState.dpiScaleY;
+    const float textColor[3] = {0.9f, 0.9f, 0.9f};
+    glColor4f(textColor[0], textColor[1], textColor[2], alpha);
+    drawText(textX, textY, g_uiState.statusMessage);
+}
+
 void render() {
+    // Calculate delta time for status message timer
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<float> deltaTime = currentTime - g_lastFrameTime;
+    g_lastFrameTime = currentTime;
+
+    // Update status message timer
+    g_uiState.updateStatusMessage(deltaTime.count());
+
     // Update validation on each frame
     if (g_uiState.showValidation) {
         g_uiState.updateValidation();
@@ -908,6 +1011,7 @@ void render() {
     }
     drawControlPoints();
     drawUI();
+    drawStatusMessage(); // Draw status messages last (on top)
 }
 
 // Event handlers - COMPLETELY REWRITTEN FOR ROBUSTNESS
@@ -953,6 +1057,11 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
                             auto afterPoints = g_uiState.curve.getPoints();
                             g_uiState.recordAction(ActionType::LOAD_PRESET, beforePoints, afterPoints,
                                                   beforePreset, g_uiState.currentPreset);
+
+                            // Show status message
+                            const std::string presetNames[] = {"Linear", "Exponential", "Logarithmic", "S-Curve", "Battle Royale", "Speedrun", "Endurance"};
+                            g_uiState.setStatusMessage("Loaded preset: " + std::string(presetNames[i]));
+
                             return; // Exit early - button handled
                         }
                     }
@@ -1143,16 +1252,20 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
                 break;
             case GLFW_KEY_S:
                 if (mods & GLFW_MOD_CONTROL) {
-                    g_uiState.curve.saveConfiguration("simulation_config.txt");
-                    std::cout << "Configuration saved to simulation_config.txt" << std::endl;
+                    try {
+                        g_uiState.curve.saveConfiguration("simulation_config.txt");
+                        g_uiState.setStatusMessage("Configuration saved to simulation_config.txt");
 
-                    // Create backup
-                    auto now = std::chrono::system_clock::now();
-                    auto time = std::chrono::system_clock::to_time_t(now);
-                    std::stringstream backupName;
-                    backupName << "simulation_config_backup_" << time << ".txt";
-                    g_uiState.curve.saveConfiguration(backupName.str());
-                    std::cout << "Backup created: " << backupName.str() << std::endl;
+                        // Create backup
+                        auto now = std::chrono::system_clock::now();
+                        auto time = std::chrono::system_clock::to_time_t(now);
+                        std::stringstream backupName;
+                        backupName << "backup/simulation_config_backup_" << time << ".txt";
+                        g_uiState.curve.saveConfiguration(backupName.str());
+                        // Don't show backup message as primary status
+                    } catch (const std::exception& e) {
+                        g_uiState.setStatusMessage("Save failed: " + std::string(e.what()));
+                    }
                 }
                 break;
             case GLFW_KEY_L:
@@ -1162,75 +1275,84 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
                         CurvePreset beforePreset = g_uiState.currentPreset;
 
                         g_uiState.curve.loadConfiguration("simulation_config.txt");
-                        std::cout << "Configuration loaded from simulation_config.txt" << std::endl;
+                        g_uiState.setStatusMessage("Configuration loaded from simulation_config.txt");
 
                         auto afterPoints = g_uiState.curve.getPoints();
                         g_uiState.recordAction(ActionType::LOAD_CONFIGURATION, beforePoints, afterPoints,
                                               beforePreset, CurvePreset::CUSTOM);
                     } catch (const std::exception& e) {
-                        std::cout << "Failed to load configuration: " << e.what() << std::endl;
+                        g_uiState.setStatusMessage("Load failed: " + std::string(e.what()));
                     }
                 }
                 break;
             case GLFW_KEY_Z:
                 if (mods & GLFW_MOD_CONTROL) {
-                    g_uiState.undo();
-                    std::cout << "Undo performed" << std::endl;
+                    if (g_uiState.actionHistory.canUndo()) {
+                        g_uiState.undo();
+                        g_uiState.setStatusMessage("Undo performed");
+                    } else {
+                        g_uiState.setStatusMessage("Nothing to undo");
+                    }
                 }
                 break;
             case GLFW_KEY_Y:
                 if (mods & GLFW_MOD_CONTROL) {
-                    g_uiState.redo();
-                    std::cout << "Redo performed" << std::endl;
+                    if (g_uiState.actionHistory.canRedo()) {
+                        g_uiState.redo();
+                        g_uiState.setStatusMessage("Redo performed");
+                    } else {
+                        g_uiState.setStatusMessage("Nothing to redo");
+                    }
                 }
                 break;
             case GLFW_KEY_C:
                 if (mods & GLFW_MOD_CONTROL) {
                     g_uiState.copyCurve();
+                    // copyCurve already sets status message
                 }
                 break;
             case GLFW_KEY_V:
                 if (mods & GLFW_MOD_CONTROL) {
                     g_uiState.pasteCurve();
+                    // pasteCurve already sets status message
                 }
                 break;
             case GLFW_KEY_I:
                 // Cycle interpolation type for selected point
                 if (g_uiState.selectedPoint >= 0) {
                     g_uiState.cycleInterpolationType(g_uiState.selectedPoint);
+                    // cycleInterpolationType already sets status message
+                } else {
+                    g_uiState.setStatusMessage("No point selected");
                 }
                 break;
             case GLFW_KEY_H:
                 // Toggle control handles
                 g_uiState.toggleControlHandles();
+                // toggleControlHandles already sets status message
                 break;
             case GLFW_KEY_E:
                 if (mods & GLFW_MOD_CONTROL) {
-                    // Export menu
-                    std::cout << "Export options:" << std::endl;
-                    std::cout << "  1: Export to JSON" << std::endl;
-                    std::cout << "  2: Export to CSV" << std::endl;
-                    std::cout << "  3: Export to Base64 (for sharing)" << std::endl;
-                    std::cout << "Select option (1-3): ";
-                    // Note: In a real application, you'd implement a proper menu system
+                    // Export menu - show quick export options
+                    g_uiState.setStatusMessage("Quick exports: J=JSON, K=CSV, B=Base64");
                 }
                 break;
             case GLFW_KEY_J:
                 // Quick export to JSON
                 try {
                     g_uiState.curve.exportToJson("curve_config.json");
-                    std::cout << "Configuration exported to curve_config.json" << std::endl;
+                    g_uiState.setStatusMessage("Exported to curve_config.json");
                 } catch (const std::exception& e) {
-                    std::cout << "Export failed: " << e.what() << std::endl;
+                    g_uiState.setStatusMessage("Export failed: " + std::string(e.what()));
                 }
                 break;
             case GLFW_KEY_K:
                 // Quick export to CSV
                 try {
                     g_uiState.curve.exportToCsv("curve_config.csv");
-                    std::cout << "Configuration exported to curve_config.csv" << std::endl;
+                    g_uiState.setStatusMessage("Exported to curve_config.csv");
                 } catch (const std::exception& e) {
-                    std::cout << "Export failed: " << e.what() << std::endl;
+                    g_uiState.setStatusMessage("Export failed: " + std::string(e.what()));
                 }
                 break;
             case GLFW_KEY_B:
@@ -1239,35 +1361,40 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
                     std::string base64 = g_uiState.curve.exportToBase64();
                     std::ofstream file("curve_config.b64");
                     file << base64;
-                    std::cout << "Configuration exported to curve_config.b64 (Base64)" << std::endl;
-                    std::cout << "Share this file or copy the content for curve sharing" << std::endl;
+                    g_uiState.setStatusMessage("Exported to curve_config.b64 (shareable)");
                 } catch (const std::exception& e) {
-                    std::cout << "Export failed: " << e.what() << std::endl;
+                    g_uiState.setStatusMessage("Export failed: " + std::string(e.what()));
                 }
                 break;
             case GLFW_KEY_DELETE:
                 // Delete selected point
                 g_uiState.deleteSelectedPoint();
+                // deleteSelectedPoint already sets status message
                 break;
             case GLFW_KEY_LEFT:
                 // Nudge left
                 g_uiState.nudgeSelectedPoint(-0.01f, 0.0f);
+                // nudgeSelectedPoint already sets status message
                 break;
             case GLFW_KEY_RIGHT:
                 // Nudge right
                 g_uiState.nudgeSelectedPoint(0.01f, 0.0f);
+                // nudgeSelectedPoint already sets status message
                 break;
             case GLFW_KEY_UP:
                 // Nudge up
                 g_uiState.nudgeSelectedPoint(0.0f, 0.1f);
+                // nudgeSelectedPoint already sets status message
                 break;
             case GLFW_KEY_DOWN:
                 // Nudge down
                 g_uiState.nudgeSelectedPoint(0.0f, -0.1f);
+                // nudgeSelectedPoint already sets status message
                 break;
             case GLFW_KEY_N:
                 // Toggle snap to grid
                 g_uiState.toggleSnapToGrid();
+                // toggleSnapToGrid already sets status message
                 break;
             case GLFW_KEY_G:
                 g_uiState.showGrid = !g_uiState.showGrid;
@@ -1347,7 +1474,18 @@ int main() {
 
     // Initialize UI state
     updateCurveArea();
-    g_uiState.curve.loadPreset(CurvePreset::BATTLE_ROYALE);
+
+    // Try to load previously saved configuration, fall back to preset if none exists
+    try {
+        g_uiState.curve.loadConfiguration("simulation_config.txt");
+        g_uiState.currentPreset = CurvePreset::CUSTOM; // Mark as custom since it's a saved config
+        std::cout << "Loaded previously saved configuration with "
+                  << g_uiState.curve.getPointCount() << " control points" << std::endl;
+    } catch (const std::exception& e) {
+        std::cout << "No saved configuration found, loading default BATTLE_ROYALE preset" << std::endl;
+        g_uiState.curve.loadPreset(CurvePreset::BATTLE_ROYALE);
+        g_uiState.currentPreset = CurvePreset::BATTLE_ROYALE;
+    }
 
     std::cout << "BattleRoyale5 Damage Curve Editor" << std::endl;
     std::cout << "Controls:" << std::endl;

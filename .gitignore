@@ -41,3 +41,6 @@
 *.dwo
 
 *.jpg
+
+# Backup config files
+backup/
