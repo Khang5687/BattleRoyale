@@ -12,12 +12,25 @@ find_package(Vulkan REQUIRED)
 # GLFW via pkg-config to be robust with Homebrew
 pkg_check_modules(GLFW3 REQUIRED IMPORTED_TARGET glfw3)
 
+# Main simulation executable
 add_executable(battleroyale5
   src/main.cpp
   src/damage_curve.cpp
 )
 
 target_link_libraries(battleroyale5 PRIVATE Vulkan::Vulkan PkgConfig::GLFW3)
+
+# Config tool executable
+add_executable(battleroyale5-config
+  src/config_main.cpp
+  src/damage_curve.cpp
+)
+
+target_link_libraries(battleroyale5-config PRIVATE PkgConfig::GLFW3)
+
+# OpenGL for config tool
+find_package(OpenGL REQUIRED)
+target_link_libraries(battleroyale5-config PRIVATE OpenGL::GL)
 
 target_compile_definitions(battleroyale5 PRIVATE GLFW_INCLUDE_VULKAN)
 

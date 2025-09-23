@@ -130,6 +130,19 @@ battleroyale5/fast:
 .PHONY : battleroyale5/fast
 
 #=============================================================================
+# Target rules for targets named battleroyale5-config
+
+# Build rule for target.
+battleroyale5-config: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 battleroyale5-config
+.PHONY : battleroyale5-config
+
+# fast build rule for target.
+battleroyale5-config/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/build
+.PHONY : battleroyale5-config/fast
+
+#=============================================================================
 # Target rules for targets named battleroyale5_shaders
 
 # Build rule for target.
@@ -142,12 +155,37 @@ battleroyale5_shaders/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5_shaders.dir/build.make CMakeFiles/battleroyale5_shaders.dir/build
 .PHONY : battleroyale5_shaders/fast
 
+src/config_main.o: src/config_main.cpp.o
+.PHONY : src/config_main.o
+
+# target to build an object file
+src/config_main.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/config_main.cpp.o
+.PHONY : src/config_main.cpp.o
+
+src/config_main.i: src/config_main.cpp.i
+.PHONY : src/config_main.i
+
+# target to preprocess a source file
+src/config_main.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/config_main.cpp.i
+.PHONY : src/config_main.cpp.i
+
+src/config_main.s: src/config_main.cpp.s
+.PHONY : src/config_main.s
+
+# target to generate assembly for a file
+src/config_main.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/config_main.cpp.s
+.PHONY : src/config_main.cpp.s
+
 src/damage_curve.o: src/damage_curve.cpp.o
 .PHONY : src/damage_curve.o
 
 # target to build an object file
 src/damage_curve.cpp.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5.dir/build.make CMakeFiles/battleroyale5.dir/src/damage_curve.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.o
 .PHONY : src/damage_curve.cpp.o
 
 src/damage_curve.i: src/damage_curve.cpp.i
@@ -156,6 +194,7 @@ src/damage_curve.i: src/damage_curve.cpp.i
 # target to preprocess a source file
 src/damage_curve.cpp.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5.dir/build.make CMakeFiles/battleroyale5.dir/src/damage_curve.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.i
 .PHONY : src/damage_curve.cpp.i
 
 src/damage_curve.s: src/damage_curve.cpp.s
@@ -164,6 +203,7 @@ src/damage_curve.s: src/damage_curve.cpp.s
 # target to generate assembly for a file
 src/damage_curve.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5.dir/build.make CMakeFiles/battleroyale5.dir/src/damage_curve.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.s
 .PHONY : src/damage_curve.cpp.s
 
 src/main.o: src/main.cpp.o
@@ -200,6 +240,10 @@ help:
 	@echo "... rebuild_cache"
 	@echo "... battleroyale5_shaders"
 	@echo "... battleroyale5"
+	@echo "... battleroyale5-config"
+	@echo "... src/config_main.o"
+	@echo "... src/config_main.i"
+	@echo "... src/config_main.s"
 	@echo "... src/damage_curve.o"
 	@echo "... src/damage_curve.i"
 	@echo "... src/damage_curve.s"
