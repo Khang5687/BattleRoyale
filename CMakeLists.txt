@@ -16,6 +16,7 @@ pkg_check_modules(GLFW3 REQUIRED IMPORTED_TARGET glfw3)
 add_executable(battleroyale5
   src/main.cpp
   src/damage_curve.cpp
+  src/font_loader.cpp
 )
 
 target_link_libraries(battleroyale5 PRIVATE Vulkan::Vulkan PkgConfig::GLFW3)
@@ -24,6 +25,7 @@ target_link_libraries(battleroyale5 PRIVATE Vulkan::Vulkan PkgConfig::GLFW3)
 add_executable(battleroyale5-config
   src/config_main.cpp
   src/damage_curve.cpp
+  src/font_loader.cpp
 )
 
 target_link_libraries(battleroyale5-config PRIVATE PkgConfig::GLFW3)

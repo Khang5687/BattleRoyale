@@ -206,6 +206,33 @@ src/damage_curve.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.s
 .PHONY : src/damage_curve.cpp.s
 
+src/font_loader.o: src/font_loader.cpp.o
+.PHONY : src/font_loader.o
+
+# target to build an object file
+src/font_loader.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5.dir/build.make CMakeFiles/battleroyale5.dir/src/font_loader.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.o
+.PHONY : src/font_loader.cpp.o
+
+src/font_loader.i: src/font_loader.cpp.i
+.PHONY : src/font_loader.i
+
+# target to preprocess a source file
+src/font_loader.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5.dir/build.make CMakeFiles/battleroyale5.dir/src/font_loader.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.i
+.PHONY : src/font_loader.cpp.i
+
+src/font_loader.s: src/font_loader.cpp.s
+.PHONY : src/font_loader.s
+
+# target to generate assembly for a file
+src/font_loader.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5.dir/build.make CMakeFiles/battleroyale5.dir/src/font_loader.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/battleroyale5-config.dir/build.make CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.s
+.PHONY : src/font_loader.cpp.s
+
 src/main.o: src/main.cpp.o
 .PHONY : src/main.o
 
@@ -247,6 +274,9 @@ help:
 	@echo "... src/damage_curve.o"
 	@echo "... src/damage_curve.i"
 	@echo "... src/damage_curve.s"
+	@echo "... src/font_loader.o"
+	@echo "... src/font_loader.i"
+	@echo "... src/font_loader.s"
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"

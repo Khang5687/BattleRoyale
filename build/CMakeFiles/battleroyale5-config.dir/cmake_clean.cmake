@@ -3,6 +3,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/battleroyale5-config.dir/src/config_main.cpp.o.d"
   "CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.o"
   "CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.o.d"
+  "CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.o"
+  "CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.o.d"
   "battleroyale5-config"
   "battleroyale5-config.pdb"
 )

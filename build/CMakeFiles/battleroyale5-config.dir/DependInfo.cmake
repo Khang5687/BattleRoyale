@@ -10,6 +10,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/config_main.cpp" "CMakeFiles/battleroyale5-config.dir/src/config_main.cpp.o" "gcc" "CMakeFiles/battleroyale5-config.dir/src/config_main.cpp.o.d"
   "/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/damage_curve.cpp" "CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.o" "gcc" "CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.o.d"
+  "/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/font_loader.cpp" "CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.o" "gcc" "CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

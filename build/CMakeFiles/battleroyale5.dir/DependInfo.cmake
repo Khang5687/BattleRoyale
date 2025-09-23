@@ -9,6 +9,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/damage_curve.cpp" "CMakeFiles/battleroyale5.dir/src/damage_curve.cpp.o" "gcc" "CMakeFiles/battleroyale5.dir/src/damage_curve.cpp.o.d"
+  "/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/font_loader.cpp" "CMakeFiles/battleroyale5.dir/src/font_loader.cpp.o" "gcc" "CMakeFiles/battleroyale5.dir/src/font_loader.cpp.o.d"
   "/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/main.cpp" "CMakeFiles/battleroyale5.dir/src/main.cpp.o" "gcc" "CMakeFiles/battleroyale5.dir/src/main.cpp.o.d"
   )
 

@@ -11,6 +11,12 @@
 #include <string>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "../stb/stb_truetype.h"
+
+#include "font_loader.hpp"
 
 #include "damage_curve.hpp"
 
@@ -32,6 +38,89 @@ const float POINT_COLOR[3] = {0.8f, 0.2f, 0.2f};
 const float POINT_HOVER_COLOR[3] = {1.0f, 0.4f, 0.4f};
 const float BACKGROUND_COLOR[3] = {0.1f, 0.1f, 0.1f};
 const float TEXT_COLOR[3] = {0.9f, 0.9f, 0.9f};
+
+struct FontRenderer {
+    GLuint textureId = 0;
+    float pixelHeight = 32.0f;
+    bool ready = false;
+    std::vector<unsigned char> fontData;
+    br5::FontAtlas atlas;
+    stbtt_fontinfo fontInfo{};
+};
+
+static FontRenderer g_fontRenderer;
+
+void destroyFontRenderer();
+
+bool initializeFontRenderer(float pixelHeight) {
+    if (g_fontRenderer.ready) {
+        if (std::fabs(pixelHeight - g_fontRenderer.pixelHeight) < 0.5f) {
+            return true;
+        }
+        destroyFontRenderer();
+    }
+
+    const std::filesystem::path fontPath = br5::findDefaultFontAsset();
+    if (fontPath.empty()) {
+        std::cerr << "Config font not found. Expected assets/fonts/hud.ttf or compatible fallback." << std::endl;
+        return false;
+    }
+
+    g_fontRenderer.fontData.clear();
+    if (!br5::loadFontFile(fontPath, g_fontRenderer.fontData)) {
+        std::cerr << "Failed to read config font file: " << fontPath << std::endl;
+        return false;
+    }
+
+    g_fontRenderer.pixelHeight = pixelHeight;
+
+    if (!br5::buildFontAtlas(g_fontRenderer.fontData, pixelHeight, g_fontRenderer.atlas, g_fontRenderer.fontInfo)) {
+        std::cerr << "Failed to build font atlas for config UI" << std::endl;
+        g_fontRenderer.fontData.clear();
+        return false;
+    }
+
+    std::vector<unsigned char> atlasRgba(g_fontRenderer.atlas.pixels.size() * 4, 255);
+    for (size_t i = 0; i < g_fontRenderer.atlas.pixels.size(); ++i) {
+        unsigned char alpha = g_fontRenderer.atlas.pixels[i];
+        atlasRgba[i * 4 + 0] = 255;
+        atlasRgba[i * 4 + 1] = 255;
+        atlasRgba[i * 4 + 2] = 255;
+        atlasRgba[i * 4 + 3] = alpha;
+    }
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glGenTextures(1, &g_fontRenderer.textureId);
+    glBindTexture(GL_TEXTURE_2D, g_fontRenderer.textureId);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                 static_cast<GLsizei>(g_fontRenderer.atlas.atlasWidth),
+                 static_cast<GLsizei>(g_fontRenderer.atlas.atlasHeight),
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, atlasRgba.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    g_fontRenderer.ready = true;
+
+    std::cout << "Config font ready from '" << fontPath.string() << "' ("
+              << g_fontRenderer.atlas.atlasWidth << "x" << g_fontRenderer.atlas.atlasHeight
+              << ", glyphs " << g_fontRenderer.atlas.glyphs.size() << ")" << std::endl;
+    return true;
+}
+
+void destroyFontRenderer() {
+    if (g_fontRenderer.textureId != 0) {
+        glDeleteTextures(1, &g_fontRenderer.textureId);
+        g_fontRenderer.textureId = 0;
+    }
+
+    g_fontRenderer.fontData.clear();
+    g_fontRenderer.atlas.pixels.clear();
+    g_fontRenderer.atlas.glyphs.clear();
+    g_fontRenderer.ready = false;
+}
 
 // UI state
 struct UIState {
@@ -152,46 +241,65 @@ void drawCircle(float centerX, float centerY, float radius, const float color[3]
 }
 
 // Simple bitmap font rendering using OpenGL
-void drawText(float x, float y, const std::string& text, const float color[3] = TEXT_COLOR) {
-    glColor3f(color[0], color[1], color[2]);
-
-    // Simple character rendering - each character is 8x12 pixels
-    const float charWidth = 8.0f;
-    const float charHeight = 12.0f;
-
-    for (size_t i = 0; i < text.length(); ++i) {
-        char c = text[i];
-        float charX = x + i * charWidth;
-
-        // Skip non-printable characters
-        if (c < 32 || c > 126) continue;
-
-        // Draw a simple rectangle representation for each character
-        // This is a minimal implementation - could be enhanced with actual bitmap fonts
-        glBegin(GL_LINE_LOOP);
-        glVertex2f(charX, y);
-        glVertex2f(charX + charWidth - 2, y);
-        glVertex2f(charX + charWidth - 2, y + charHeight);
-        glVertex2f(charX, y + charHeight);
-        glEnd();
-
-        // Draw some simple character patterns for common letters
-        glBegin(GL_LINES);
-        if (c >= 'A' && c <= 'Z') {
-            // Draw a simple pattern for uppercase letters
-            glVertex2f(charX + 2, y + 2);
-            glVertex2f(charX + charWidth - 4, y + charHeight - 2);
-        } else if (c >= 'a' && c <= 'z') {
-            // Draw a simple pattern for lowercase letters
-            glVertex2f(charX + 2, y + charHeight/2);
-            glVertex2f(charX + charWidth - 4, y + charHeight/2);
-        } else if (c >= '0' && c <= '9') {
-            // Draw a simple pattern for numbers
-            glVertex2f(charX + charWidth/2, y + 2);
-            glVertex2f(charX + charWidth/2, y + charHeight - 2);
-        }
-        glEnd();
+void drawText(float x, float bottom, const std::string& text, const float color[3] = TEXT_COLOR) {
+    if (!g_fontRenderer.ready || text.empty()) {
+        return;
     }
+
+    float cursorX = x;
+    float baseline = bottom - g_fontRenderer.atlas.descent;
+    const float lineHeight = g_fontRenderer.atlas.lineAdvance > 0.0f
+        ? g_fontRenderer.atlas.lineAdvance
+        : (g_fontRenderer.atlas.ascent - g_fontRenderer.atlas.descent);
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, g_fontRenderer.textureId);
+    glColor4f(color[0], color[1], color[2], 1.0f);
+
+    glBegin(GL_QUADS);
+    uint32_t prevGlyphIndex = 0;
+    for (unsigned char ch : text) {
+        if (ch == '\n') {
+            cursorX = x;
+            baseline -= lineHeight;
+            prevGlyphIndex = 0;
+            continue;
+        }
+
+        uint32_t codepoint = static_cast<uint32_t>(ch);
+        auto glyphIt = g_fontRenderer.atlas.glyphs.find(codepoint);
+        if (glyphIt == g_fontRenderer.atlas.glyphs.end()) {
+            glyphIt = g_fontRenderer.atlas.glyphs.find(static_cast<uint32_t>('?'));
+            if (glyphIt == g_fontRenderer.atlas.glyphs.end()) {
+                continue;
+            }
+        }
+
+        const auto& glyph = glyphIt->second;
+
+        float x0 = cursorX + glyph.xoff;
+        float x1 = cursorX + glyph.xoff2;
+        float yTop = baseline - glyph.yoff;
+        float yBottom = baseline - glyph.yoff2;
+
+        glTexCoord2f(glyph.u0, glyph.v0); glVertex2f(x0, yTop);
+        glTexCoord2f(glyph.u1, glyph.v0); glVertex2f(x1, yTop);
+        glTexCoord2f(glyph.u1, glyph.v1); glVertex2f(x1, yBottom);
+        glTexCoord2f(glyph.u0, glyph.v1); glVertex2f(x0, yBottom);
+
+        float advance = glyph.xadvance;
+        if (prevGlyphIndex != 0 && glyph.glyphIndex != 0) {
+            advance += static_cast<float>(stbtt_GetGlyphKernAdvance(&g_fontRenderer.fontInfo, prevGlyphIndex, glyph.glyphIndex))
+                       * g_fontRenderer.atlas.scale;
+        }
+
+        cursorX += advance;
+        prevGlyphIndex = glyph.glyphIndex;
+    }
+    glEnd();
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
 }
 
 void drawGrid() {
@@ -331,19 +439,30 @@ void drawUI() {
     }
 
     // Add title and instructions
-    float titleY = g_uiState.currentFramebufferHeight - 20.0f * g_uiState.dpiScaleY;
+    float baseSpacing = g_fontRenderer.ready ?
+        (g_fontRenderer.atlas.lineAdvance > 0.0f ? g_fontRenderer.atlas.lineAdvance : (g_fontRenderer.atlas.ascent - g_fontRenderer.atlas.descent))
+        : 18.0f * g_uiState.dpiScaleY;
     const float titleColor[3] = {1.0f, 1.0f, 1.0f};
-    drawText(15.0f * g_uiState.dpiScaleX, titleY, "Damage Curve Presets:", titleColor);
+    float titleBaseline = g_uiState.currentFramebufferHeight - 35.0f * g_uiState.dpiScaleY;
+    drawText(15.0f * g_uiState.dpiScaleX, titleBaseline, "Damage Curve Presets:", titleColor);
+
+    // Current preset indicator
+    if (g_fontRenderer.ready && g_uiState.currentPreset != CurvePreset::CUSTOM) {
+        float indicatorBaseline = titleBaseline - (baseSpacing + 8.0f * g_uiState.dpiScaleY);
+        const float indicatorColor[3] = {0.5f, 1.0f, 0.5f};
+        const std::string currentText = "Active: " + presetNames[static_cast<int>(g_uiState.currentPreset)];
+        drawText(15.0f * g_uiState.dpiScaleX, indicatorBaseline, currentText, indicatorColor);
+    }
 
     // Add instructions at bottom of panel
-    float instructY = 80.0f * g_uiState.dpiScaleY;
+    float instructBaseline = 95.0f * g_uiState.dpiScaleY;
     const float instructColor[3] = {0.7f, 0.7f, 0.7f};
     float instructX = 15.0f * g_uiState.dpiScaleX;
-    float instructLineSpacing = 15.0f * g_uiState.dpiScaleY;
-    drawText(instructX, instructY, "Ctrl+S: Save", instructColor);
-    drawText(instructX, instructY - instructLineSpacing, "Ctrl+L: Load", instructColor);
-    drawText(instructX, instructY - 2 * instructLineSpacing, "G: Toggle Grid", instructColor);
-    drawText(instructX, instructY - 3 * instructLineSpacing, "Right-click: Del Point", instructColor);
+    float instructSpacing = baseSpacing + 6.0f * g_uiState.dpiScaleY;
+    drawText(instructX, instructBaseline, "Ctrl+S: Save", instructColor);
+    drawText(instructX, instructBaseline - instructSpacing, "Ctrl+L: Load", instructColor);
+    drawText(instructX, instructBaseline - 2 * instructSpacing, "G: Toggle Grid", instructColor);
+    drawText(instructX, instructBaseline - 3 * instructSpacing, "Right-click: Del Point", instructColor);
 
     // Add axis labels for the curve area
     const float labelColor[3] = {0.8f, 0.8f, 0.8f};
@@ -364,13 +483,6 @@ void drawUI() {
     drawText(yLabelX, yLabelY - 4 * yLabelSpacing, "g", labelColor);
     drawText(yLabelX, yLabelY - 5 * yLabelSpacing, "e", labelColor);
 
-    // Current preset indicator
-    if (g_uiState.currentPreset != CurvePreset::CUSTOM) {
-        float indicatorY = startY + 40.0f * g_uiState.dpiScaleY;
-        const float indicatorColor[3] = {0.5f, 1.0f, 0.5f};
-        const std::string currentText = "Active: " + presetNames[static_cast<int>(g_uiState.currentPreset)];
-        drawText(15.0f * g_uiState.dpiScaleX, indicatorY, currentText, indicatorColor);
-    }
 }
 
 void render() {
@@ -571,6 +683,7 @@ void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
 
     // Update curve area using framebuffer coordinates
     updateCurveArea();
+    initializeFontRenderer(28.0f * g_uiState.dpiScaleY);
 }
 
 int main() {
@@ -609,6 +722,10 @@ int main() {
     glfwGetFramebufferSize(window, &width, &height);
     framebufferSizeCallback(window, width, height);
 
+    if (!initializeFontRenderer(28.0f * g_uiState.dpiScaleY)) {
+        std::cerr << "Config font unavailable; UI text disabled." << std::endl;
+    }
+
     // Initialize UI state
     updateCurveArea();
     g_uiState.curve.loadPreset(CurvePreset::BATTLE_ROYALE);
@@ -632,6 +749,7 @@ int main() {
     }
 
     // Cleanup
+    destroyFontRenderer();
     glfwDestroyWindow(window);
     glfwTerminate();
 

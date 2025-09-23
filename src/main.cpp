@@ -36,6 +36,7 @@
 #include "../stb/stb_image_resize2.h"
 
 #include "damage_curve.hpp"
+#include "font_loader.hpp"
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -2951,25 +2952,6 @@ static void transitionImageLayout(VkDevice device, VkCommandPool commandPool, Vk
 	endSingleTimeCommands(device, commandPool, graphicsQueue, commandBuffer);
 }
 
-static bool loadFontFile(const std::filesystem::path& path, std::vector<unsigned char>& out) {
-	std::ifstream file(path, std::ios::binary);
-	if (!file) {
-		return false;
-	}
-	file.seekg(0, std::ios::end);
-	const auto size = static_cast<size_t>(file.tellg());
-	file.seekg(0, std::ios::beg);
-	out.resize(size);
-	if (size > 0) {
-		file.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
-		if (!file) {
-			out.clear();
-			return false;
-		}
-	}
-	return true;
-}
-
 static void uploadHudFontAtlas(HudFont& font, VkPhysicalDevice physical, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, const std::vector<unsigned char>& pixels) {
 	BufferWithMemory staging;
 	VkDeviceSize imageSize = static_cast<VkDeviceSize>(pixels.size());
@@ -3000,21 +2982,7 @@ static void uploadHudFontAtlas(HudFont& font, VkPhysicalDevice physical, VkDevic
 }
 
 static bool loadHudFont(HudFont& font, VkPhysicalDevice physical, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue) {
-	const std::array<std::filesystem::path, 4> candidatePaths = {
-		std::filesystem::path("assets/fonts/hud.ttf"),
-		std::filesystem::path("assets/fonts/Roboto-Regular.ttf"),
-		std::filesystem::path("assets/hud.ttf"),
-		std::filesystem::path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
-	};
-
-	std::filesystem::path fontPath;
-	for (const auto& candidate : candidatePaths) {
-		if (!candidate.empty() && std::filesystem::exists(candidate)) {
-			fontPath = candidate;
-			break;
-		}
-	}
-
+	std::filesystem::path fontPath = br5::findDefaultFontAsset();
 	if (fontPath.empty()) {
 		std::cerr << "HUD font not found. Expected assets/fonts/hud.ttf or compatible fallback." << std::endl;
 		return false;
@@ -3022,7 +2990,7 @@ static bool loadHudFont(HudFont& font, VkPhysicalDevice physical, VkDevice devic
 
 	std::cout << "HUD font: attempting to load '" << fontPath.string() << "'" << std::endl;
 
-	if (!loadFontFile(fontPath, font.fontData)) {
+	if (!br5::loadFontFile(fontPath, font.fontData)) {
 		std::cerr << "Failed to read HUD font file: " << fontPath << std::endl;
 		return false;
 	}
