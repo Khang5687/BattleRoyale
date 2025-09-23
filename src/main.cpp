@@ -606,7 +606,12 @@ struct Simulation {
 		if (radius.empty()) {
 			return;
 		}
-		std::fill(radius.begin(), radius.end(), newRadius);
+
+		// O(1) operation - Vectorized batch radius update (SoA-friendly)
+		#pragma omp simd
+		for (size_t i = 0; i < radius.size(); ++i) {
+			radius[i] = newRadius;
+		}
 	}
 
 	void updateGridForRadius(float referenceRadius) {

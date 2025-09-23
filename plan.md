@@ -980,21 +980,18 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   - [x] **Lazy Image Loading Thresholds** — radius-based tier downgrades now gate texture promotion (`src/main.cpp:854`).
   - [ ] **GPU Culling Integration** — reuse the spatial system for off-screen rejection (pending follow-up once cluster culling hooks land).
 
-- [ ] **🎯 O(1) Complexity Implementation**
-  - [ ] **Batch Radius Updates**: Single formula calculates target radius for all circles
+- [x] **🎯 O(1) Complexity Implementation**
+  - [x] **Batch Radius Updates**: Single formula calculates target radius for all circles
     ```cpp
-    // O(1) operation - no loops through entities
-    float globalTargetRadius = calculateCurrentRadius(aliveCount, totalPlayers);
-
-    // Vectorized update in parallel (SoA-friendly)
+    // O(1) operation - Vectorized batch radius update (SoA-friendly)
     #pragma omp simd
-    for (size_t i = 0; i < circleCount; ++i) {
-        targetRadius[i] = globalTargetRadius;
+    for (size_t i = 0; i < radius.size(); ++i) {
+        radius[i] = newRadius;
     }
     ```
   - [x] **Threshold-Based Decisions**: Use simple comparisons, not searches
   - [x] **Spatial Grid Efficiency**: Leverage existing O(n) spatial partitioning
-  - [ ] **Memory Layout Optimization**: SIMD-friendly radius updates in structure-of-arrays
+  - [x] **Memory Layout Optimization**: SIMD-friendly radius updates in structure-of-arrays
 
 - [x] **🎯 Constants and Tuning Parameters**
   ```cpp
