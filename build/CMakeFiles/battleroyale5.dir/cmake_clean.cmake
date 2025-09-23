@@ -1,4 +1,6 @@
 file(REMOVE_RECURSE
+  "CMakeFiles/battleroyale5.dir/src/damage_curve.cpp.o"
+  "CMakeFiles/battleroyale5.dir/src/damage_curve.cpp.o.d"
   "CMakeFiles/battleroyale5.dir/src/main.cpp.o"
   "CMakeFiles/battleroyale5.dir/src/main.cpp.o.d"
   "battleroyale5"

@@ -1,0 +1,17 @@
+# simulation_config.txt - Damage Scaling Configuration
+damage_curve_version=1.0
+
+# Curve interpolation method: linear, spline
+curve_interpolation=spline
+
+# Control points: playerRatio:damageMultiplier (sorted by playerRatio)
+# This is the BATTLE_ROYALE preset: slow early game, accelerating finale
+curve_points=0.0:0.5,0.3:0.8,0.7:1.5,1.0:2.5
+
+# Curve validation bounds
+min_damage_multiplier=0.1
+max_damage_multiplier=5.0
+
+# Additional simulation parameters
+enable_curve_smoothing=true
+curve_update_frequency=60  # Hz for real-time curve evaluation

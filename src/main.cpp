@@ -35,6 +35,8 @@
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "../stb/stb_image_resize2.h"
 
+#include "damage_curve.hpp"
+
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
 #endif
@@ -44,6 +46,9 @@
 #ifndef VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
 #define VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME "VK_KHR_get_physical_device_properties2"
 #endif
+
+// Global damage curve instance for dynamic damage scaling
+static DamageCurve globalDamageCurve;
 
 static void glfwErrorCallback(int code, const char* desc) {
 	std::fprintf(stderr, "GLFW error %d: %s\n", code, desc);
@@ -396,6 +401,18 @@ struct Simulation {
 			}
 		}
 		std::cout << "Loaded " << biasReductions.size() << " bias entries\n";
+	}
+
+	void loadDamageCurveConfig(const std::string& configFile) {
+		try {
+			globalDamageCurve.loadConfiguration(configFile);
+			std::cout << "Loaded damage curve configuration with "
+					  << globalDamageCurve.getPointCount() << " control points\n";
+		} catch (const std::exception& e) {
+			std::cerr << "Error loading damage curve config: " << e.what()
+					  << ". Using default BATTLE_ROYALE preset.\n";
+			globalDamageCurve.loadPreset(CurvePreset::BATTLE_ROYALE);
+		}
 	}
 
 	void initializeFromAssets(const std::string& assetsDir, uint32_t targetCount) {
@@ -819,14 +836,9 @@ struct Simulation {
 									float totalImpact = impactDamage + penetrationDamage + relativeDamage;
 									float baseDamage = std::max(minDamage, totalImpact * damageMultiplier);
 									
-									// Apply population-based damage scaling - less damage as fewer players remain
+									// Apply dynamic curve-based damage scaling
 									uint32_t currentAlive = aliveCount();
-									float aliveRatio = static_cast<float>(currentAlive) / static_cast<float>(std::max(1u, maxPlayers));
-									aliveRatio = std::clamp(aliveRatio, 0.0f, 1.0f);
-									float populationScale = std::pow(aliveRatio, 1.2f);
-									populationScale = std::clamp(populationScale, 0.08f, 1.0f);
-
-									float scaledBaseDamage = baseDamage * populationScale;
+									float scaledBaseDamage = calculateDynamicDamage(globalDamageCurve, baseDamage, currentAlive, maxPlayers);
 									float finalDamageI = scaledBaseDamage;
 									float finalDamageJ = scaledBaseDamage;
 
@@ -1132,14 +1144,8 @@ struct StatisticalCluster {
 	void processEliminations(float damage, uint32_t totalPopulation = 10000) {
 		if (aliveCount == 0) return;
 
-		// Apply population-based damage scaling - clusters also scale with total population
-		float populationRatio = static_cast<float>(totalPopulation) / 10000.0f; // Normalize to initial population
-		populationRatio = std::clamp(populationRatio, 0.0f, 1.0f);
-		float populationScale = std::pow(populationRatio, 1.2f);
-		populationScale = std::clamp(populationScale, 0.08f, 1.0f);
-
-		// Apply statistical damage - much more gradual elimination
-		float scaledDamage = damage * populationScale;
+		// Apply dynamic curve-based damage scaling for clusters
+		float scaledDamage = calculateDynamicDamage(globalDamageCurve, damage, totalPopulation, 10000);
 		float eliminationRate = std::min(0.001f, scaledDamage * 0.1f); // Max 0.1% elimination per frame
 		uint32_t eliminations = static_cast<uint32_t>(aliveCount * eliminationRate);
 		aliveCount = (eliminations >= aliveCount) ? 0 : aliveCount - eliminations;
@@ -3726,6 +3732,8 @@ int main() {
 	sim.imageManager = &imageManager;
 	std::cout << "Loading bias config..." << std::endl; std::cout.flush();
 	sim.loadBiasConfig("bias.txt");
+	std::cout << "Loading damage curve config..." << std::endl; std::cout.flush();
+	sim.loadDamageCurveConfig("simulation_config.txt");
 	std::cout << "Initializing from assets..." << std::endl; std::cout.flush();
 	sim.initializeFromAssets("assets", sim.maxPlayers);
 	std::cout << "Simulation initialized!" << std::endl; std::cout.flush();
