@@ -287,8 +287,8 @@ struct Simulation {
 	// Stage 2 – dynamic circle scaling parameters
 	static constexpr float MIN_CIRCLE_RADIUS = 2.0f;
 	static constexpr float MAX_CIRCLE_RADIUS = 200.0f;
-	static constexpr float INITIAL_DENSITY_FACTOR = 0.6f;
-	static constexpr float FINAL_SIZE_FACTOR = 0.15f;
+	static constexpr float INITIAL_DENSITY_FACTOR = 0.6f;  // Reduced from 0.6f for smaller initial circles
+	static constexpr float FINAL_SIZE_FACTOR = 0.02f;     // Reduced from 0.15f for smaller final circles
 	static constexpr float RADIUS_TRANSITION_SPEED = 2.0f; // Units per second toward target radius
 	static constexpr float RADIUS_SNAP_EPSILON = 0.05f;
 	static constexpr float GRID_CELL_SCALE = 2.2f;
@@ -333,6 +333,9 @@ struct Simulation {
 
 	// Bias system - now uses damage reduction instead of health multipliers
 	std::map<std::string, float> biasReductions; // 0.0 = no reduction, 0.5 = 50% damage reduction
+
+	// Size factor system - customizable final circle sizes based on remaining players
+	std::map<uint32_t, float> sizeFactors; // player count -> size factor multiplier
 
 	// Helper function to normalize velocity to dynamic speed (with speed boost)
 	void normalizeVelocity(size_t i) {
@@ -402,6 +405,27 @@ struct Simulation {
 			}
 		}
 		std::cout << "Loaded " << biasReductions.size() << " bias entries\n";
+	}
+
+	void loadSizeFactorsConfig(const std::string& sizeFactorsFile) {
+		sizeFactors.clear();
+		std::ifstream file(sizeFactorsFile);
+		if (!file.is_open()) {
+			std::cout << "No size factors config found, using default FINAL_SIZE_FACTOR\n";
+			return;
+		}
+		std::string line;
+		while (std::getline(file, line)) {
+			size_t pos = line.find(':');
+			if (pos != std::string::npos) {
+				uint32_t playerCount = std::stoul(line.substr(0, pos));
+				float factor = std::stof(line.substr(pos + 1));
+				// Clamp factor to reasonable bounds [0.01, 1.0] to prevent extreme sizes
+				factor = std::clamp(factor, 0.01f, 1.0f);
+				sizeFactors[playerCount] = factor;
+			}
+		}
+		std::cout << "Loaded " << sizeFactors.size() << " size factor entries\n";
 	}
 
 	void loadDamageCurveConfig(const std::string& configFile) {
@@ -598,7 +622,20 @@ struct Simulation {
 		aliveRatio = std::clamp(aliveRatio, 0.0f, 1.0f);
 		float eliminationRatio = 1.0f - aliveRatio;
 		float t = smoothstep(0.0f, 1.0f, eliminationRatio);
-		float target = std::lerp(initialCircleRadius, finalCircleRadius, t);
+
+		// Use configurable size factor based on current alive count, or default to finalCircleRadius
+		float targetFinalRadius = finalCircleRadius;
+		if (!sizeFactors.empty()) {
+			// Find the largest threshold that is <= current alive count
+			auto it = sizeFactors.upper_bound(alivePlayers);
+			if (it != sizeFactors.begin()) {
+				--it; // Get the threshold <= alivePlayers
+				targetFinalRadius = std::min(worldWidth, worldHeight) * it->second;
+				targetFinalRadius = std::clamp(targetFinalRadius, MIN_CIRCLE_RADIUS, MAX_CIRCLE_RADIUS);
+			}
+		}
+
+		float target = std::lerp(initialCircleRadius, targetFinalRadius, t);
 		return std::clamp(target, MIN_CIRCLE_RADIUS, MAX_CIRCLE_RADIUS);
 	}
 
@@ -3705,6 +3742,8 @@ int main() {
 	sim.imageManager = &imageManager;
 	std::cout << "Loading bias config..." << std::endl; std::cout.flush();
 	sim.loadBiasConfig("bias.txt");
+	std::cout << "Loading size factors config..." << std::endl; std::cout.flush();
+	sim.loadSizeFactorsConfig("size_factors.txt");
 	std::cout << "Loading damage curve config..." << std::endl; std::cout.flush();
 	sim.loadDamageCurveConfig("simulation_config.txt");
 	std::cout << "Initializing from assets..." << std::endl; std::cout.flush();

@@ -103,6 +103,12 @@ if [ -f "$PROJECT_ROOT/bias.txt" ]; then
     echo -e "${GREEN}✅ bias.txt copied${NC}"
 fi
 
+# Copy size_factors.txt if it exists
+if [ -f "$PROJECT_ROOT/size_factors.txt" ]; then
+    cp "$PROJECT_ROOT/size_factors.txt" "$BUILD_DIR/"
+    echo -e "${GREEN}✅ size_factors.txt copied${NC}"
+fi
+
 # Check if shaders were compiled
 if [ -f "$BUILD_DIR/shaders/circle.vert.spv" ] && [ -f "$BUILD_DIR/shaders/circle.frag.spv" ]; then
     echo -e "${GREEN}✅ Shaders compiled successfully${NC}"
