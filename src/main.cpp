@@ -282,7 +282,7 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 50000;
+	uint32_t maxPlayers = 0;
 
 	// Stage 2 – dynamic circle scaling parameters
 	static constexpr float MIN_CIRCLE_RADIUS = 2.0f;
@@ -309,6 +309,11 @@ struct Simulation {
 	static constexpr float HEALTH_BAR_SIMPLE_SHAPE_WIDTH_SCALE = 0.75f;
 	static constexpr float HEALTH_BAR_BASIC_TEXTURE_WIDTH_SCALE = 1.875f;
 	static constexpr float HEALTH_BAR_FULL_DETAIL_WIDTH_SCALE = 2.5f;
+
+	// Winner animation constants
+	static constexpr float WINNER_GROWTH_SPEED = 1.5f;     // Units per second growth rate
+	static constexpr float WINNER_GROWTH_DURATION = 3.0f;  // Total animation time in seconds
+	static constexpr float WINNER_FINAL_SCALE_MULTIPLIER = 1.2f; // Scale beyond MAX_CIRCLE_RADIUS
 
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
@@ -386,6 +391,12 @@ struct Simulation {
 	int winnerIndex = -1;
 	bool victorySetupDone = false;
 
+	// Winner growth animation state
+	float winnerAnimationStartTime = 0.0f;
+	float winnerInitialRadius = 0.0f;
+	float winnerTargetRadius = 0.0f;
+	bool winnerAnimationComplete = false;
+
 	void loadBiasConfig(const std::string& biasFile) {
 		biasReductions.clear();
 		std::ifstream file(biasFile);
@@ -454,28 +465,36 @@ struct Simulation {
 		if (imageManager) {
 			imageManager->atlas.imageFiles = files;
 		}
-		uint32_t count = std::min<uint32_t>(targetCount, static_cast<uint32_t>(files.size()));
-		if (count == 0) count = targetCount; // fallback to fakes
 
-		maxPlayers = targetCount;
+		uint32_t count;
+		if (targetCount == 0) {
+			// When maxPlayers is 0, only load real players from images, no fakes
+			count = static_cast<uint32_t>(files.size());
+		} else {
+			// When maxPlayers > 0, use target count with fallback to fakes if needed
+			count = std::min<uint32_t>(targetCount, static_cast<uint32_t>(files.size()));
+			if (count == 0) count = targetCount; // fallback to fakes
+		}
+
+		maxPlayers = count;
 		initialCircleRadius = calculateInitialRadius(maxPlayers);
 		finalCircleRadius = calculateFinalRadius();
 		globalCurrentRadius = initialCircleRadius;
 		globalTargetRadius = initialCircleRadius;
 		updateGridForRadius(globalCurrentRadius);
 
-		posX.resize(targetCount);
-		posY.resize(targetCount);
-		velX.resize(targetCount);
-		velY.resize(targetCount);
-		radius.resize(targetCount);
-		health.resize(targetCount);
-		alive.resize(targetCount);
-		imageId.resize(targetCount);
-		imageTier.resize(targetCount);
-		lastDamageTick.assign(targetCount, 0);
+		posX.resize(count);
+		posY.resize(count);
+		velX.resize(count);
+		velY.resize(count);
+		radius.resize(count);
+		health.resize(count);
+		alive.resize(count);
+		imageId.resize(count);
+		imageTier.resize(count);
+		lastDamageTick.assign(count, 0);
 		damageEventCounter = 0;
-		names.resize(targetCount);
+		names.resize(count);
 
 		// TODO: New camera system will initialize here
 
@@ -532,7 +551,7 @@ struct Simulation {
 
 		// Place circles with rejection sampling
 		const int maxAttempts = 50; // Limit attempts to prevent infinite loops
-		for (uint32_t i = 0; i < targetCount; ++i) {
+		for (uint32_t i = 0; i < count; ++i) {
 			bool placed = false;
 			for (int attempt = 0; attempt < maxAttempts && !placed; ++attempt) {
 				float candidateX = distX(rng);
@@ -740,6 +759,7 @@ struct Simulation {
 		}
 	}
 
+
 	void updateSpeedIncrease() {
 		uint32_t alivePlayers = aliveCount();
 		if (alivePlayers > 5) {
@@ -775,6 +795,9 @@ struct Simulation {
 
 		// Update global circle radius based on elimination progress
 		updateRadiusScaling(dt);
+
+		// Update winner growth animation
+		updateWinnerAnimation(dt);
 
 		uint32_t aliveBeforeStep = aliveCount();
 		std::array<int, 2> finalists{ -1, -1 };
@@ -1006,13 +1029,19 @@ struct Simulation {
 				displayRadius = std::max(finalCircleRadius, globalCurrentRadius);
 			}
 
+				// Initialize winner growth animation
+				winnerAnimationStartTime = simulationTime;
+				winnerInitialRadius = displayRadius;
+				winnerTargetRadius = displayRadius * WINNER_FINAL_SCALE_MULTIPLIER;
+				winnerAnimationComplete = false;
+
 				for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
 					velX[i] = 0.0f;
 					velY[i] = 0.0f;
 					if (i == winnerIndex) {
 						posX[i] = centerX;
 						posY[i] = centerY;
-						radius[i] = displayRadius;
+						radius[i] = winnerInitialRadius; // Start with initial radius for animation
 						health[i] = 1.0f;
 						if (imageId[i] != UINT32_MAX) {
 							imageTier[i] = std::max<uint8_t>(imageTier[i], 2);
@@ -1059,6 +1088,31 @@ struct Simulation {
 					}
 					break;
 			}
+		}
+	}
+
+	// Winner growth animation update
+	void updateWinnerAnimation(float dt) {
+		if (!inVictory || winnerIndex < 0 || winnerAnimationComplete) {
+			return;
+		}
+
+		float elapsedTime = simulationTime - winnerAnimationStartTime;
+		float progress = std::min(elapsedTime / WINNER_GROWTH_DURATION, 1.0f);
+
+		// Smooth easing function for natural growth feel
+		float easedProgress = 1.0f - std::pow(1.0f - progress, 3.0f); // Ease-out cubic
+
+		// Calculate current radius based on animation progress
+		float currentRadius = std::lerp(winnerInitialRadius, winnerTargetRadius, easedProgress);
+
+		// Update winner radius
+		radius[winnerIndex] = currentRadius;
+
+		// Check if animation is complete
+		if (progress >= 1.0f) {
+			winnerAnimationComplete = true;
+			radius[winnerIndex] = winnerTargetRadius; // Ensure exact final value
 		}
 	}
 
@@ -3761,7 +3815,7 @@ int main() {
 	std::cout << "Loading damage curve config..." << std::endl; std::cout.flush();
 	sim.loadDamageCurveConfig("simulation_config.txt");
 	std::cout << "Initializing from assets..." << std::endl; std::cout.flush();
-	sim.initializeFromAssets("assets", sim.maxPlayers);
+	sim.initializeFromAssets("assets/players", sim.maxPlayers);
 	std::cout << "Simulation initialized!" << std::endl; std::cout.flush();
 
 	// Initialize adaptive simulation architecture
