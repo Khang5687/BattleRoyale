@@ -46,6 +46,10 @@ struct UIState {
     // Dynamic UI layout (updated on window resize)
     int currentWindowWidth = INITIAL_WINDOW_WIDTH;
     int currentWindowHeight = INITIAL_WINDOW_HEIGHT;
+    int currentFramebufferWidth = INITIAL_WINDOW_WIDTH;
+    int currentFramebufferHeight = INITIAL_WINDOW_HEIGHT;
+    float dpiScaleX = 1.0f;
+    float dpiScaleY = 1.0f;
     float uiPanelWidth = 0.0f;
     float curveAreaLeft = 0.0f;
     float curveAreaRight = 0.0f;
@@ -104,14 +108,14 @@ bool isPointNearMouse(float screenX, float screenY, double mouseX, double mouseY
 }
 
 void updateCurveArea() {
-    // Calculate UI panel width based on current window size
-    g_uiState.uiPanelWidth = g_uiState.currentWindowWidth * UI_PANEL_WIDTH_RATIO;
+    // Calculate UI panel width based on current framebuffer size (for rendering)
+    g_uiState.uiPanelWidth = g_uiState.currentFramebufferWidth * UI_PANEL_WIDTH_RATIO;
 
-    // Update curve area bounds
-    g_uiState.curveAreaLeft = g_uiState.uiPanelWidth + CURVE_MARGIN;
-    g_uiState.curveAreaRight = g_uiState.currentWindowWidth - CURVE_MARGIN;
-    g_uiState.curveAreaTop = CURVE_MARGIN;
-    g_uiState.curveAreaBottom = g_uiState.currentWindowHeight - CURVE_MARGIN;
+    // Update curve area bounds using framebuffer coordinates
+    g_uiState.curveAreaLeft = g_uiState.uiPanelWidth + CURVE_MARGIN * g_uiState.dpiScaleX;
+    g_uiState.curveAreaRight = g_uiState.currentFramebufferWidth - CURVE_MARGIN * g_uiState.dpiScaleX;
+    g_uiState.curveAreaTop = CURVE_MARGIN * g_uiState.dpiScaleY;
+    g_uiState.curveAreaBottom = g_uiState.currentFramebufferHeight - CURVE_MARGIN * g_uiState.dpiScaleY;
 
     // Calculate curve area dimensions
     g_uiState.curveWidth = g_uiState.curveAreaRight - g_uiState.curveAreaLeft;
@@ -258,17 +262,17 @@ void drawControlPoints() {
 }
 
 void drawUI() {
-    // Draw background panel
+    // Draw background panel using framebuffer coordinates
     glColor3f(0.05f, 0.05f, 0.05f);
     glBegin(GL_QUADS);
     glVertex2f(0, 0);
     glVertex2f(g_uiState.uiPanelWidth, 0);
-    glVertex2f(g_uiState.uiPanelWidth, g_uiState.currentWindowHeight);
-    glVertex2f(0, g_uiState.currentWindowHeight);
+    glVertex2f(g_uiState.uiPanelWidth, g_uiState.currentFramebufferHeight);
+    glVertex2f(0, g_uiState.currentFramebufferHeight);
     glEnd();
 
     // Draw panel border
-    drawLine(g_uiState.uiPanelWidth, 0, g_uiState.uiPanelWidth, g_uiState.currentWindowHeight, AXIS_COLOR, 2.0f);
+    drawLine(g_uiState.uiPanelWidth, 0, g_uiState.uiPanelWidth, g_uiState.currentFramebufferHeight, AXIS_COLOR, 2.0f);
 
     // Draw preset buttons (simplified representation)
     const std::vector<std::string> presetNames = {
@@ -277,12 +281,13 @@ void drawUI() {
     };
 
     // Calculate button positions from top of window (since Y=0 is now at bottom)
-    float buttonMargin = 10.0f;
-    float buttonSpacing = 10.0f;
-    float startY = g_uiState.currentWindowHeight - 60.0f; // Start from top with margin
+    float buttonMargin = 10.0f * g_uiState.dpiScaleX;
+    float buttonSpacing = 10.0f * g_uiState.dpiScaleY;
+    float startY = g_uiState.currentFramebufferHeight - 60.0f * g_uiState.dpiScaleY; // Start from top with margin
 
     for (size_t i = 0; i < presetNames.size(); ++i) {
-        float y = startY - i * (PRESET_BUTTON_HEIGHT + buttonSpacing);
+        float scaledButtonHeight = PRESET_BUTTON_HEIGHT * g_uiState.dpiScaleY;
+        float y = startY - i * (scaledButtonHeight + buttonSpacing);
 
         // Button background
         glColor3f(0.2f, 0.2f, 0.2f);
@@ -291,8 +296,8 @@ void drawUI() {
         }
 
         glBegin(GL_QUADS);
-        glVertex2f(buttonMargin, y - PRESET_BUTTON_HEIGHT);
-        glVertex2f(g_uiState.uiPanelWidth - buttonMargin, y - PRESET_BUTTON_HEIGHT);
+        glVertex2f(buttonMargin, y - scaledButtonHeight);
+        glVertex2f(g_uiState.uiPanelWidth - buttonMargin, y - scaledButtonHeight);
         glVertex2f(g_uiState.uiPanelWidth - buttonMargin, y);
         glVertex2f(buttonMargin, y);
         glEnd();
@@ -303,20 +308,20 @@ void drawUI() {
             // Thicker border for selected preset
             const float selectedBorderColor[3] = {0.5f, 0.8f, 0.5f};
             borderColor = selectedBorderColor;
-            drawLine(buttonMargin, y - PRESET_BUTTON_HEIGHT, g_uiState.uiPanelWidth - buttonMargin, y - PRESET_BUTTON_HEIGHT, borderColor, 2.0f);
-            drawLine(g_uiState.uiPanelWidth - buttonMargin, y - PRESET_BUTTON_HEIGHT, g_uiState.uiPanelWidth - buttonMargin, y, borderColor, 2.0f);
+            drawLine(buttonMargin, y - scaledButtonHeight, g_uiState.uiPanelWidth - buttonMargin, y - scaledButtonHeight, borderColor, 2.0f);
+            drawLine(g_uiState.uiPanelWidth - buttonMargin, y - scaledButtonHeight, g_uiState.uiPanelWidth - buttonMargin, y, borderColor, 2.0f);
             drawLine(g_uiState.uiPanelWidth - buttonMargin, y, buttonMargin, y, borderColor, 2.0f);
-            drawLine(buttonMargin, y, buttonMargin, y - PRESET_BUTTON_HEIGHT, borderColor, 2.0f);
+            drawLine(buttonMargin, y, buttonMargin, y - scaledButtonHeight, borderColor, 2.0f);
         } else {
-            drawLine(buttonMargin, y - PRESET_BUTTON_HEIGHT, g_uiState.uiPanelWidth - buttonMargin, y - PRESET_BUTTON_HEIGHT, borderColor);
-            drawLine(g_uiState.uiPanelWidth - buttonMargin, y - PRESET_BUTTON_HEIGHT, g_uiState.uiPanelWidth - buttonMargin, y, borderColor);
+            drawLine(buttonMargin, y - scaledButtonHeight, g_uiState.uiPanelWidth - buttonMargin, y - scaledButtonHeight, borderColor);
+            drawLine(g_uiState.uiPanelWidth - buttonMargin, y - scaledButtonHeight, g_uiState.uiPanelWidth - buttonMargin, y, borderColor);
             drawLine(g_uiState.uiPanelWidth - buttonMargin, y, buttonMargin, y, borderColor);
-            drawLine(buttonMargin, y, buttonMargin, y - PRESET_BUTTON_HEIGHT, borderColor);
+            drawLine(buttonMargin, y, buttonMargin, y - scaledButtonHeight, borderColor);
         }
 
         // Button text
-        float textX = buttonMargin + 5.0f;
-        float textY = y - PRESET_BUTTON_HEIGHT/2 - 6.0f; // Center vertically
+        float textX = buttonMargin + 5.0f * g_uiState.dpiScaleX;
+        float textY = y - scaledButtonHeight/2 - 6.0f * g_uiState.dpiScaleY; // Center vertically
         const float* textColor = TEXT_COLOR;
         if (static_cast<size_t>(g_uiState.currentPreset) == i) {
             const float selectedTextColor[3] = {0.9f, 1.0f, 0.9f};
@@ -326,42 +331,45 @@ void drawUI() {
     }
 
     // Add title and instructions
-    float titleY = g_uiState.currentWindowHeight - 20.0f;
+    float titleY = g_uiState.currentFramebufferHeight - 20.0f * g_uiState.dpiScaleY;
     const float titleColor[3] = {1.0f, 1.0f, 1.0f};
-    drawText(15.0f, titleY, "Damage Curve Presets:", titleColor);
+    drawText(15.0f * g_uiState.dpiScaleX, titleY, "Damage Curve Presets:", titleColor);
 
     // Add instructions at bottom of panel
-    float instructY = 80.0f;
+    float instructY = 80.0f * g_uiState.dpiScaleY;
     const float instructColor[3] = {0.7f, 0.7f, 0.7f};
-    drawText(15.0f, instructY, "Ctrl+S: Save", instructColor);
-    drawText(15.0f, instructY - 15.0f, "Ctrl+L: Load", instructColor);
-    drawText(15.0f, instructY - 30.0f, "G: Toggle Grid", instructColor);
-    drawText(15.0f, instructY - 45.0f, "Right-click: Del Point", instructColor);
+    float instructX = 15.0f * g_uiState.dpiScaleX;
+    float instructLineSpacing = 15.0f * g_uiState.dpiScaleY;
+    drawText(instructX, instructY, "Ctrl+S: Save", instructColor);
+    drawText(instructX, instructY - instructLineSpacing, "Ctrl+L: Load", instructColor);
+    drawText(instructX, instructY - 2 * instructLineSpacing, "G: Toggle Grid", instructColor);
+    drawText(instructX, instructY - 3 * instructLineSpacing, "Right-click: Del Point", instructColor);
 
     // Add axis labels for the curve area
     const float labelColor[3] = {0.8f, 0.8f, 0.8f};
 
     // X-axis label (bottom)
-    float xLabelX = g_uiState.curveAreaLeft + g_uiState.curveWidth/2 - 60.0f;
-    float xLabelY = 20.0f;
+    float xLabelX = g_uiState.curveAreaLeft + g_uiState.curveWidth/2 - 60.0f * g_uiState.dpiScaleX;
+    float xLabelY = 20.0f * g_uiState.dpiScaleY;
     drawText(xLabelX, xLabelY, "Player Elimination Ratio", labelColor);
 
     // Y-axis label (left side, rotated effect by spacing letters vertically)
-    float yLabelX = g_uiState.curveAreaLeft - 40.0f;
-    float yLabelY = g_uiState.curveAreaTop + g_uiState.curveHeight/2 + 40.0f;
+    float yLabelX = g_uiState.curveAreaLeft - 40.0f * g_uiState.dpiScaleX;
+    float yLabelY = g_uiState.curveAreaTop + g_uiState.curveHeight/2 + 40.0f * g_uiState.dpiScaleY;
+    float yLabelSpacing = 12.0f * g_uiState.dpiScaleY;
     drawText(yLabelX, yLabelY, "D", labelColor);
-    drawText(yLabelX, yLabelY - 12.0f, "a", labelColor);
-    drawText(yLabelX, yLabelY - 24.0f, "m", labelColor);
-    drawText(yLabelX, yLabelY - 36.0f, "a", labelColor);
-    drawText(yLabelX, yLabelY - 48.0f, "g", labelColor);
-    drawText(yLabelX, yLabelY - 60.0f, "e", labelColor);
+    drawText(yLabelX, yLabelY - yLabelSpacing, "a", labelColor);
+    drawText(yLabelX, yLabelY - 2 * yLabelSpacing, "m", labelColor);
+    drawText(yLabelX, yLabelY - 3 * yLabelSpacing, "a", labelColor);
+    drawText(yLabelX, yLabelY - 4 * yLabelSpacing, "g", labelColor);
+    drawText(yLabelX, yLabelY - 5 * yLabelSpacing, "e", labelColor);
 
     // Current preset indicator
     if (g_uiState.currentPreset != CurvePreset::CUSTOM) {
-        float indicatorY = startY + 40.0f;
+        float indicatorY = startY + 40.0f * g_uiState.dpiScaleY;
         const float indicatorColor[3] = {0.5f, 1.0f, 0.5f};
         const std::string currentText = "Active: " + presetNames[static_cast<int>(g_uiState.currentPreset)];
-        drawText(15.0f, indicatorY, currentText, indicatorColor);
+        drawText(15.0f * g_uiState.dpiScaleX, indicatorY, currentText, indicatorColor);
     }
 }
 
@@ -379,9 +387,10 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
     double rawMouseX, rawMouseY;
     glfwGetCursorPos(window, &rawMouseX, &rawMouseY);
 
-    // Convert GLFW mouse coordinates (Y=0 at top) to OpenGL coordinates (Y=0 at bottom)
-    float mouseX = static_cast<float>(rawMouseX);
-    float mouseY = static_cast<float>(g_uiState.currentWindowHeight - rawMouseY);
+    // Convert GLFW mouse coordinates (Y=0 at top) to OpenGL framebuffer coordinates (Y=0 at bottom)
+    // Scale from window coordinates to framebuffer coordinates for high-DPI displays
+    float mouseX = static_cast<float>(rawMouseX * g_uiState.dpiScaleX);
+    float mouseY = static_cast<float>(g_uiState.currentFramebufferHeight - rawMouseY * g_uiState.dpiScaleY);
 
     // Debug output disabled in final version
 
@@ -394,14 +403,15 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
             // STEP 1: Check if clicking in UI panel (preset buttons)
             if (mouseX >= 0 && mouseX <= g_uiState.uiPanelWidth) {
 
-                float buttonMargin = 10.0f;
-                float buttonSpacing = 10.0f;
-                float startY = g_uiState.currentWindowHeight - 60.0f;
+                float buttonMargin = 10.0f * g_uiState.dpiScaleX;
+                float buttonSpacing = 10.0f * g_uiState.dpiScaleY;
+                float scaledButtonHeight = PRESET_BUTTON_HEIGHT * g_uiState.dpiScaleY;
+                float startY = g_uiState.currentFramebufferHeight - 60.0f * g_uiState.dpiScaleY;
 
                 if (mouseX >= buttonMargin && mouseX <= g_uiState.uiPanelWidth - buttonMargin) {
                     for (int i = 0; i < 7; ++i) {
-                        float buttonTop = startY - i * (PRESET_BUTTON_HEIGHT + buttonSpacing);
-                        float buttonBottom = buttonTop - PRESET_BUTTON_HEIGHT;
+                        float buttonTop = startY - i * (scaledButtonHeight + buttonSpacing);
+                        float buttonBottom = buttonTop - scaledButtonHeight;
 
                         if (mouseY >= buttonBottom && mouseY <= buttonTop) {
                             g_uiState.currentPreset = static_cast<CurvePreset>(i);
@@ -462,9 +472,10 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
 }
 
 void cursorPosCallback(GLFWwindow* window, double rawX, double rawY) {
-    // Convert GLFW mouse coordinates (Y=0 at top) to OpenGL coordinates (Y=0 at bottom)
-    float mouseX = static_cast<float>(rawX);
-    float mouseY = static_cast<float>(g_uiState.currentWindowHeight - rawY);
+    // Convert GLFW mouse coordinates (Y=0 at top) to OpenGL framebuffer coordinates (Y=0 at bottom)
+    // Scale from window coordinates to framebuffer coordinates for high-DPI displays
+    float mouseX = static_cast<float>(rawX * g_uiState.dpiScaleX);
+    float mouseY = static_cast<float>(g_uiState.currentFramebufferHeight - rawY * g_uiState.dpiScaleY);
 
     // Update hover state (only if not currently dragging)
     if (!g_uiState.isDragging) {
@@ -537,18 +548,28 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
 
-    // Update UI state with actual window size
-    g_uiState.currentWindowWidth = width;
-    g_uiState.currentWindowHeight = height;
+    // Get both window size and framebuffer size for DPI scaling
+    int windowWidth, windowHeight;
+    glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
-    // Update projection matrix - keep Y axis going up (standard OpenGL)
+    // Update UI state with both window and framebuffer sizes
+    g_uiState.currentWindowWidth = windowWidth;
+    g_uiState.currentWindowHeight = windowHeight;
+    g_uiState.currentFramebufferWidth = width;
+    g_uiState.currentFramebufferHeight = height;
+
+    // Calculate DPI scale factors
+    g_uiState.dpiScaleX = (windowWidth > 0) ? static_cast<float>(width) / static_cast<float>(windowWidth) : 1.0f;
+    g_uiState.dpiScaleY = (windowHeight > 0) ? static_cast<float>(height) / static_cast<float>(windowHeight) : 1.0f;
+
+    // Update projection matrix using framebuffer size - keep Y axis going up (standard OpenGL)
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    glOrtho(0, width, 0, height, -1, 1);  // Fixed: Y goes from 0 (bottom) to height (top)
+    glOrtho(0, width, 0, height, -1, 1);  // Use framebuffer size for projection
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    // Update curve area
+    // Update curve area using framebuffer coordinates
     updateCurveArea();
 }
 
