@@ -740,11 +740,9 @@ struct Simulation {
 		}
 	}
 
-	// TODO: Placeholder for new camera calculation functions
-
 	void updateSpeedIncrease() {
 		uint32_t alivePlayers = aliveCount();
-		if (alivePlayers > 2) {
+		if (alivePlayers > 5) {
 			if (currentSpeedBoost != 1.0f) {
 				currentSpeedBoost = 1.0f;
 			}
@@ -986,11 +984,27 @@ struct Simulation {
 				}
 			}
 		} else {
-			if (!victorySetupDone && winnerIndex >= 0) {
-				// Position winner at center of world
-				const float centerX = worldWidth * 0.5f;
-				const float centerY = worldHeight * 0.5f;
-				const float displayRadius = std::max(finalCircleRadius, globalCurrentRadius);
+		if (!victorySetupDone && winnerIndex >= 0) {
+			// Position winner at center of world
+			const float centerX = worldWidth * 0.5f;
+			const float centerY = worldHeight * 0.5f;
+
+			// Use size factor for 1 player (winner), or current radius, or reasonable default
+			float displayRadius = globalCurrentRadius;
+			if (!sizeFactors.empty()) {
+				// Check if we have a size factor for 1 player
+				auto it = sizeFactors.find(1);
+				if (it != sizeFactors.end()) {
+					displayRadius = std::min(worldWidth, worldHeight) * it->second;
+					displayRadius = std::clamp(displayRadius, MIN_CIRCLE_RADIUS, MAX_CIRCLE_RADIUS);
+				} else {
+					// No specific factor for 1 player, use a larger size than current
+					displayRadius = std::max(displayRadius, std::min(worldWidth, worldHeight) * 0.6f);
+				}
+			} else {
+				// Fallback to old behavior
+				displayRadius = std::max(finalCircleRadius, globalCurrentRadius);
+			}
 
 				for (int i = 0; i < static_cast<int>(alive.size()); ++i) {
 					velX[i] = 0.0f;
