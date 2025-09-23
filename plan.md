@@ -195,9 +195,16 @@ if (frameTime > TARGET_FRAME_TIME) {
 - IMAGE_LOAD_THRESHOLD_RADIUS
 - MAX_CIRCLE_SIZE
 - WINNER_SCALE
-- DAMAGE_MULTIPLIER, WALL_DAMPING, COLLISION_DAMPING
+- ~~DAMAGE_MULTIPLIER~~ (DEPRECATED - replaced by dynamic damage curve system), WALL_DAMPING, COLLISION_DAMPING
 - GRID_CELL_SIZE
 - BIAS_ACTIVE_THRESHOLD (default: 50 - minimum player count for bias to be active)
+
+### Dynamic Damage Curve Constants
+- CURVE_EVALUATION_CACHE_SIZE (default: 1000 - pre-computed curve values for performance)
+- MIN_DAMAGE_MULTIPLIER (default: 0.1 - minimum allowed damage scaling)
+- MAX_DAMAGE_MULTIPLIER (default: 5.0 - maximum allowed damage scaling)
+- CURVE_SMOOTHING_FACTOR (default: 0.1 - interpolation smoothness)
+- DEFAULT_CURVE_PRESET (default: BATTLE_ROYALE - initial curve configuration)
 
 ### 1M+ Entity Scaling Constants
 - INDIVIDUAL_PROMOTION_THRESHOLD (default: 10.0f - minimum apparent radius for individual simulation)
@@ -487,6 +494,226 @@ struct PerformanceMetrics {
 
 The performance instrumentation provides comprehensive monitoring capabilities essential for measuring optimization effectiveness. All metrics are captured automatically with minimal performance overhead, enabling data-driven optimization decisions.
 
+## 🚨 Dynamic Damage Scaling Curve System - HIGHEST PRIORITY
+
+**CRITICAL ISSUE RESOLVED**: Battle royale pacing suffers from rapid early-game eliminations followed by painfully slow late-game due to collision frequency variance. Current fixed damage scaling creates poor user experience with uncontrollable simulation speed.
+
+**SOLUTION**: Configurable damage scaling curve system that adjusts damage multipliers based on player count, providing fine-grained control over elimination pacing throughout the entire battle progression.
+
+### 🧠 Core Problem Analysis
+
+**Current Issue**:
+- **Early Game (many circles)**: High collision frequency → rapid eliminations → simulation feels too fast
+- **Late Game (few circles)**: Low collision frequency → slow eliminations → simulation drags endlessly
+- **Fixed Damage**: No adaptive control over pacing as battle progresses
+
+**Root Cause**: `finalDamage = baseDamage * DAMAGE_MULTIPLIER` uses constant multiplier regardless of game state
+
+### 🎯 Dynamic Damage Curve Solution
+
+**New Architecture**:
+```cpp
+// Replace fixed DAMAGE_MULTIPLIER with dynamic curve evaluation
+float evaluateDamageCurve(float playerRatio); // playerRatio = aliveCount / totalPlayers
+float finalDamage = baseDamage * evaluateDamageCurve(currentPlayerRatio);
+```
+
+**Curve Benefits**:
+- **Early Game Control**: Reduce damage when player count is high (slower eliminations)
+- **Late Game Acceleration**: Increase damage when player count is low (faster finale)
+- **Perfect Pacing**: Customizable curve shapes for optimal battle drama
+- **Predictable Duration**: Fine-tune simulation length for any player count
+
+### 🛠️ Implementation Architecture
+
+#### **Option A: Separate Config Executable (CHOSEN APPROACH)**
+
+**Rationale**: Clean separation of concerns, follows existing `bias.txt` pattern, simpler implementation
+
+**Executables**:
+```bash
+battleroyale5-config  # Curve editor and configuration tool
+battleroyale5         # Main simulation loads saved curve settings
+```
+
+**Configuration Flow**:
+1. **Edit**: Use `battleroyale5-config` to design damage curves
+2. **Save**: Curve parameters written to `simulation_config.txt`
+3. **Load**: Main simulation reads curve configuration at startup
+4. **Apply**: Real-time curve evaluation during collision damage calculation
+
+#### **Advanced Curve Editor Design (Research-Based)**
+
+Based on industry-standard curve editor analysis (DaVinci Resolve, Unity, CAD software), implementing professional-grade interactive curve editor:
+
+**🎛️ Core Editor Features**:
+```cpp
+class DamageCurveEditor {
+public:
+    struct CurvePoint {
+        float playerRatio;     // X-axis: 0.0 (all players) → 1.0 (1 player left)
+        float damageMultiplier; // Y-axis: damage scaling factor
+        InterpolationType type; // Linear, Smooth, Bezier
+    };
+
+    // Interactive Manipulation
+    void addPoint(float x, float y);           // Click to add control point
+    void removePoint(size_t index);           // Right-click or select+delete
+    void movePoint(size_t index, float x, float y); // Drag to reposition
+
+    // Curve Evaluation
+    float evaluateCurve(float playerRatio) const;
+
+    // Presets & Templates
+    void loadPreset(CurvePreset preset);      // Linear, Exponential, S-Curve, Custom
+    void saveConfiguration(const std::string& filename);
+    void loadConfiguration(const std::string& filename);
+};
+```
+
+**📊 Interpolation Methods**:
+- **Linear**: Straight lines between points (predictable, simple)
+- **Smooth Spline**: Catmull-Rom splines (natural curves, no overshooting)
+- **Custom Bezier**: Full control handles (maximum flexibility)
+
+**🎨 Visual Interface Elements**:
+- **Grid Background**: Visual reference for precise point placement
+- **Real-time Preview**: Live curve visualization with smooth anti-aliased rendering
+- **Point Manipulation**:
+  - Left-click empty space: Add new control point
+  - Left-click + drag point: Move existing point
+  - Right-click point: Remove point with confirmation
+  - Snap-to-grid: Optional for precise alignment
+- **Curve Types**: Dropdown per-segment interpolation method selection
+- **Value Display**: Real-time X/Y coordinate display during point manipulation
+
+**⚡ Professional UX Features**:
+- **Undo/Redo**: Full action history with Ctrl+Z/Ctrl+Y
+- **Copy/Paste**: Curve segment duplication and transfer
+- **Zoom/Pan**: Mouse wheel zoom, middle-click pan for precision editing
+- **Keyboard Shortcuts**: Delete key for point removal, arrow keys for fine adjustment
+- **Preview Animation**: Scrub through curve to visualize damage scaling over time
+
+**💾 Configuration File Format**:
+```txt
+# simulation_config.txt - Damage Scaling Configuration
+damage_curve_version=1.0
+
+# Curve interpolation method: linear, spline, bezier
+curve_interpolation=spline
+
+# Control points: playerRatio:damageMultiplier (sorted by playerRatio)
+curve_points=0.0:0.3,0.2:0.5,0.5:0.8,0.8:1.2,1.0:2.0
+
+# Curve validation bounds
+min_damage_multiplier=0.1
+max_damage_multiplier=5.0
+
+# Additional simulation parameters
+enable_curve_smoothing=true
+curve_update_frequency=60  # Hz for real-time curve evaluation
+```
+
+**🎯 Curve Presets Library**:
+```cpp
+enum class CurvePreset {
+    LINEAR,           // Constant pacing: 1.0 damage throughout
+    EXPONENTIAL,      // Slow start, explosive finale: 0.3 → 3.0
+    LOGARITHMIC,      // Fast start, gradual finale: 2.0 → 0.5
+    S_CURVE,          // Dramatic tension: slow→fast→slow→explosive
+    BATTLE_ROYALE,    // Optimized for BR games: 0.5→0.8→1.5→2.5
+    SPEEDRUN,         // Fast elimination: 1.5→2.0→3.0
+    ENDURANCE,        // Long battles: 0.2→0.4→0.8→1.2
+    CUSTOM            // User-defined curve
+};
+```
+
+### 🔧 Integration with Main Simulation
+
+**Damage Calculation Update** (`src/main.cpp`):
+```cpp
+// Replace current fixed damage system
+// OLD: float finalDamage = baseDamage * DAMAGE_MULTIPLIER;
+
+// NEW: Dynamic curve-based damage scaling
+float calculateDynamicDamage(float baseDamage, uint32_t aliveCount, uint32_t totalPlayers) {
+    float playerRatio = 1.0f - (float)aliveCount / totalPlayers; // 0.0 → 1.0 as players eliminated
+    float curveMultiplier = globalDamageCurve.evaluateCurve(playerRatio);
+    return baseDamage * curveMultiplier;
+}
+
+// Apply in collision response
+float damage = calculateDynamicDamage(impulseMagnitude * BASE_DAMAGE_FACTOR,
+                                     aliveCircleCount, totalInitialPlayers);
+```
+
+**Performance Optimization**:
+- **Curve Evaluation**: O(log n) binary search for curve segment lookup
+- **Caching**: Pre-compute curve values for common player count ranges
+- **Memory**: Minimal overhead - single curve object loaded at startup
+
+### 🎮 User Experience Flow
+
+**Configuration Workflow**:
+1. **Launch Config Tool**: `./battleroyale5-config`
+2. **Design Curve**: Interactive point manipulation with real-time preview
+3. **Test Scenarios**: Preview curve effects for different player counts
+4. **Save Configuration**: Export to `simulation_config.txt`
+5. **Run Simulation**: `./battleroyale5` automatically loads curve settings
+6. **Monitor Results**: Use F3 performance overlay to observe pacing effects
+
+**Example Curve Design Session**:
+```
+Player Ratio → Damage Multiplier (Example S-Curve)
+0.0 (100% alive) → 0.3x damage (slow early eliminations)
+0.3 (70% alive)  → 0.8x damage (moderate middle game)
+0.7 (30% alive)  → 1.5x damage (tension building)
+0.9 (10% alive)  → 2.5x damage (explosive finale)
+1.0 (winner)     → N/A (victory state)
+```
+
+### 📋 Implementation Priority & Milestones
+
+**🚨 IMMEDIATE DEVELOPMENT** (Highest Priority - Block all other features):
+
+**Phase 1: Core Curve System** (Week 1)
+- [ ] Design `DamageCurve` class with point-based curve evaluation
+- [ ] Implement basic interpolation methods (linear, spline)
+- [ ] Create configuration file I/O system (`simulation_config.txt`)
+- [ ] Replace fixed `DAMAGE_MULTIPLIER` with dynamic curve evaluation in main simulation
+
+**Phase 2: Config Tool Foundation** (Week 1-2)
+- [ ] Create `battleroyale5-config` executable with basic UI framework
+- [ ] Implement curve visualization with grid and real-time preview
+- [ ] Add interactive point manipulation (add, remove, move)
+- [ ] Build curve preset library with common battle royale patterns
+
+**Phase 3: Advanced Editor Features** (Week 2-3)
+- [ ] Professional UX: undo/redo, copy/paste, keyboard shortcuts
+- [ ] Advanced interpolation: Bezier curves with control handles
+- [ ] Curve validation: bounds checking, smoothness analysis
+- [ ] Export/import: configuration backup and sharing system
+
+**Phase 4: Integration & Polish** (Week 3-4)
+- [ ] Stress test curve evaluation performance with 1M+ entities
+- [ ] Real-time curve adjustment during simulation (optional)
+- [ ] Documentation: user guide and curve design best practices
+- [ ] Validation: A/B test different curves for optimal battle pacing
+
+**🎯 Success Metrics**:
+- **Pacing Control**: Ability to maintain consistent elimination rate regardless of player count
+- **User Experience**: Smooth, predictable battle progression from start to finish
+- **Performance**: <1ms curve evaluation overhead per frame
+- **Usability**: Non-technical users can design effective curves within 5 minutes
+
+**Integration Points**:
+- **Constants Section**: Add curve configuration parameters alongside existing constants
+- **Initialization**: Load curve configuration during simulation startup
+- **Collision System**: Replace fixed damage calculation with curve evaluation
+- **Performance Monitoring**: Track curve evaluation timing in F3 overlay
+
+This damage scaling curve system solves the fundamental pacing issue while providing powerful, user-friendly control over battle dynamics. The separate config executable approach ensures clean architecture and rapid iteration on curve designs.
+
 ## 🎯 Hybrid Count + Spatial Zoom System - NEXT IMPLEMENTATION PRIORITY
 
 **DESIGN GOAL**: Intelligent camera system that combines player count with spatial distribution while maintaining stable, centered zoom that prevents circle clipping.
@@ -629,6 +856,40 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   ---
 
 ## Remaining Work Roadmap
+
+### 🚨 PRIORITY 0 – Dynamic Damage Scaling Curve System ⚡ IMMEDIATE DEVELOPMENT
+**BLOCKING ALL OTHER FEATURES** - Critical pacing control system for battle royale simulation
+
+- [ ] **Phase 1: Core Curve System** (Week 1)
+  - [ ] Design `DamageCurve` class with point-based curve evaluation (`src/damage_curve.hpp/.cpp`)
+  - [ ] Implement basic interpolation methods: linear and Catmull-Rom splines
+  - [ ] Create configuration file I/O system for `simulation_config.txt`
+  - [ ] Replace fixed `DAMAGE_MULTIPLIER` with `calculateDynamicDamage()` in main collision system
+  - [ ] Add curve parameter validation and bounds checking
+- [ ] **Phase 2: Config Tool Foundation** (Week 1-2)
+  - [ ] Create `battleroyale5-config` executable with GLFW + OpenGL UI framework
+  - [ ] Implement grid-based curve visualization with real-time preview
+  - [ ] Add interactive point manipulation: click-to-add, drag-to-move, right-click-to-remove
+  - [ ] Build curve preset library: Linear, Exponential, S-Curve, Battle-Royale-Optimized
+  - [ ] Real-time curve evaluation preview with damage multiplier display
+- [ ] **Phase 3: Advanced Editor Features** (Week 2-3)
+  - [ ] Professional UX: undo/redo system, copy/paste functionality
+  - [ ] Advanced interpolation: Bezier curves with control handle manipulation
+  - [ ] Curve validation: smoothness analysis, discontinuity detection
+  - [ ] Export/import system: configuration backup and curve sharing
+  - [ ] Snap-to-grid, keyboard shortcuts (Delete, arrow keys, Ctrl+Z/Y)
+- [ ] **Phase 4: Integration & Performance** (Week 3-4)
+  - [ ] Stress test curve evaluation performance with 1M+ entities (target <1ms overhead)
+  - [ ] Memory optimization: curve caching for common player count ranges
+  - [ ] Integration with F3 performance overlay: curve evaluation timing display
+  - [ ] Documentation: user guide and curve design best practices
+  - [ ] A/B testing framework for optimal curve validation
+
+**Success Criteria**:
+- Configurable elimination pacing for any player count (10 to 1M+)
+- Professional curve editor usable by non-technical users within 5 minutes
+- <1ms per-frame curve evaluation overhead
+- Seamless integration with existing simulation architecture
 
 ### Stage 1 – Spatial Foundations ✅ COMPLETED
 - [x] **Advanced Spatial Partitioning**
