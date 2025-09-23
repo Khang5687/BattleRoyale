@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <chrono>
+#include <sstream>
+#include <fstream>
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../stb/stb_truetype.h"
@@ -19,6 +22,85 @@
 #include "font_loader.hpp"
 
 #include "damage_curve.hpp"
+
+// Action history system for undo/redo
+enum class ActionType {
+    ADD_POINT,
+    REMOVE_POINT,
+    MOVE_POINT,
+    LOAD_PRESET,
+    LOAD_CONFIGURATION
+};
+
+struct Action {
+    ActionType type;
+    std::vector<CurvePoint> beforePoints;
+    std::vector<CurvePoint> afterPoints;
+    CurvePreset presetBefore = CurvePreset::CUSTOM;
+    CurvePreset presetAfter = CurvePreset::CUSTOM;
+    int affectedPointIndex = -1;
+    CurvePoint oldPoint;
+    CurvePoint newPoint;
+};
+
+class ActionHistory {
+private:
+    std::vector<Action> actions;
+    size_t currentIndex = 0; // Points to next undo action
+    static constexpr size_t MAX_HISTORY = 50;
+
+public:
+    void recordAction(Action action) {
+        // Remove any actions after current index (when doing new action after undo)
+        if (currentIndex < actions.size()) {
+            actions.resize(currentIndex);
+        }
+
+        actions.push_back(action);
+        currentIndex = actions.size();
+
+        // Limit history size
+        if (actions.size() > MAX_HISTORY) {
+            actions.erase(actions.begin());
+            currentIndex--;
+        }
+    }
+
+    bool canUndo() const {
+        return currentIndex > 0;
+    }
+
+    bool canRedo() const {
+        return currentIndex < actions.size();
+    }
+
+    Action* getUndoAction() {
+        if (!canUndo()) return nullptr;
+        return &actions[currentIndex - 1];
+    }
+
+    Action* getRedoAction() {
+        if (!canRedo()) return nullptr;
+        return &actions[currentIndex];
+    }
+
+    void undo() {
+        if (canUndo()) {
+            currentIndex--;
+        }
+    }
+
+    void redo() {
+        if (canRedo()) {
+            currentIndex++;
+        }
+    }
+
+    void clear() {
+        actions.clear();
+        currentIndex = 0;
+    }
+};
 
 // Configuration constants
 const int INITIAL_WINDOW_WIDTH = 1200;
@@ -125,12 +207,29 @@ void destroyFontRenderer() {
 // UI state
 struct UIState {
     DamageCurve curve;
+    ActionHistory actionHistory;
     std::vector<CurvePoint> displayPoints;
     int selectedPoint = -1;
     int hoveredPoint = -1;
     bool isDragging = false;
     double lastMouseX = 0.0;
     double lastMouseY = 0.0;
+
+    // Drag state for undo/redo
+    bool dragStarted = false;
+    CurvePoint dragStartPoint;
+
+    // Clipboard for copy/paste
+    std::vector<CurvePoint> clipboardPoints;
+    bool hasClipboardData = false;
+
+    // Bezier curve editing
+    int selectedControlPoint = -1; // -1 = none, 0 = point, 1 = control in, 2 = control out
+    bool showControlHandles = true;
+
+    // Curve validation
+    bool showValidation = true;
+    DamageCurve::CurveValidationResult lastValidation;
 
     // Dynamic UI layout (updated on window resize)
     int currentWindowWidth = INITIAL_WINDOW_WIDTH;
@@ -148,7 +247,166 @@ struct UIState {
     float curveHeight = 0.0f;
 
     bool showGrid = true;
+    bool snapToGrid = false;
+    float gridSnapSize = 0.05f; // 5% snap increments
     CurvePreset currentPreset = CurvePreset::BATTLE_ROYALE;
+
+    // Undo/redo helper methods
+    void recordAction(ActionType type, const std::vector<CurvePoint>& beforePoints,
+                     const std::vector<CurvePoint>& afterPoints,
+                     CurvePreset presetBefore = CurvePreset::CUSTOM,
+                     CurvePreset presetAfter = CurvePreset::CUSTOM,
+                     int affectedIndex = -1, const CurvePoint& oldPoint = {},
+                     const CurvePoint& newPoint = {}) {
+        Action action;
+        action.type = type;
+        action.beforePoints = beforePoints;
+        action.afterPoints = afterPoints;
+        action.presetBefore = presetBefore;
+        action.presetAfter = presetAfter;
+        action.affectedPointIndex = affectedIndex;
+        action.oldPoint = oldPoint;
+        action.newPoint = newPoint;
+
+        actionHistory.recordAction(action);
+        currentPreset = presetAfter;
+    }
+
+    void undo() {
+        if (actionHistory.canUndo()) {
+            Action* action = actionHistory.getUndoAction();
+            if (action) {
+                curve.setPoints(action->beforePoints);
+                currentPreset = action->presetBefore;
+                actionHistory.undo();
+            }
+        }
+    }
+
+    void redo() {
+        if (actionHistory.canRedo()) {
+            Action* action = actionHistory.getRedoAction();
+            if (action) {
+                curve.setPoints(action->afterPoints);
+                currentPreset = action->presetAfter;
+                actionHistory.redo();
+            }
+        }
+    }
+
+    // Copy/paste methods
+    void copyCurve() {
+        clipboardPoints = curve.getPoints();
+        hasClipboardData = true;
+        std::cout << "Curve copied to clipboard (" << clipboardPoints.size() << " points)" << std::endl;
+    }
+
+    void pasteCurve() {
+        if (!hasClipboardData) {
+            std::cout << "No curve data in clipboard" << std::endl;
+            return;
+        }
+
+        auto beforePoints = curve.getPoints();
+        CurvePreset beforePreset = currentPreset;
+
+        curve.setPoints(clipboardPoints);
+        currentPreset = CurvePreset::CUSTOM;
+
+        auto afterPoints = curve.getPoints();
+        recordAction(ActionType::LOAD_CONFIGURATION, beforePoints, afterPoints,
+                    beforePreset, currentPreset);
+
+        std::cout << "Curve pasted from clipboard (" << clipboardPoints.size() << " points)" << std::endl;
+    }
+
+    // Bezier curve editing methods
+    void cycleInterpolationType(int pointIndex) {
+        if (pointIndex < 0 || pointIndex >= static_cast<int>(curve.getPoints().size())) return;
+
+        auto points = curve.getPoints();
+        InterpolationType currentType = points[pointIndex].type;
+
+        // Cycle through interpolation types
+        switch (currentType) {
+            case InterpolationType::LINEAR:
+                points[pointIndex].type = InterpolationType::SPLINE;
+                break;
+            case InterpolationType::SPLINE:
+                points[pointIndex].type = InterpolationType::BEZIER;
+                // Initialize control points for Bezier
+                if (pointIndex > 0 && pointIndex < static_cast<int>(points.size()) - 1) {
+                    float prevX = points[pointIndex - 1].playerRatio;
+                    float nextX = points[pointIndex + 1].playerRatio;
+                    float currentX = points[pointIndex].playerRatio;
+                    float dx = (nextX - prevX) * 0.25f; // Quarter distance to neighbors
+
+                    points[pointIndex].controlInX = -dx * 0.5f;
+                    points[pointIndex].controlOutX = dx * 0.5f;
+                    points[pointIndex].controlInY = 0.0f;
+                    points[pointIndex].controlOutY = 0.0f;
+                }
+                break;
+            case InterpolationType::BEZIER:
+                points[pointIndex].type = InterpolationType::LINEAR;
+                break;
+        }
+
+        curve.setPoints(points);
+        std::cout << "Changed point " << pointIndex << " interpolation to " <<
+            (points[pointIndex].type == InterpolationType::LINEAR ? "LINEAR" :
+             points[pointIndex].type == InterpolationType::SPLINE ? "SPLINE" : "BEZIER") << std::endl;
+    }
+
+    void toggleControlHandles() {
+        showControlHandles = !showControlHandles;
+        std::cout << "Control handles " << (showControlHandles ? "shown" : "hidden") << std::endl;
+    }
+
+    void updateValidation() {
+        lastValidation = curve.validateCurve();
+    }
+
+    void toggleValidation() {
+        showValidation = !showValidation;
+        std::cout << "Validation display " << (showValidation ? "enabled" : "disabled") << std::endl;
+    }
+
+    // Snap-to-grid helper functions
+    float snapValueToGrid(float value, float snapSize) {
+        if (!snapToGrid) return value;
+        return std::round(value / snapSize) * snapSize;
+    }
+
+    void toggleSnapToGrid() {
+        snapToGrid = !snapToGrid;
+        std::cout << "Snap to grid " << (snapToGrid ? "enabled" : "disabled") << std::endl;
+    }
+
+    void deleteSelectedPoint() {
+        if (selectedPoint >= 0 && curve.getPoints().size() > 2) {
+            auto beforePoints = curve.getPoints();
+            curve.removePoint(selectedPoint);
+            auto afterPoints = curve.getPoints();
+
+            recordAction(ActionType::REMOVE_POINT, beforePoints, afterPoints,
+                        currentPreset, currentPreset, selectedPoint, beforePoints[selectedPoint]);
+            selectedPoint = -1;
+            selectedControlPoint = -1;
+            std::cout << "Point deleted" << std::endl;
+        }
+    }
+
+    void nudgeSelectedPoint(float deltaX, float deltaY) {
+        if (selectedPoint >= 0 && selectedControlPoint == 0) {
+            auto points = curve.getPoints();
+            points[selectedPoint].playerRatio = std::clamp(points[selectedPoint].playerRatio + deltaX, 0.0f, 1.0f);
+            points[selectedPoint].damageMultiplier = snapValueToGrid(
+                std::clamp(points[selectedPoint].damageMultiplier + deltaY, 0.1f, 5.0f), gridSnapSize);
+            curve.setPoints(points);
+            std::cout << "Point nudged" << std::endl;
+        }
+    }
 };
 
 UIState g_uiState;
@@ -364,8 +622,64 @@ void drawControlPoints() {
             radius = POINT_HOVER_RADIUS;
         }
 
+        // Highlight selected point
+        if (static_cast<int>(i) == g_uiState.selectedPoint) {
+            const float selectedColor[3] = {1.0f, 0.8f, 0.2f};
+            drawCircle(screenX, screenY, radius + 4.0f, selectedColor, false);
+        }
+
         drawCircle(screenX, screenY, radius, color, true);
         drawCircle(screenX, screenY, radius + 2.0f, AXIS_COLOR, false);
+
+        // Draw interpolation type indicator
+        if (points[i].type != InterpolationType::LINEAR) {
+            const float typeColor[3] = {
+                points[i].type == InterpolationType::SPLINE ? 0.2f : 0.8f,
+                points[i].type == InterpolationType::SPLINE ? 0.8f : 0.2f,
+                0.2f
+            };
+            drawCircle(screenX + radius + 6.0f, screenY - radius - 6.0f, 3.0f, typeColor, true);
+        }
+    }
+
+    // Draw Bezier control handles if enabled
+    if (g_uiState.showControlHandles) {
+        for (size_t i = 0; i < points.size(); ++i) {
+            if (points[i].type == InterpolationType::BEZIER) {
+                float pointX = playerRatioToScreen(points[i].playerRatio);
+                float pointY = damageMultiplierToScreen(points[i].damageMultiplier);
+
+                // Draw control lines and handles
+                float cInX, cInY, cOutX, cOutY;
+                points[i].getControlInPoint(cInX, cInY);
+                points[i].getControlOutPoint(cOutX, cOutY);
+
+                float screenCInX = playerRatioToScreen(cInX);
+                float screenCInY = damageMultiplierToScreen(cInY);
+                float screenCOutX = playerRatioToScreen(cOutX);
+                float screenCOutY = damageMultiplierToScreen(cOutY);
+
+                // Control lines
+                const float lineColor[3] = {0.5f, 0.5f, 0.5f};
+                drawLine(pointX, pointY, screenCInX, screenCInY, lineColor, 1.0f);
+                drawLine(pointX, pointY, screenCOutX, screenCOutY, lineColor, 1.0f);
+
+                // Control handles
+                const float handleColor[3] = {0.7f, 0.7f, 0.2f};
+                drawCircle(screenCInX, screenCInY, 4.0f, handleColor, true);
+                drawCircle(screenCOutX, screenCOutY, 4.0f, handleColor, true);
+
+                // Highlight selected control handle
+                if (static_cast<int>(i) == g_uiState.selectedPoint && g_uiState.selectedControlPoint > 0) {
+                    const float selectedHandleColor[3] = {1.0f, 1.0f, 0.2f};
+                    if (g_uiState.selectedControlPoint == 1) {
+                        drawCircle(screenCInX, screenCInY, 6.0f, selectedHandleColor, false);
+                    } else if (g_uiState.selectedControlPoint == 2) {
+                        drawCircle(screenCOutX, screenCOutY, 6.0f, selectedHandleColor, false);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -454,6 +768,39 @@ void drawUI() {
         drawText(15.0f * g_uiState.dpiScaleX, indicatorBaseline, currentText, indicatorColor);
     }
 
+    // Validation status
+    if (g_uiState.showValidation && g_fontRenderer.ready) {
+        float validationBaseline = titleBaseline - (2 * baseSpacing + 16.0f * g_uiState.dpiScaleY);
+        const auto& validation = g_uiState.lastValidation;
+
+        std::string statusText = "Curve Status: ";
+        const float* statusColor;
+
+        if (!validation.isValid) {
+            statusText += "INVALID";
+            statusColor = new float[3]{1.0f, 0.2f, 0.2f}; // Red
+        } else if (validation.hasDiscontinuities) {
+            statusText += "DISCONTINUOUS";
+            statusColor = new float[3]{1.0f, 0.4f, 0.2f}; // Orange-red
+        } else if (validation.hasSharpCorners) {
+            statusText += "SHARP CORNERS";
+            statusColor = new float[3]{1.0f, 0.8f, 0.2f}; // Orange
+        } else {
+            statusText += "SMOOTH";
+            statusColor = new float[3]{0.2f, 1.0f, 0.2f}; // Green
+        }
+
+        drawText(15.0f * g_uiState.dpiScaleX, validationBaseline, statusText, statusColor);
+
+        // Smoothness score
+        float smoothness = g_uiState.curve.estimateSmoothness();
+        char smoothnessBuf[32];
+        std::snprintf(smoothnessBuf, sizeof(smoothnessBuf), "Smoothness: %.1f%%", smoothness * 100.0f);
+        drawText(15.0f * g_uiState.dpiScaleX, validationBaseline - baseSpacing, smoothnessBuf, TEXT_COLOR);
+
+        delete[] statusColor;
+    }
+
     // Add instructions at bottom of panel
     float instructBaseline = 95.0f * g_uiState.dpiScaleY;
     const float instructColor[3] = {0.7f, 0.7f, 0.7f};
@@ -461,8 +808,17 @@ void drawUI() {
     float instructSpacing = baseSpacing + 6.0f * g_uiState.dpiScaleY;
     drawText(instructX, instructBaseline, "Ctrl+S: Save", instructColor);
     drawText(instructX, instructBaseline - instructSpacing, "Ctrl+L: Load", instructColor);
-    drawText(instructX, instructBaseline - 2 * instructSpacing, "G: Toggle Grid", instructColor);
-    drawText(instructX, instructBaseline - 3 * instructSpacing, "Right-click: Del Point", instructColor);
+    drawText(instructX, instructBaseline - 2 * instructSpacing, "Ctrl+Z/Y: Undo/Redo", instructColor);
+    drawText(instructX, instructBaseline - 3 * instructSpacing, "Ctrl+C/V: Copy/Paste", instructColor);
+    drawText(instructX, instructBaseline - 4 * instructSpacing, "J/K/B: Export JSON/CSV/B64", instructColor);
+    drawText(instructX, instructBaseline - 5 * instructSpacing, "I: Cycle Interp Type", instructColor);
+    drawText(instructX, instructBaseline - 6 * instructSpacing, "H: Toggle Handles", instructColor);
+    drawText(instructX, instructBaseline - 7 * instructSpacing, "G: Toggle Grid", instructColor);
+    drawText(instructX, instructBaseline - 8 * instructSpacing, "N: Toggle Snap-to-Grid", instructColor);
+    drawText(instructX, instructBaseline - 9 * instructSpacing, "Arrows: Nudge Point", instructColor);
+    drawText(instructX, instructBaseline - 10 * instructSpacing, "Delete: Remove Point", instructColor);
+    drawText(instructX, instructBaseline - 11 * instructSpacing, "V: Toggle Validation", instructColor);
+    drawText(instructX, instructBaseline - 12 * instructSpacing, "Right-click: Del Point", instructColor);
 
     // Add axis labels for the curve area
     const float labelColor[3] = {0.8f, 0.8f, 0.8f};
@@ -485,11 +841,71 @@ void drawUI() {
 
 }
 
+void drawValidationIndicators() {
+    if (!g_uiState.showValidation) return;
+
+    const auto& validation = g_uiState.lastValidation;
+
+    // Draw discontinuity indicators
+    if (validation.hasDiscontinuities) {
+        const float discontinuityColor[3] = {1.0f, 0.2f, 0.2f}; // Red for discontinuities
+
+        for (size_t pointIndex : validation.discontinuityPoints) {
+            if (pointIndex < g_uiState.curve.getPoints().size()) {
+                const auto& point = g_uiState.curve.getPoints()[pointIndex];
+                float screenX = playerRatioToScreen(point.playerRatio);
+                float screenY = damageMultiplierToScreen(point.damageMultiplier);
+
+                // Draw warning triangle above the point
+                glColor3f(discontinuityColor[0], discontinuityColor[1], discontinuityColor[2]);
+                glBegin(GL_TRIANGLES);
+                glVertex2f(screenX, screenY + 15.0f);
+                glVertex2f(screenX - 8.0f, screenY + 5.0f);
+                glVertex2f(screenX + 8.0f, screenY + 5.0f);
+                glEnd();
+
+                // Draw exclamation mark
+                drawText(screenX - 3.0f, screenY + 8.0f, "!", discontinuityColor);
+            }
+        }
+    }
+
+    // Draw sharp corner indicators
+    if (validation.hasSharpCorners) {
+        const float cornerColor[3] = {1.0f, 0.8f, 0.2f}; // Orange for sharp corners
+
+        for (size_t pointIndex : validation.sharpCornerPoints) {
+            if (pointIndex < g_uiState.curve.getPoints().size()) {
+                const auto& point = g_uiState.curve.getPoints()[pointIndex];
+                float screenX = playerRatioToScreen(point.playerRatio);
+                float screenY = damageMultiplierToScreen(point.damageMultiplier);
+
+                // Draw warning diamond to the right of the point
+                glColor3f(cornerColor[0], cornerColor[1], cornerColor[2]);
+                glBegin(GL_QUADS);
+                glVertex2f(screenX + 12.0f, screenY);
+                glVertex2f(screenX + 6.0f, screenY + 6.0f);
+                glVertex2f(screenX + 12.0f, screenY + 12.0f);
+                glVertex2f(screenX + 18.0f, screenY + 6.0f);
+                glEnd();
+            }
+        }
+    }
+}
+
 void render() {
+    // Update validation on each frame
+    if (g_uiState.showValidation) {
+        g_uiState.updateValidation();
+    }
+
     glClear(GL_COLOR_BUFFER_BIT);
 
     drawGrid();
     drawCurve();
+    if (g_uiState.showValidation) {
+        drawValidationIndicators();
+    }
     drawControlPoints();
     drawUI();
 }
@@ -526,8 +942,17 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
                         float buttonBottom = buttonTop - scaledButtonHeight;
 
                         if (mouseY >= buttonBottom && mouseY <= buttonTop) {
+                            // Record action before loading preset
+                            auto beforePoints = g_uiState.curve.getPoints();
+                            CurvePreset beforePreset = g_uiState.currentPreset;
+
                             g_uiState.currentPreset = static_cast<CurvePreset>(i);
                             g_uiState.curve.loadPreset(g_uiState.currentPreset);
+
+                            // Record action after loading preset
+                            auto afterPoints = g_uiState.curve.getPoints();
+                            g_uiState.recordAction(ActionType::LOAD_PRESET, beforePoints, afterPoints,
+                                                  beforePreset, g_uiState.currentPreset);
                             return; // Exit early - button handled
                         }
                     }
@@ -539,31 +964,88 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
             if (mouseX >= g_uiState.curveAreaLeft && mouseX <= g_uiState.curveAreaRight &&
                 mouseY >= g_uiState.curveAreaTop && mouseY <= g_uiState.curveAreaBottom) {
 
-                // STEP 2A: Check if clicking on existing control point
+                // STEP 2A: Check if clicking on Bezier control handles first (higher priority)
                 const auto& points = g_uiState.curve.getPoints();
+                if (g_uiState.showControlHandles) {
+                    for (size_t i = 0; i < points.size(); ++i) {
+                        if (points[i].type == InterpolationType::BEZIER) {
+                            // Check control handles
+                            float cInX, cInY, cOutX, cOutY;
+                            points[i].getControlInPoint(cInX, cInY);
+                            points[i].getControlOutPoint(cOutX, cOutY);
+
+                            float screenCInX = playerRatioToScreen(cInX);
+                            float screenCInY = damageMultiplierToScreen(cInY);
+                            float screenCOutX = playerRatioToScreen(cOutX);
+                            float screenCOutY = damageMultiplierToScreen(cOutY);
+
+                            if (isPointNearMouse(screenCInX, screenCInY, mouseX, mouseY, 6.0f)) {
+                                g_uiState.selectedPoint = static_cast<int>(i);
+                                g_uiState.selectedControlPoint = 1; // Control in
+                                g_uiState.isDragging = true;
+                                return;
+                            }
+                            if (isPointNearMouse(screenCOutX, screenCOutY, mouseX, mouseY, 6.0f)) {
+                                g_uiState.selectedPoint = static_cast<int>(i);
+                                g_uiState.selectedControlPoint = 2; // Control out
+                                g_uiState.isDragging = true;
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // STEP 2B: Check if clicking on existing control point
                 for (size_t i = 0; i < points.size(); ++i) {
                     float pointScreenX = playerRatioToScreen(points[i].playerRatio);
                     float pointScreenY = damageMultiplierToScreen(points[i].damageMultiplier);
 
                     if (isPointNearMouse(pointScreenX, pointScreenY, mouseX, mouseY, POINT_HOVER_RADIUS)) {
                         g_uiState.selectedPoint = static_cast<int>(i);
+                        g_uiState.selectedControlPoint = 0; // Point itself
                         g_uiState.isDragging = true;
+                        g_uiState.dragStarted = true;
+                        g_uiState.dragStartPoint = points[i]; // Store original position
                         return; // Exit early - point selected
                     }
                 }
 
                 // STEP 2B: No point clicked - add new point
-                float playerRatio = screenToPlayerRatio(mouseX);
-                float damageMultiplier = screenToDamageMultiplier(mouseY);
+                float playerRatio = g_uiState.snapValueToGrid(
+                    screenToPlayerRatio(mouseX), g_uiState.gridSnapSize);
+                float damageMultiplier = g_uiState.snapValueToGrid(
+                    screenToDamageMultiplier(mouseY), g_uiState.gridSnapSize);
+
+                // Record action before adding point
+                auto beforePoints = g_uiState.curve.getPoints();
 
                 // Add the point (validation happens in DamageCurve class)
                 g_uiState.curve.addPoint(playerRatio, damageMultiplier);
+
+                // Record action after adding point
+                auto afterPoints = g_uiState.curve.getPoints();
+                g_uiState.recordAction(ActionType::ADD_POINT, beforePoints, afterPoints,
+                                      g_uiState.currentPreset, g_uiState.currentPreset,
+                                      static_cast<int>(afterPoints.size() - 1));
                 return;
             }
 
         } else if (action == GLFW_RELEASE) {
+            // Record move action if we were dragging a point
+            if (g_uiState.dragStarted && g_uiState.selectedPoint >= 0 && g_uiState.selectedControlPoint == 0) {
+                auto afterPoints = g_uiState.curve.getPoints();
+                auto beforePoints = afterPoints;
+                beforePoints[g_uiState.selectedPoint] = g_uiState.dragStartPoint;
+
+                g_uiState.recordAction(ActionType::MOVE_POINT, beforePoints, afterPoints,
+                                      g_uiState.currentPreset, g_uiState.currentPreset,
+                                      g_uiState.selectedPoint, g_uiState.dragStartPoint,
+                                      afterPoints[g_uiState.selectedPoint]);
+            }
             g_uiState.isDragging = false;
             g_uiState.selectedPoint = -1;
+            g_uiState.selectedControlPoint = -1;
+            g_uiState.dragStarted = false;
         }
     } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
         // Right-click to remove point
@@ -575,7 +1057,17 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
 
             if (isPointNearMouse(screenX, screenY, mouseX, mouseY, POINT_HOVER_RADIUS)) {
                 if (points.size() > 2) { // Keep at least 2 points
+                    // Record action before removing point
+                    auto beforePoints = g_uiState.curve.getPoints();
+
+                    // Remove the point
                     g_uiState.curve.removePoint(i);
+
+                    // Record action after removing point
+                    auto afterPoints = g_uiState.curve.getPoints();
+                    g_uiState.recordAction(ActionType::REMOVE_POINT, beforePoints, afterPoints,
+                                          g_uiState.currentPreset, g_uiState.currentPreset,
+                                          static_cast<int>(i), beforePoints[i]);
                 }
                 break;
             }
@@ -616,11 +1108,26 @@ void cursorPosCallback(GLFWwindow* window, double rawX, double rawY) {
         if (mouseX >= g_uiState.curveAreaLeft && mouseX <= g_uiState.curveAreaRight &&
             mouseY >= g_uiState.curveAreaTop && mouseY <= g_uiState.curveAreaBottom) {
 
-            float playerRatio = screenToPlayerRatio(mouseX);
-            float damageMultiplier = screenToDamageMultiplier(mouseY);
+            if (g_uiState.selectedControlPoint == 0) {
+                // Dragging a point
+                float playerRatio = g_uiState.snapValueToGrid(screenToPlayerRatio(mouseX), g_uiState.gridSnapSize);
+                float damageMultiplier = g_uiState.snapValueToGrid(screenToDamageMultiplier(mouseY), g_uiState.gridSnapSize);
+                g_uiState.curve.movePoint(g_uiState.selectedPoint, playerRatio, damageMultiplier);
+            } else if (g_uiState.selectedControlPoint == 1 || g_uiState.selectedControlPoint == 2) {
+                // Dragging a control handle
+                float controlX = screenToPlayerRatio(mouseX);
+                float controlY = screenToDamageMultiplier(mouseY);
 
-            // Move the point (validation happens in DamageCurve class)
-            g_uiState.curve.movePoint(g_uiState.selectedPoint, playerRatio, damageMultiplier);
+                auto points = g_uiState.curve.getPoints();
+                if (g_uiState.selectedControlPoint == 1) {
+                    // Control in
+                    points[g_uiState.selectedPoint].setControlInPoint(controlX, controlY);
+                } else {
+                    // Control out
+                    points[g_uiState.selectedPoint].setControlOutPoint(controlX, controlY);
+                }
+                g_uiState.curve.setPoints(points);
+            }
         }
     }
 
@@ -638,17 +1145,129 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
                 if (mods & GLFW_MOD_CONTROL) {
                     g_uiState.curve.saveConfiguration("simulation_config.txt");
                     std::cout << "Configuration saved to simulation_config.txt" << std::endl;
+
+                    // Create backup
+                    auto now = std::chrono::system_clock::now();
+                    auto time = std::chrono::system_clock::to_time_t(now);
+                    std::stringstream backupName;
+                    backupName << "simulation_config_backup_" << time << ".txt";
+                    g_uiState.curve.saveConfiguration(backupName.str());
+                    std::cout << "Backup created: " << backupName.str() << std::endl;
                 }
                 break;
             case GLFW_KEY_L:
                 if (mods & GLFW_MOD_CONTROL) {
                     try {
+                        auto beforePoints = g_uiState.curve.getPoints();
+                        CurvePreset beforePreset = g_uiState.currentPreset;
+
                         g_uiState.curve.loadConfiguration("simulation_config.txt");
                         std::cout << "Configuration loaded from simulation_config.txt" << std::endl;
+
+                        auto afterPoints = g_uiState.curve.getPoints();
+                        g_uiState.recordAction(ActionType::LOAD_CONFIGURATION, beforePoints, afterPoints,
+                                              beforePreset, CurvePreset::CUSTOM);
                     } catch (const std::exception& e) {
                         std::cout << "Failed to load configuration: " << e.what() << std::endl;
                     }
                 }
+                break;
+            case GLFW_KEY_Z:
+                if (mods & GLFW_MOD_CONTROL) {
+                    g_uiState.undo();
+                    std::cout << "Undo performed" << std::endl;
+                }
+                break;
+            case GLFW_KEY_Y:
+                if (mods & GLFW_MOD_CONTROL) {
+                    g_uiState.redo();
+                    std::cout << "Redo performed" << std::endl;
+                }
+                break;
+            case GLFW_KEY_C:
+                if (mods & GLFW_MOD_CONTROL) {
+                    g_uiState.copyCurve();
+                }
+                break;
+            case GLFW_KEY_V:
+                if (mods & GLFW_MOD_CONTROL) {
+                    g_uiState.pasteCurve();
+                }
+                break;
+            case GLFW_KEY_I:
+                // Cycle interpolation type for selected point
+                if (g_uiState.selectedPoint >= 0) {
+                    g_uiState.cycleInterpolationType(g_uiState.selectedPoint);
+                }
+                break;
+            case GLFW_KEY_H:
+                // Toggle control handles
+                g_uiState.toggleControlHandles();
+                break;
+            case GLFW_KEY_E:
+                if (mods & GLFW_MOD_CONTROL) {
+                    // Export menu
+                    std::cout << "Export options:" << std::endl;
+                    std::cout << "  1: Export to JSON" << std::endl;
+                    std::cout << "  2: Export to CSV" << std::endl;
+                    std::cout << "  3: Export to Base64 (for sharing)" << std::endl;
+                    std::cout << "Select option (1-3): ";
+                    // Note: In a real application, you'd implement a proper menu system
+                }
+                break;
+            case GLFW_KEY_J:
+                // Quick export to JSON
+                try {
+                    g_uiState.curve.exportToJson("curve_config.json");
+                    std::cout << "Configuration exported to curve_config.json" << std::endl;
+                } catch (const std::exception& e) {
+                    std::cout << "Export failed: " << e.what() << std::endl;
+                }
+                break;
+            case GLFW_KEY_K:
+                // Quick export to CSV
+                try {
+                    g_uiState.curve.exportToCsv("curve_config.csv");
+                    std::cout << "Configuration exported to curve_config.csv" << std::endl;
+                } catch (const std::exception& e) {
+                    std::cout << "Export failed: " << e.what() << std::endl;
+                }
+                break;
+            case GLFW_KEY_B:
+                // Export to Base64 for sharing
+                try {
+                    std::string base64 = g_uiState.curve.exportToBase64();
+                    std::ofstream file("curve_config.b64");
+                    file << base64;
+                    std::cout << "Configuration exported to curve_config.b64 (Base64)" << std::endl;
+                    std::cout << "Share this file or copy the content for curve sharing" << std::endl;
+                } catch (const std::exception& e) {
+                    std::cout << "Export failed: " << e.what() << std::endl;
+                }
+                break;
+            case GLFW_KEY_DELETE:
+                // Delete selected point
+                g_uiState.deleteSelectedPoint();
+                break;
+            case GLFW_KEY_LEFT:
+                // Nudge left
+                g_uiState.nudgeSelectedPoint(-0.01f, 0.0f);
+                break;
+            case GLFW_KEY_RIGHT:
+                // Nudge right
+                g_uiState.nudgeSelectedPoint(0.01f, 0.0f);
+                break;
+            case GLFW_KEY_UP:
+                // Nudge up
+                g_uiState.nudgeSelectedPoint(0.0f, 0.1f);
+                break;
+            case GLFW_KEY_DOWN:
+                // Nudge down
+                g_uiState.nudgeSelectedPoint(0.0f, -0.1f);
+                break;
+            case GLFW_KEY_N:
+                // Toggle snap to grid
+                g_uiState.toggleSnapToGrid();
                 break;
             case GLFW_KEY_G:
                 g_uiState.showGrid = !g_uiState.showGrid;
@@ -732,11 +1351,22 @@ int main() {
 
     std::cout << "BattleRoyale5 Damage Curve Editor" << std::endl;
     std::cout << "Controls:" << std::endl;
-    std::cout << "  Left click: Add point or select/drag existing point" << std::endl;
+    std::cout << "  Left click: Add point or select/drag existing point/handle" << std::endl;
     std::cout << "  Right click: Remove point" << std::endl;
     std::cout << "  Ctrl+S: Save configuration" << std::endl;
     std::cout << "  Ctrl+L: Load configuration" << std::endl;
+    std::cout << "  Ctrl+Z/Y: Undo/Redo" << std::endl;
+    std::cout << "  Ctrl+C/V: Copy/Paste curve" << std::endl;
+    std::cout << "  I: Cycle interpolation type (Linear -> Spline -> Bezier)" << std::endl;
+    std::cout << "  H: Toggle Bezier control handles" << std::endl;
     std::cout << "  G: Toggle grid" << std::endl;
+    std::cout << "  V: Toggle validation display" << std::endl;
+    std::cout << "  J: Export to JSON" << std::endl;
+    std::cout << "  K: Export to CSV" << std::endl;
+    std::cout << "  B: Export to Base64 (for sharing)" << std::endl;
+    std::cout << "  N: Toggle snap-to-grid" << std::endl;
+    std::cout << "  Arrow keys: Nudge selected point" << std::endl;
+    std::cout << "  Delete: Remove selected point" << std::endl;
     std::cout << "  ESC: Exit" << std::endl;
 
     // Main loop
