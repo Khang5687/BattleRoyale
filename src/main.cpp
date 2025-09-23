@@ -306,7 +306,7 @@ struct Simulation {
 
 	float wallDamping = 0.85f;
 	float collisionDamping = 0.98f;
-	float damageMultiplier = 0.0002f; // Increased for more visible damage
+	float damageMultiplier = 0.00005f; // Tuned down for slower attrition pacing
 	float minDamage = 0.004f; // Increased minimum damage for better visibility
 	float gridCellSize = GRID_CELL_MIN;
 	float speedMultiplier = 2.0f; // Speed multiplier for circle movement
@@ -821,8 +821,10 @@ struct Simulation {
 									
 									// Apply population-based damage scaling - less damage as fewer players remain
 									uint32_t currentAlive = aliveCount();
-									float populationScale = static_cast<float>(currentAlive) / static_cast<float>(maxPlayers);
-									populationScale = std::max(0.1f, populationScale); // Minimum 10% damage to prevent zero damage
+									float aliveRatio = static_cast<float>(currentAlive) / static_cast<float>(std::max(1u, maxPlayers));
+									aliveRatio = std::clamp(aliveRatio, 0.0f, 1.0f);
+									float populationScale = std::pow(aliveRatio, 1.2f);
+									populationScale = std::clamp(populationScale, 0.08f, 1.0f);
 
 									float scaledBaseDamage = baseDamage * populationScale;
 									float finalDamageI = scaledBaseDamage;
@@ -1131,8 +1133,10 @@ struct StatisticalCluster {
 		if (aliveCount == 0) return;
 
 		// Apply population-based damage scaling - clusters also scale with total population
-		float populationScale = static_cast<float>(totalPopulation) / 10000.0f; // Normalize to initial population
-		populationScale = std::max(0.1f, populationScale); // Minimum 10% to prevent zero damage
+		float populationRatio = static_cast<float>(totalPopulation) / 10000.0f; // Normalize to initial population
+		populationRatio = std::clamp(populationRatio, 0.0f, 1.0f);
+		float populationScale = std::pow(populationRatio, 1.2f);
+		populationScale = std::clamp(populationScale, 0.08f, 1.0f);
 
 		// Apply statistical damage - much more gradual elimination
 		float scaledDamage = damage * populationScale;
