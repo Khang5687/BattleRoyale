@@ -282,13 +282,13 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 0;
+	uint32_t maxPlayers = 50000;
 
 	// Stage 2 – dynamic circle scaling parameters
 	static constexpr float MIN_CIRCLE_RADIUS = 2.0f;
 	static constexpr float MAX_CIRCLE_RADIUS = 200.0f;
 	static constexpr float INITIAL_DENSITY_FACTOR = 0.6f;  // Reduced from 0.6f for smaller initial circles
-	static constexpr float FINAL_SIZE_FACTOR = 0.02f;     // Reduced from 0.15f for smaller final circles
+	static constexpr float FINAL_SIZE_FACTOR = 0.01f;     // Reduced from 0.15f for smaller final circles
 	static constexpr float RADIUS_TRANSITION_SPEED = 2.0f; // Units per second toward target radius
 	static constexpr float RADIUS_SNAP_EPSILON = 0.05f;
 	static constexpr float GRID_CELL_SCALE = 2.2f;
@@ -471,9 +471,15 @@ struct Simulation {
 			// When maxPlayers is 0, only load real players from images, no fakes
 			count = static_cast<uint32_t>(files.size());
 		} else {
-			// When maxPlayers > 0, use target count with fallback to fakes if needed
-			count = std::min<uint32_t>(targetCount, static_cast<uint32_t>(files.size()));
-			if (count == 0) count = targetCount; // fallback to fakes
+			// When maxPlayers > 0, prioritize real images over fakes
+			uint32_t realImages = static_cast<uint32_t>(files.size());
+			if (realImages == 0) {
+				// No real images, fall back to all fakes
+				count = targetCount;
+			} else {
+				// Use all real images, and fill with fakes up to targetCount
+				count = std::max(targetCount, realImages);
+			}
 		}
 
 		maxPlayers = count;
@@ -900,14 +906,13 @@ struct Simulation {
 									float totalImpact = impactDamage + penetrationDamage + relativeDamage;
 									float baseDamage = std::max(minDamage, totalImpact * damageMultiplier);
 									
-									// Apply dynamic curve-based damage scaling
-									uint32_t currentAlive = aliveCount();
-									float scaledBaseDamage = calculateDynamicDamage(globalDamageCurve, baseDamage, currentAlive, maxPlayers);
+									// Apply dynamic curve-based damage scaling (use cached alive count to avoid O(n²))
+									float scaledBaseDamage = calculateDynamicDamage(globalDamageCurve, baseDamage, aliveBeforeStep, maxPlayers);
 									float finalDamageI = scaledBaseDamage;
 									float finalDamageJ = scaledBaseDamage;
 
 									// Apply bias damage reduction if bias is active (enough players)
-									if (currentAlive >= BIAS_ACTIVE_THRESHOLD) {
+									if (aliveBeforeStep >= BIAS_ACTIVE_THRESHOLD) {
 										// Apply bias reduction for player i (capped at 80% reduction to ensure damage)
 										auto itI = biasReductions.find(names[i]);
 										if (itI != biasReductions.end()) {

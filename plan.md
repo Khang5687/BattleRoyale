@@ -1115,10 +1115,10 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
 - **Visual Progression**: Natural battle royale pacing with increasing circle prominence as players die
 
 ### Stage 3 – Performance & GPU-Driven Rendering (start once Stage 2 stabilizes)
-- [ ] **P0: CPU Frame-Stability Hotfixes**
-  - [ ] Cache the per-frame alive count and reuse it inside collision loops to avoid O(n²) rescans.
-  - [ ] Feed the real circle radius into `adaptiveSim.updateSimulationTiers()` so demotion/promotion logic reacts to actual circle size.
-  - [ ] Re-profile the 50k-entity start (target ≤16 ms frame) and capture notes for regression tracking.
+- [x] **P0: CPU Frame-Stability Hotfixes** ✅ **COMPLETED**
+  - [x] Cache the per-frame alive count and reuse it inside collision loops to avoid O(n²) rescans.
+  - [x] Feed the real circle radius into `adaptiveSim.updateSimulationTiers()` so demotion/promotion logic reacts to actual circle size.
+  - [x] Re-profile the 50k-entity start (target ≤16 ms frame) and capture notes for regression tracking.
 - [ ] **P1: GPU-Driven Rendering – Stage 1 (Compute Culling Prototype)**
   - [ ] Stand up a compute pass that frustum-culls instance data into a GPU-visible list
   - [ ] Define the shared visibility buffer layout (supports dynamic circle radius scaling)
