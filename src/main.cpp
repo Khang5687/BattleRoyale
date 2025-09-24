@@ -104,7 +104,40 @@ struct GPUCullingBuffers {
 	bool enabled = false;                      // GPU culling can be disabled for debugging
 };
 
+// P2: Indirect draw command structures for GPU-driven rendering
+struct IndirectDrawCommand {
+	uint32_t vertexCount;    // Number of vertices to draw (6 for quad)
+	uint32_t instanceCount;  // Number of instances to draw (from GPU culling)
+	uint32_t firstVertex;    // First vertex index (always 0)
+	uint32_t firstInstance;  // First instance index (always 0)
+};
+
+struct GPUIndirectBuffers {
+	BufferWithMemory circleDrawCommandBuffer;     // Circle draw commands
+	BufferWithMemory healthBarDrawCommandBuffer;  // Health bar draw commands
+	BufferWithMemory circleCompactedInstanceBuffer;    // Compacted circle instances for rendering
+	BufferWithMemory healthBarCompactedInstanceBuffer; // Compacted health bar instances for rendering
+	BufferWithMemory healthBarVisibilityBuffer;        // Health bar visibility indices
+	BufferWithMemory healthBarCounterBuffer;            // Health bar visible count
+	VkDeviceSize circleDrawCommandCapacity = 0;
+	VkDeviceSize healthBarDrawCommandCapacity = 0;
+	VkDeviceSize circleCompactedCapacity = 0;
+	VkDeviceSize healthBarCompactedCapacity = 0;
+	uint32_t circleVisibleCount = 0;
+	uint32_t healthBarVisibleCount = 0;
+	bool enabled = false;  // P2 indirect draw can be disabled for debugging
+};
+
 struct GPUCullingPipeline {
+	VkPipelineLayout computeLayout = VK_NULL_HANDLE;
+	VkPipeline computePipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+};
+
+// P2: Compute pipeline for compacting instances and generating draw commands
+struct GPUCompactionPipeline {
 	VkPipelineLayout computeLayout = VK_NULL_HANDLE;
 	VkPipeline computePipeline = VK_NULL_HANDLE;
 	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
@@ -120,7 +153,15 @@ struct FrustumCullPushConstants {
 	uint32_t pad1;          // padding for alignment
 };
 
-// Performance metrics for GPU culling
+// P2: Push constants for instance compaction shader
+struct CompactionPushConstants {
+	uint32_t maxInstances;        // maximum number of input instances
+	uint32_t maxHealthBars;       // maximum number of health bar instances
+	uint32_t enableHealthBars;    // 1 if health bars should be processed, 0 otherwise
+	uint32_t pad1;                // padding for alignment
+};
+
+// Performance metrics for GPU culling and P2 indirect draw
 struct GPUCullingMetrics {
 	std::chrono::high_resolution_clock::time_point computeStartTime;
 	std::chrono::high_resolution_clock::time_point computeEndTime;
@@ -130,6 +171,14 @@ struct GPUCullingMetrics {
 	float cullingEfficiency = 0.0f; // percentage of instances culled
 	bool validationEnabled = true;
 	bool validationPassed = true;
+	
+	// P2: Instance compaction metrics
+	std::chrono::high_resolution_clock::time_point compactionStartTime;
+	std::chrono::high_resolution_clock::time_point compactionEndTime;
+	float compactionTimeMs = 0.0f;
+	uint32_t compactedCircles = 0;
+	uint32_t compactedHealthBars = 0;
+	bool indirectDrawEnabled = false;
 };
 
 struct HudGeometry {
@@ -2739,6 +2788,212 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device) {
 	return pipeline;
 }
 
+// P2: Create compute pipeline for instance compaction and draw command generation
+static GPUCompactionPipeline createInstanceCompactionPipeline(VkDevice device) {
+	std::string baseDir = std::string(BR5_SHADER_DIR);
+	std::string compPath = baseDir + "/circle_cull.comp.spv";
+	auto compCode = readBinaryFile(compPath);
+	VkShaderModule comp = createShaderModule(device, compCode);
+
+	// Create descriptor set layout for compaction buffers (10 bindings)
+	VkDescriptorSetLayoutBinding bindings[10]{};
+	
+	// Binding 0: Input instance data (readonly)
+	bindings[0].binding = 0;
+	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[0].descriptorCount = 1;
+	bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 1: Visibility indices (readonly)
+	bindings[1].binding = 1;
+	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[1].descriptorCount = 1;
+	bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 2: Visibility counter (readonly)
+	bindings[2].binding = 2;
+	bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[2].descriptorCount = 1;
+	bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 3: Input health bar data (readonly)
+	bindings[3].binding = 3;
+	bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[3].descriptorCount = 1;
+	bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 4: Circle draw command (writeonly)
+	bindings[4].binding = 4;
+	bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[4].descriptorCount = 1;
+	bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 5: Health bar draw command (writeonly)
+	bindings[5].binding = 5;
+	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[5].descriptorCount = 1;
+	bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 6: Compacted circle instances (writeonly)
+	bindings[6].binding = 6;
+	bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[6].descriptorCount = 1;
+	bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 7: Compacted health bar instances (writeonly)
+	bindings[7].binding = 7;
+	bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[7].descriptorCount = 1;
+	bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 8: Health bar visibility indices (writeonly)
+	bindings[8].binding = 8;
+	bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[8].descriptorCount = 1;
+	bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	
+	// Binding 9: Health bar counter (read/write)
+	bindings[9].binding = 9;
+	bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[9].descriptorCount = 1;
+	bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	VkDescriptorSetLayoutCreateInfo dslci{};
+	dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	dslci.bindingCount = 10;
+	dslci.pBindings = bindings;
+
+	GPUCompactionPipeline pipeline{};
+	if (vkCreateDescriptorSetLayout(device, &dslci, nullptr, &pipeline.descriptorSetLayout) != VK_SUCCESS) {
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to create compaction descriptor set layout");
+	}
+
+	// Push constants for compaction parameters
+	VkPushConstantRange pushRange{};
+	pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	pushRange.offset = 0;
+	pushRange.size = sizeof(CompactionPushConstants);
+
+	VkPipelineLayoutCreateInfo plci{};
+	plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	plci.setLayoutCount = 1;
+	plci.pSetLayouts = &pipeline.descriptorSetLayout;
+	plci.pushConstantRangeCount = 1;
+	plci.pPushConstantRanges = &pushRange;
+
+	if (vkCreatePipelineLayout(device, &plci, nullptr, &pipeline.computeLayout) != VK_SUCCESS) {
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to create compaction pipeline layout");
+	}
+
+	VkComputePipelineCreateInfo cpci{};
+	cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+	cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	cpci.stage.module = comp;
+	cpci.stage.pName = "main";
+	cpci.layout = pipeline.computeLayout;
+
+	if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &pipeline.computePipeline) != VK_SUCCESS) {
+		vkDestroyPipelineLayout(device, pipeline.computeLayout, nullptr);
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to create compaction compute pipeline");
+	}
+
+	// Create descriptor pool for compaction pipeline
+	VkDescriptorPoolSize poolSizes[1];
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	poolSizes[0].descriptorCount = 10; // 10 storage buffers
+
+	VkDescriptorPoolCreateInfo dpci{};
+	dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	dpci.poolSizeCount = 1;
+	dpci.pPoolSizes = poolSizes;
+	dpci.maxSets = 1;
+
+	if (vkCreateDescriptorPool(device, &dpci, nullptr, &pipeline.descriptorPool) != VK_SUCCESS) {
+		vkDestroyPipeline(device, pipeline.computePipeline, nullptr);
+		vkDestroyPipelineLayout(device, pipeline.computeLayout, nullptr);
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to create compaction descriptor pool");
+	}
+
+	// Allocate descriptor set
+	VkDescriptorSetAllocateInfo dsai{};
+	dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	dsai.descriptorPool = pipeline.descriptorPool;
+	dsai.descriptorSetCount = 1;
+	dsai.pSetLayouts = &pipeline.descriptorSetLayout;
+
+	if (vkAllocateDescriptorSets(device, &dsai, &pipeline.descriptorSet) != VK_SUCCESS) {
+		vkDestroyDescriptorPool(device, pipeline.descriptorPool, nullptr);
+		vkDestroyPipeline(device, pipeline.computePipeline, nullptr);
+		vkDestroyPipelineLayout(device, pipeline.computeLayout, nullptr);
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to allocate compaction descriptor set");
+	}
+
+	vkDestroyShaderModule(device, comp, nullptr);
+	return pipeline;
+}
+
+// P2: Create buffers for indirect draw system
+static void createGPUIndirectBuffers(VkPhysicalDevice physical, VkDevice device, GPUIndirectBuffers& buffers, uint32_t maxInstances, uint32_t maxHealthBars) {
+	// Circle draw command buffer (single command)
+	VkDeviceSize circleDrawCommandSize = sizeof(IndirectDrawCommand);
+	createBuffer(physical, device, circleDrawCommandSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.circleDrawCommandBuffer);
+	buffers.circleDrawCommandCapacity = circleDrawCommandSize;
+
+	// Health bar draw command buffer (single command)
+	VkDeviceSize healthBarDrawCommandSize = sizeof(IndirectDrawCommand);
+	createBuffer(physical, device, healthBarDrawCommandSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.healthBarDrawCommandBuffer);
+	buffers.healthBarDrawCommandCapacity = healthBarDrawCommandSize;
+
+	// Compacted circle instance buffer
+	VkDeviceSize circleCompactedSize = sizeof(InstanceLayoutCPU) * maxInstances;
+	createBuffer(physical, device, circleCompactedSize,
+		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.circleCompactedInstanceBuffer);
+	buffers.circleCompactedCapacity = circleCompactedSize;
+
+	// Compacted health bar instance buffer
+	VkDeviceSize healthBarCompactedSize = sizeof(HealthBarInstance) * maxHealthBars;
+	createBuffer(physical, device, healthBarCompactedSize,
+		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.healthBarCompactedInstanceBuffer);
+	buffers.healthBarCompactedCapacity = healthBarCompactedSize;
+
+	// Health bar visibility buffer
+	VkDeviceSize healthBarVisibilitySize = sizeof(uint32_t) * maxHealthBars;
+	createBuffer(physical, device, healthBarVisibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.healthBarVisibilityBuffer);
+
+	// Health bar counter buffer
+	VkDeviceSize healthBarCounterSize = sizeof(uint32_t);
+	createBuffer(physical, device, healthBarCounterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.healthBarCounterBuffer);
+
+	// Enable P2 indirect draw for testing
+	buffers.enabled = true;
+}
+
 // GPU-Driven Culling: Create buffers for compute culling pass
 static void createGPUCullingBuffers(VkPhysicalDevice physical, VkDevice device, GPUCullingBuffers& buffers, uint32_t maxInstances) {
 	// Input instance buffer (raw instance data for GPU)
@@ -2843,6 +3098,79 @@ static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipe
 	vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
 }
 
+// P2: Setup descriptor sets for instance compaction pipeline
+static void setupGPUCompactionDescriptors(VkDevice device,
+	const GPUCompactionPipeline& pipeline,
+	const GPUCullingBuffers& cullingBuffers,
+	const GPUIndirectBuffers& indirectBuffers,
+	VkBuffer healthBarInputBuffer) {
+	
+	VkDescriptorBufferInfo bufferInfos[10]{};
+	
+	// Binding 0: Input instance data (from P1 culling)
+	bufferInfos[0].buffer = cullingBuffers.inputInstanceBuffer.buffer;
+	bufferInfos[0].offset = 0;
+	bufferInfos[0].range = VK_WHOLE_SIZE;
+	
+	// Binding 1: Visibility indices (from P1 culling)
+	bufferInfos[1].buffer = cullingBuffers.visibilityBuffer.buffer;
+	bufferInfos[1].offset = 0;
+	bufferInfos[1].range = VK_WHOLE_SIZE;
+	
+	// Binding 2: Visibility counter (from P1 culling)
+	bufferInfos[2].buffer = cullingBuffers.visibilityCounterBuffer.buffer;
+	bufferInfos[2].offset = 0;
+	bufferInfos[2].range = sizeof(uint32_t);
+	
+	// Binding 3: Input health bar data
+	bufferInfos[3].buffer = healthBarInputBuffer;
+	bufferInfos[3].offset = 0;
+	bufferInfos[3].range = VK_WHOLE_SIZE;
+	
+	// Binding 4: Circle draw command output
+	bufferInfos[4].buffer = indirectBuffers.circleDrawCommandBuffer.buffer;
+	bufferInfos[4].offset = 0;
+	bufferInfos[4].range = sizeof(IndirectDrawCommand);
+	
+	// Binding 5: Health bar draw command output
+	bufferInfos[5].buffer = indirectBuffers.healthBarDrawCommandBuffer.buffer;
+	bufferInfos[5].offset = 0;
+	bufferInfos[5].range = sizeof(IndirectDrawCommand);
+	
+	// Binding 6: Compacted circle instances output
+	bufferInfos[6].buffer = indirectBuffers.circleCompactedInstanceBuffer.buffer;
+	bufferInfos[6].offset = 0;
+	bufferInfos[6].range = VK_WHOLE_SIZE;
+	
+	// Binding 7: Compacted health bar instances output
+	bufferInfos[7].buffer = indirectBuffers.healthBarCompactedInstanceBuffer.buffer;
+	bufferInfos[7].offset = 0;
+	bufferInfos[7].range = VK_WHOLE_SIZE;
+	
+	// Binding 8: Health bar visibility indices output
+	bufferInfos[8].buffer = indirectBuffers.healthBarVisibilityBuffer.buffer;
+	bufferInfos[8].offset = 0;
+	bufferInfos[8].range = VK_WHOLE_SIZE;
+	
+	// Binding 9: Health bar counter output
+	bufferInfos[9].buffer = indirectBuffers.healthBarCounterBuffer.buffer;
+	bufferInfos[9].offset = 0;
+	bufferInfos[9].range = sizeof(uint32_t);
+
+	VkWriteDescriptorSet writes[10]{};
+	for (int i = 0; i < 10; ++i) {
+		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[i].dstSet = pipeline.descriptorSet;
+		writes[i].dstBinding = i;
+		writes[i].dstArrayElement = 0;
+		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[i].descriptorCount = 1;
+		writes[i].pBufferInfo = &bufferInfos[i];
+	}
+
+	vkUpdateDescriptorSets(device, 10, writes, 0, nullptr);
+}
+
 // GPU-Driven Culling: Execute compute shader for frustum culling
 static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCullingPipeline& pipeline, 
 	const GPUCullingBuffers& buffers, GPUCullingMetrics& metrics, 
@@ -2918,6 +3246,125 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 	metrics.computeEndTime = std::chrono::high_resolution_clock::now();
 	auto deltaTime = std::chrono::duration<float, std::milli>(metrics.computeEndTime - metrics.computeStartTime);
 	metrics.computeTimeMs = deltaTime.count();
+}
+
+// P2: Execute instance compaction and draw command generation
+static void executeGPUCompaction(VkDevice device, VkCommandBuffer cmd, 
+	const GPUCompactionPipeline& pipeline, 
+	const GPUIndirectBuffers& indirectBuffers,
+	GPUCullingMetrics& metrics,
+	uint32_t maxInstances, uint32_t maxHealthBars, bool enableHealthBars) {
+	
+	metrics.compactionStartTime = std::chrono::high_resolution_clock::now();
+	
+	// Bind compute pipeline and descriptor set
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.computePipeline);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.computeLayout, 0, 1, &pipeline.descriptorSet, 0, nullptr);
+	
+	// Set push constants
+	CompactionPushConstants pushConstants{};
+	pushConstants.maxInstances = maxInstances;
+	pushConstants.maxHealthBars = maxHealthBars;
+	pushConstants.enableHealthBars = enableHealthBars ? 1u : 0u;
+	pushConstants.pad1 = 0;
+	
+	vkCmdPushConstants(cmd, pipeline.computeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 
+		0, sizeof(CompactionPushConstants), &pushConstants);
+	
+	// Reset health bar counter
+	if (enableHealthBars) {
+		uint32_t zero = 0;
+		VkBufferMemoryBarrier resetBarrier{};
+		resetBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+		resetBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		resetBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		resetBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		resetBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		resetBarrier.buffer = indirectBuffers.healthBarCounterBuffer.buffer;
+		resetBarrier.offset = 0;
+		resetBarrier.size = sizeof(uint32_t);
+
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, nullptr, 1, &resetBarrier, 0, nullptr);
+
+		vkCmdFillBuffer(cmd, indirectBuffers.healthBarCounterBuffer.buffer, 0, sizeof(uint32_t), 0);
+
+		// Barrier to ensure counter reset completes
+		VkBufferMemoryBarrier counterBarrier{};
+		counterBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+		counterBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		counterBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		counterBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		counterBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		counterBarrier.buffer = indirectBuffers.healthBarCounterBuffer.buffer;
+		counterBarrier.offset = 0;
+		counterBarrier.size = sizeof(uint32_t);
+
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0, 0, nullptr, 1, &counterBarrier, 0, nullptr);
+	}
+	
+	// Dispatch compaction compute shader
+	// Use the same workgroup size as frustum culling (64 threads per group)
+	uint32_t numWorkGroups = (maxInstances + 63) / 64;
+	vkCmdDispatch(cmd, numWorkGroups, 1, 1);
+	
+	// Memory barrier: compute write -> vertex read for indirect draw
+	VkBufferMemoryBarrier barriers[4]{};
+	
+	// Circle draw command barrier
+	barriers[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	barriers[0].dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+	barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barriers[0].buffer = indirectBuffers.circleDrawCommandBuffer.buffer;
+	barriers[0].offset = 0;
+	barriers[0].size = sizeof(IndirectDrawCommand);
+	
+	// Circle compacted instances barrier
+	barriers[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barriers[1].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	barriers[1].dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+	barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barriers[1].buffer = indirectBuffers.circleCompactedInstanceBuffer.buffer;
+	barriers[1].offset = 0;
+	barriers[1].size = VK_WHOLE_SIZE;
+	
+	uint32_t barrierCount = 2;
+	
+	if (enableHealthBars) {
+		// Health bar draw command barrier
+		barriers[2].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+		barriers[2].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barriers[2].dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+		barriers[2].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[2].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[2].buffer = indirectBuffers.healthBarDrawCommandBuffer.buffer;
+		barriers[2].offset = 0;
+		barriers[2].size = sizeof(IndirectDrawCommand);
+		
+		// Health bar compacted instances barrier
+		barriers[3].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+		barriers[3].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barriers[3].dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+		barriers[3].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[3].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barriers[3].buffer = indirectBuffers.healthBarCompactedInstanceBuffer.buffer;
+		barriers[3].offset = 0;
+		barriers[3].size = VK_WHOLE_SIZE;
+		
+		barrierCount = 4;
+	}
+	
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+		VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+		0, 0, nullptr, barrierCount, barriers, 0, nullptr);
+	
+	metrics.compactionEndTime = std::chrono::high_resolution_clock::now();
+	metrics.compactionTimeMs = std::chrono::duration<float, std::milli>(metrics.compactionEndTime - metrics.compactionStartTime).count();
+	metrics.indirectDrawEnabled = true;
 }
 
 // GPU-Driven Culling: Validate GPU culling results against CPU reference
@@ -4018,6 +4465,10 @@ int main() {
 	GPUCullingPipeline cullingPipeline = createFrustumCullingPipeline(device);
 	GPUCullingBuffers cullingBuffers{};
 	GPUCullingMetrics cullingMetrics{};
+	
+	// P2: Create instance compaction pipeline for indirect draw generation
+	GPUCompactionPipeline compactionPipeline = createInstanceCompactionPipeline(device);
+	GPUIndirectBuffers indirectBuffers{};
 
 	// Create geometry buffers (quad vertices) and instance buffer
 	GeometryBuffers geom{};
@@ -4231,6 +4682,12 @@ int main() {
 	createGPUCullingBuffers(physical, device, cullingBuffers, sim.maxPlayers);
 	setupGPUCullingDescriptors(device, cullingPipeline, cullingBuffers);
 	std::cout << "GPU culling system initialized!" << std::endl; std::cout.flush();
+	
+	// P2: Initialize indirect draw buffers and descriptors
+	std::cout << "Initializing P2 indirect draw buffers..." << std::endl; std::cout.flush();
+	createGPUIndirectBuffers(physical, device, indirectBuffers, sim.maxPlayers, sim.maxPlayers);
+	setupGPUCompactionDescriptors(device, compactionPipeline, cullingBuffers, indirectBuffers, healthGeom.instanceBuffer.buffer);
+	std::cout << "P2 indirect draw system initialized!" << std::endl; std::cout.flush();
 
 	uint32_t frameCount = 0;
 	uint32_t lastAliveCount = sim.aliveCount();
@@ -4424,6 +4881,12 @@ int main() {
 					executeGPUCulling(device, cmd, cullingPipeline, cullingBuffers, cullingMetrics, 
 						cpuInstances, sc.extent.width, sc.extent.height);
 					
+					// P2: Execute instance compaction pass if indirect draw is enabled
+					if (indirectBuffers.enabled) {
+						executeGPUCompaction(device, cmd, compactionPipeline, indirectBuffers, cullingMetrics,
+							static_cast<uint32_t>(cpuInstances.size()), static_cast<uint32_t>(healthBarInstances.size()), !healthBarInstances.empty());
+					}
+					
 					// Skip validation for now to avoid complexity - mark as passed
 					cullingMetrics.validationPassed = true;
 				} catch (...) {
@@ -4527,6 +4990,28 @@ int main() {
 					if (!cullingMetrics.validationEnabled) validationText += " (skip)";
 					appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, validationText, diagTextSize, diagShadow);
 					appendHudText(hudFont, hudVertices, 24.0f, yOffset, validationText, diagTextSize, diagColor);
+					yOffset += 35.0f;
+				}
+				
+				// P2: Indirect draw metrics
+				std::string indirectStatusText = "P2 Indirect Draw: " + std::string(indirectBuffers.enabled ? "ENABLED" : "DISABLED");
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, indirectStatusText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, indirectStatusText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+				
+				if (indirectBuffers.enabled && cullingMetrics.indirectDrawEnabled) {
+					std::string compactionText = "Compaction: " + std::to_string(cullingMetrics.compactionTimeMs) + "ms, " +
+												std::to_string(cullingMetrics.compactedCircles) + " circles, " +
+												std::to_string(cullingMetrics.compactedHealthBars) + " health bars";
+					appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, compactionText, diagTextSize, diagShadow);
+					appendHudText(hudFont, hudVertices, 24.0f, yOffset, compactionText, diagTextSize, diagColor);
+					yOffset += 35.0f;
+					
+					// Total GPU time (P1 + P2)
+					float totalGPUTime = cullingMetrics.computeTimeMs + cullingMetrics.compactionTimeMs;
+					std::string totalGPUText = "Total GPU: " + std::to_string(totalGPUTime) + "ms";
+					appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, totalGPUText, diagTextSize, diagShadow);
+					appendHudText(hudFont, hudVertices, 24.0f, yOffset, totalGPUText, diagTextSize, diagColor);
 					yOffset += 35.0f;
 				}
 
@@ -4635,12 +5120,32 @@ int main() {
 		}
 
 		// Bind vertex buffers and draw instanced quads
-		VkBuffer vbs[] = { geom.quadVertexBuffer.buffer, geom.instanceBuffer.buffer };
-		VkDeviceSize offs[] = { 0, 0 };
-		vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
-		vkCmdDraw(cmd, 6, geom.instanceCount, 0, 0);
+		if (indirectBuffers.enabled && cullingBuffers.enabled) {
+			// P2: Use indirect draw with GPU-compacted instances
+			VkBuffer vbs[] = { geom.quadVertexBuffer.buffer, indirectBuffers.circleCompactedInstanceBuffer.buffer };
+			VkDeviceSize offs[] = { 0, 0 };
+			vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
+			vkCmdDrawIndirect(cmd, indirectBuffers.circleDrawCommandBuffer.buffer, 0, 1, sizeof(IndirectDrawCommand));
+		} else {
+			// CPU path: Use direct draw with CPU-generated instances
+			VkBuffer vbs[] = { geom.quadVertexBuffer.buffer, geom.instanceBuffer.buffer };
+			VkDeviceSize offs[] = { 0, 0 };
+			vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
+			vkCmdDraw(cmd, 6, geom.instanceCount, 0, 0);
+		}
 
-		if (healthGeom.instanceCount > 0) {
+		// Health bar rendering
+		if (indirectBuffers.enabled && cullingBuffers.enabled) {
+			// P2: Use indirect draw with GPU-compacted health bar instances
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, healthBarPipeline.pipeline);
+			float healthPush[4] = { 0.0f, 0.0f, sim.worldWidth, sim.worldHeight };
+			vkCmdPushConstants(cmd, healthBarPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(healthPush), healthPush);
+			VkBuffer hbVbs[] = { geom.quadVertexBuffer.buffer, indirectBuffers.healthBarCompactedInstanceBuffer.buffer };
+			VkDeviceSize hbOffs[] = { 0, 0 };
+			vkCmdBindVertexBuffers(cmd, 0, 2, hbVbs, hbOffs);
+			vkCmdDrawIndirect(cmd, indirectBuffers.healthBarDrawCommandBuffer.buffer, 0, 1, sizeof(IndirectDrawCommand));
+		} else if (healthGeom.instanceCount > 0) {
+			// CPU path: Use direct draw with CPU-generated health bar instances
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, healthBarPipeline.pipeline);
 			float healthPush[4] = { 0.0f, 0.0f, sim.worldWidth, sim.worldHeight };
 			vkCmdPushConstants(cmd, healthBarPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(healthPush), healthPush);
