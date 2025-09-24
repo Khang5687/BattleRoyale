@@ -157,6 +157,184 @@ if (frameTime > TARGET_FRAME_TIME) {
   - Tier 2 (real): high-quality mipmapped texture uploaded on demand when radius > IMAGE_LOAD_THRESHOLD.
 - O(1) algorithmic constraint for image access: each entity holds stable index to metadata; atlas layer lookup is O(1) via a dense vector; LRU updates are O(1) amortized with linked-list + hashmap.
 
+### 🚀 High-Performance Parallel Image Loading System (PRIORITY 0.5)
+**CRITICAL ISSUE**: Current single-threaded image loading with 10ms sleep achieves only ~100 images/second. With 50k+ images, this results in 8+ minute load times and poor user experience with textures popping in during gameplay.
+
+**ROOT CAUSE ANALYSIS**:
+- **Serial Processing Bottleneck**: Single background thread processes one image at a time
+- **Inefficient GPU Uploads**: Individual command buffer + queue submission per texture
+- **Wasted Startup Opportunity**: Simulation pauses at start, but no aggressive preloading
+- **I/O Inefficiency**: No batching, no parallelism, constant thread sleeping (10ms between requests)
+
+**SOLUTION ARCHITECTURE**: Multi-threaded batch loading system with startup preloading
+
+#### Phase 1: Parallel Decoding Pipeline (8-10x Speedup)
+```cpp
+struct ParallelImageLoader {
+    // Thread pool for parallel decoding
+    static constexpr size_t DECODE_THREAD_COUNT = 8;  // Tune to CPU cores
+    std::vector<std::thread> decoderThreads;
+
+    // Lock-free work queue using atomics
+    struct WorkItem {
+        uint32_t imageId;
+        std::atomic<int> status{0};  // 0=pending, 1=processing, 2=complete
+    };
+    std::vector<WorkItem> workQueue;
+    std::atomic<size_t> nextWorkIndex{0};
+    std::atomic<size_t> completedCount{0};
+
+    // Pre-allocated decode buffers (avoid malloc overhead)
+    std::vector<std::vector<uint8_t>> decodeBuffers;  // One per thread
+};
+```
+
+**Key Optimizations**:
+- **Lock-Free Work Stealing**: Atomic work queue eliminates mutex contention
+- **Pre-Allocated Buffers**: Thread-local decode buffers (256×256×4 each)
+- **STB SIMD**: Enable `STBI_SSE2` and `STBIR_SSE2` for vectorized decode/resize
+- **File Memory Mapping**: Use `mmap()` for faster file access on NVMe SSDs
+
+#### Phase 2: Batched GPU Upload (5-8x Additional Speedup)
+```cpp
+struct BatchedUploadContext {
+    // Large staging buffer for batch transfers
+    BufferWithMemory stagingBuffer;  // 256 MB
+    VkCommandBuffer batchTransferCmd;
+    VkFence uploadFence;
+
+    // Batch configuration
+    static constexpr size_t MAX_BATCH_SIZE = 128;  // Images per submission
+    std::vector<VkBufferImageCopy> copyRegions;
+    std::vector<VkImageMemoryBarrier> barriers;
+};
+```
+
+**Vulkan Optimizations**:
+- **Batch Command Buffers**: Upload 128 textures in single command buffer
+- **Dedicated Transfer Queue**: Use async transfer queue if available (check queue families)
+- **Persistent Staging Buffer**: Reuse large staging buffer across batches
+- **Pipeline Barriers Batching**: Batch all image layout transitions
+
+#### Phase 3: Startup Preloading (Eliminate User-Visible Loading)
+```cpp
+void preloadDuringStartup(ImageManager& mgr, bool simulationPaused) {
+    if (!simulationPaused) return;
+
+    auto startTime = std::chrono::high_resolution_clock::now();
+
+    // Phase A: Critical preload (first 512 images - block on this)
+    size_t criticalCount = std::min(512ul, mgr.atlas.imageFiles.size());
+    parallelBatchLoad(mgr, 0, criticalCount, true);  // blocking=true
+
+    std::cout << "Loaded " << criticalCount << " critical images\n";
+
+    // Phase B: Likely-needed (next 1536 images - parallel with render setup)
+    size_t likelyCount = std::min(2048ul, mgr.atlas.imageFiles.size());
+    parallelBatchLoad(mgr, criticalCount, likelyCount, false);  // non-blocking
+
+    // Phase C: Background fill (remaining images - opportunistic)
+    if (mgr.atlas.imageFiles.size() > likelyCount) {
+        continuousBackgroundLoad(mgr, likelyCount);
+    }
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - startTime).count();
+    std::cout << "Startup preload: " << criticalCount << " images in " << elapsed << "ms\n";
+}
+```
+
+**Startup Strategy**:
+- **Exploit Pause Window**: Aggressive preloading while simulation is paused
+- **Tiered Loading**: Critical (512) → Likely (2048) → Background (all)
+- **Priority-Based**: Load closest/largest circles first using spatial heuristics
+- **Non-Blocking Transition**: Simulation can start before all images loaded
+
+#### Phase 4: Priority & Memory Management
+```cpp
+struct LoadPriority {
+    float distanceToPlayer;    // Closer = higher priority
+    float circleRadius;        // Larger = higher priority
+    uint64_t lastAccessFrame;  // Recently used = higher priority
+
+    float computeScore() const {
+        return (1000.0f / (1.0f + distanceToPlayer)) +
+               (circleRadius * 10.0f) +
+               (lastAccessFrame > 0 ? 500.0f : 0.0f);
+    }
+};
+
+// Memory budget tracking
+struct VRAMBudget {
+    VkDeviceSize totalVRAM;
+    VkDeviceSize textureAtlasSize;
+    static constexpr float TEXTURE_BUDGET_RATIO = 0.6f;  // 60% VRAM for textures
+
+    uint32_t calculateMaxLayers(VkPhysicalDevice physical) {
+        // Query device memory and compute safe atlas layer count
+        VkDeviceSize perLayer = 256 * 256 * 4;  // RGBA
+        return std::min(2048u, (uint32_t)((totalVRAM * 0.6f) / perLayer));
+    }
+};
+```
+
+**Advanced Features**:
+- **Distance-Based Priority**: Spatial queries determine which images load first
+- **Dynamic Priority Refresh**: Re-prioritize queue every 60 frames based on gameplay
+- **LRU Batch Eviction**: Evict multiple layers at once for better cache coherency
+- **VRAM Budget Enforcement**: Auto-tune atlas layer count based on available VRAM
+
+#### Performance Projections
+
+| Metric | Current | Optimized (All Phases) | Speedup |
+|--------|---------|------------------------|---------|
+| Decode Rate | 100/s | 800-1000/s | 8-10x |
+| GPU Upload | 20/s | 2000-2500/s | 100-125x |
+| **Total Pipeline** | **100/s** | **~5000-8000/s** | **50-80x** |
+| **50k Images** | **8+ minutes** | **6-10 seconds** | **~60x** |
+
+**O(1) Complexity Achievement**:
+- **Parallel Decode**: O(N/P) where P=8 threads → effectively O(1) per-thread
+- **Atlas Lookup**: O(1) hash map (unchanged)
+- **LRU Updates**: O(1) amortized with linked-list + hashmap (unchanged)
+- **Batch Upload**: O(B) where B=batch size (128), independent of total count
+- **User Experience**: O(1) - textures available before needed via preload
+
+#### Implementation Roadmap
+
+**Priority 0.5a: Parallel Decoding** (Immediate - 1-2 days)
+- [ ] Create thread pool with 8 decoder threads (tune to `std::thread::hardware_concurrency()`)
+- [ ] Implement lock-free work queue using atomic operations
+- [ ] Pre-allocate decode buffers (one 256×256×4 buffer per thread)
+- [ ] Enable STB SIMD optimizations (`STBI_SSE2`, `STBIR_SSE2`)
+- [ ] Replace single loader thread in `initImageManager()`
+
+**Priority 0.5b: Batched GPU Upload** (1-2 days after 0.5a)
+- [ ] Create persistent 256MB staging buffer at init
+- [ ] Implement batch command buffer recording (128 images/batch)
+- [ ] Batch VkBufferImageCopy regions and image barriers
+- [ ] Reduce queue submissions from O(N) to O(N/128)
+- [ ] Check for dedicated transfer queue and use if available
+
+**Priority 0.5c: Startup Preloading** (1 day after 0.5b)
+- [ ] Detect simulation pause state in main loop
+- [ ] Implement 3-phase preload strategy (512 → 2048 → all)
+- [ ] Add priority calculation based on circle distance/size
+- [ ] Show progress UI during startup preload
+
+**Priority 0.5d: Polish & Validation** (1 day)
+- [ ] Add performance metrics (images/sec, total time)
+- [ ] Implement VRAM budget enforcement
+- [ ] Stress test with 50k+ images
+- [ ] Validate thread safety with TSan/Helgrind
+
+**Success Criteria**:
+- ✅ 50k images load in <10 seconds (vs 8+ minutes currently)
+- ✅ First 2048 images available before simulation starts (<2 seconds)
+- ✅ No visual texture pop-in during normal gameplay
+- ✅ Memory usage stays within 60% VRAM budget
+- ✅ Thread-safe with no data races or synchronization issues
+
 ### Performance Monitoring & Adaptive Quality
 - **Real-time Profiling**: Monitor frame time, draw calls, and memory usage
 - **Adaptive LOD**: Dynamically adjust IMAGE_LOAD_THRESHOLD based on performance headroom
@@ -1031,6 +1209,22 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   ---
 
 ## Remaining Work Roadmap
+
+### 🚨 PRIORITY 0.5 – High-Performance Parallel Image Loading ⚡ CRITICAL OPTIMIZATION
+**BLOCKING USABILITY** - Current image loading is painfully slow (~8 minutes for 50k images) with severe texture pop-in during gameplay
+
+**Current State**: Single-threaded loader with 10ms sleep → ~100 images/second
+**Target State**: Multi-threaded batch loader → ~5000-8000 images/second (50-80x faster)
+
+**Implementation Phases** (see "Advanced Asset Management" section above for details):
+- [ ] **Phase 1: Parallel Decoding** (8 worker threads, lock-free queue, SIMD-enabled STB) → 8-10x speedup
+- [ ] **Phase 2: Batched GPU Upload** (128 images/batch, persistent staging buffer) → 5-8x additional speedup
+- [ ] **Phase 3: Startup Preloading** (leverage simulation pause, tiered loading strategy) → eliminate user-visible loading
+- [ ] **Phase 4: Priority & Memory Management** (distance-based priority, VRAM budget enforcement) → intelligent resource allocation
+
+**Success Criteria**: 50k images loaded in <10 seconds (vs 8+ minutes), no texture pop-in, O(1) user experience
+
+---
 
 ### 🚨 PRIORITY 0 – Dynamic Damage Scaling Curve System ⚡ IMMEDIATE DEVELOPMENT
 **BLOCKING ALL OTHER FEATURES** - Critical pacing control system for battle royale simulation
