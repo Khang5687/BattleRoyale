@@ -481,13 +481,13 @@ static void ensureAtlasLookupBuffer(ImageManager& mgr, size_t entryCount);
 
 struct Simulation {
 	// Constants
-	uint32_t maxPlayers = 50000;
+	uint32_t maxPlayers = 0;
 
 	// Stage 2 – dynamic circle scaling parameters
 	static constexpr float MIN_CIRCLE_RADIUS = 2.0f;
 	static constexpr float MAX_CIRCLE_RADIUS = 200.0f;
-	static constexpr float INITIAL_DENSITY_FACTOR = 0.6f;  // Reduced from 0.6f for smaller initial circles
-	static constexpr float FINAL_SIZE_FACTOR = 0.01f;     // Reduced from 0.15f for smaller final circles
+	static constexpr float INITIAL_DENSITY_FACTOR = 0.3f;  // Reduced from 0.6f for smaller initial circles
+	static constexpr float FINAL_SIZE_FACTOR = 0.005f;     // Reduced from 0.15f for smaller final circles
 	static constexpr float RADIUS_TRANSITION_SPEED = 2.0f; // Units per second toward target radius
 	static constexpr float RADIUS_SNAP_EPSILON = 0.05f;
 	static constexpr float GRID_CELL_SCALE = 2.2f;
