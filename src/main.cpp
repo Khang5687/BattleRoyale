@@ -56,6 +56,8 @@
 
 // Global damage curve instance for dynamic damage scaling
 static DamageCurve globalDamageCurve;
+static bool gDisableGpuStream = false;
+static bool gDisableGpuCulling = false;
 
 static void glfwErrorCallback(int code, const char* desc) {
 	std::fprintf(stderr, "GLFW error %d: %s\n", code, desc);
@@ -101,6 +103,8 @@ struct GPUCullingBuffers {
 	BufferWithMemory visibilityCounterBuffer;  // Atomic counter for visible count
 	BufferWithMemory culledInstanceBuffer;     // Final culled instance data for rendering
 	BufferWithMemory stagingBuffer;            // Persistent staging buffer for uploads
+	BufferWithMemory counterReadbackBuffer;    // Host-visible readback of visible count
+	uint32_t* counterReadbackHost = nullptr;
 	VkDeviceSize inputCapacity = 0;
 	VkDeviceSize visibilityCapacity = 0;
 	VkDeviceSize culledCapacity = 0;
@@ -363,6 +367,7 @@ struct TextureAtlas {
 	std::list<uint32_t> lruOrder; // Most recently used first
 	std::unordered_map<uint32_t, std::list<uint32_t>::iterator> layerToLruIter;
 	std::queue<uint32_t> freeLayers;
+	std::vector<VkImageLayout> layerLayouts;
 
 	// Texture cache
 	std::unordered_map<uint32_t, LoadedTexture> textureCache;
@@ -372,11 +377,54 @@ struct TextureAtlas {
 	int64_t frameCounter = 0;
 };
 
+enum class GpuStreamRequestState : uint32_t {
+	Idle = 0,
+	Ready = 1,
+	InFlight = 2,
+	Complete = 3
+};
+
+struct GpuStreamRequest {
+	uint32_t state = static_cast<uint32_t>(GpuStreamRequestState::Idle);
+	uint32_t layer = 0;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	uint32_t pixelOffset = 0;
+	uint32_t imageId = UINT32_MAX;
+	uint32_t reserved0 = 0;
+	uint32_t reserved1 = 0;
+};
+
+struct GpuStreamSlot {
+	bool inFlight = false;
+	uint32_t imageId = UINT32_MAX;
+	uint32_t layer = UINT32_MAX;
+};
+
+struct GpuStreamContext {
+	static constexpr uint32_t SLOT_COUNT = 16;
+	static constexpr uint32_t BYTES_PER_PIXEL = 4;
+	static constexpr uint32_t TEXTURE_PIXELS = TextureAtlas::ATLAS_SIZE * TextureAtlas::ATLAS_SIZE;
+	static constexpr VkDeviceSize TEXTURE_BYTES = static_cast<VkDeviceSize>(TEXTURE_PIXELS * BYTES_PER_PIXEL);
+
+	bool enabled = false;
+	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+	BufferWithMemory requestBuffer;
+	BufferWithMemory pixelBuffer;
+	void* mappedRequests = nullptr;
+	uint8_t* mappedPixels = nullptr;
+	std::array<GpuStreamSlot, SLOT_COUNT> slots{};
+};
+
 struct ImageManager {
 	static constexpr float IMAGE_LOAD_THRESHOLD_RADIUS = 20.0f;
 	static constexpr uint32_t MAX_CACHE_SIZE = 4096;
 
 	TextureAtlas atlas;
+	GpuStreamContext gpuStream;
 
 	// Background loading thread
 	std::thread loaderThread;
@@ -401,6 +449,11 @@ struct ImageManager {
 
 // Forward declarations
 class AdaptiveCircleSimulation;
+static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkDescriptorPool descriptorPool, bool enableGpuStream);
+static void pollGpuStreamCompletions(ImageManager& mgr);
+static bool queueGpuStreamUpload(ImageManager& mgr, uint32_t imageId, uint32_t layer, LoadedTexture& texture);
+static void recordGpuStreamUploads(VkCommandBuffer cmd, ImageManager& mgr);
+static void destroyGpuStreamResources(ImageManager& mgr);
 
 struct HudFont {
 	float basePixelHeight = 48.0f;
@@ -3610,6 +3663,16 @@ static void createGPUCullingBuffers(VkPhysicalDevice physical, VkDevice device, 
 		buffers.stagingBuffer);
 	buffers.stagingCapacity = inputSize;
 
+	// Host-visible readback buffer for visible counter
+	createBuffer(physical, device, sizeof(uint32_t),
+		VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		buffers.counterReadbackBuffer);
+	buffers.counterReadbackHost = static_cast<uint32_t*>(mapMemory(device, buffers.counterReadbackBuffer.memory, sizeof(uint32_t)));
+	if (buffers.counterReadbackHost) {
+		*buffers.counterReadbackHost = 0;
+	}
+
 	// Disable GPU culling by default for P1 stability testing
 	buffers.enabled = false;
 }
@@ -3845,19 +3908,78 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 	uint32_t workgroups = (metrics.totalInstances + 63) / 64;
 	vkCmdDispatch(cmd, workgroups, 1, 1);
 
-	// Barrier to ensure compute shader completes before we read results
-	VkBufferMemoryBarrier computeBarrier{};
-	computeBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-	computeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-	computeBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	computeBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	computeBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	computeBarrier.buffer = buffers.visibilityCounterBuffer.buffer;
-	computeBarrier.offset = 0;
-	computeBarrier.size = sizeof(uint32_t);
+	// Prepare visibility counter for transfer readback
+	VkBufferMemoryBarrier counterToTransfer{};
+	counterToTransfer.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	counterToTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	counterToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	counterToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	counterToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	counterToTransfer.buffer = buffers.visibilityCounterBuffer.buffer;
+	counterToTransfer.offset = 0;
+	counterToTransfer.size = sizeof(uint32_t);
 
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-		0, 0, nullptr, 1, &computeBarrier, 0, nullptr);
+	vkCmdPipelineBarrier(cmd,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0,
+		0, nullptr,
+		1, &counterToTransfer,
+		0, nullptr);
+
+	// Copy counter to host-visible buffer for diagnostics/fallback checks
+	VkBufferCopy counterCopy{};
+	counterCopy.srcOffset = 0;
+	counterCopy.dstOffset = 0;
+	counterCopy.size = sizeof(uint32_t);
+	vkCmdCopyBuffer(cmd, buffers.visibilityCounterBuffer.buffer, buffers.counterReadbackBuffer.buffer, 1, &counterCopy);
+
+	// Ensure transfer writes visible to host reads
+	VkBufferMemoryBarrier readbackVisibility{};
+	readbackVisibility.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	readbackVisibility.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	readbackVisibility.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+	readbackVisibility.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	readbackVisibility.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	readbackVisibility.buffer = buffers.counterReadbackBuffer.buffer;
+	readbackVisibility.offset = 0;
+	readbackVisibility.size = sizeof(uint32_t);
+
+	// Barriers to make culling outputs available to subsequent compute passes
+	VkBufferMemoryBarrier postCullingBarriers[2]{};
+	postCullingBarriers[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	postCullingBarriers[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	postCullingBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	postCullingBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	postCullingBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	postCullingBarriers[0].buffer = buffers.visibilityBuffer.buffer;
+	postCullingBarriers[0].offset = 0;
+	postCullingBarriers[0].size = buffers.visibilityCapacity;
+
+	postCullingBarriers[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	postCullingBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	postCullingBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	postCullingBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	postCullingBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	postCullingBarriers[1].buffer = buffers.visibilityCounterBuffer.buffer;
+	postCullingBarriers[1].offset = 0;
+	postCullingBarriers[1].size = sizeof(uint32_t);
+
+	vkCmdPipelineBarrier(cmd,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_HOST_BIT,
+		0,
+		0, nullptr,
+		1, &readbackVisibility,
+		0, nullptr);
+
+	vkCmdPipelineBarrier(cmd,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0,
+		0, nullptr,
+		2, postCullingBarriers,
+		0, nullptr);
 
 	metrics.computeEndTime = std::chrono::high_resolution_clock::now();
 	auto deltaTime = std::chrono::duration<float, std::milli>(metrics.computeEndTime - metrics.computeStartTime);
@@ -4063,6 +4185,18 @@ static void destroyGPUCullingResources(VkDevice device, GPUCullingPipeline& pipe
 	if (buffers.stagingBuffer.memory != VK_NULL_HANDLE) {
 		vkFreeMemory(device, buffers.stagingBuffer.memory, nullptr);
 		buffers.stagingBuffer.memory = VK_NULL_HANDLE;
+	}
+	if (buffers.counterReadbackHost) {
+		unmapMemory(device, buffers.counterReadbackBuffer.memory);
+		buffers.counterReadbackHost = nullptr;
+	}
+	if (buffers.counterReadbackBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.counterReadbackBuffer.buffer, nullptr);
+		buffers.counterReadbackBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (buffers.counterReadbackBuffer.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(device, buffers.counterReadbackBuffer.memory, nullptr);
+		buffers.counterReadbackBuffer.memory = VK_NULL_HANDLE;
 	}
 }
 
@@ -4416,7 +4550,7 @@ static void ensureAtlasLookupBuffer(ImageManager& mgr, size_t entryCount) {
 	updateAtlasLookupDescriptor(mgr);
 }
 
-static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue) {
+static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkDescriptorPool descriptorPool, bool enableGpuStream) {
 	mgr.physicalDevice = physicalDevice;
 	mgr.device = device;
 	mgr.commandPool = commandPool;
@@ -4426,7 +4560,7 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 	createImage(physicalDevice, device,
 		TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, TextureAtlas::MAX_LAYERS,
 		VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mgr.atlas.atlasArray);
 
 	mgr.atlas.atlasArray.view = createImageView2DArray(device, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, TextureAtlas::MAX_LAYERS);
@@ -4434,6 +4568,7 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 
 	// Initialize LRU structures
 	mgr.atlas.layerToImageId.resize(TextureAtlas::MAX_LAYERS, UINT32_MAX);
+	mgr.atlas.layerLayouts.resize(TextureAtlas::MAX_LAYERS, VK_IMAGE_LAYOUT_UNDEFINED);
 	for (uint32_t i = 0; i < TextureAtlas::MAX_LAYERS; ++i) {
 		mgr.atlas.freeLayers.push(i);
 	}
@@ -4446,6 +4581,144 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mgr.placeholderTexture);
 
 	mgr.placeholderTexture.view = createImageView(device, mgr.placeholderTexture.image, VK_FORMAT_R8G8B8A8_UNORM);
+
+	mgr.gpuStream.enabled = enableGpuStream;
+	if (mgr.gpuStream.enabled) {
+		try {
+			VkDeviceSize requestBufferSize = sizeof(GpuStreamRequest) * GpuStreamContext::SLOT_COUNT;
+			createBuffer(
+				physicalDevice,
+				device,
+				requestBufferSize,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				mgr.gpuStream.requestBuffer);
+			mgr.gpuStream.mappedRequests = mapMemory(device, mgr.gpuStream.requestBuffer.memory, requestBufferSize);
+			auto* requests = static_cast<GpuStreamRequest*>(mgr.gpuStream.mappedRequests);
+			for (uint32_t i = 0; i < GpuStreamContext::SLOT_COUNT; ++i) {
+				requests[i] = GpuStreamRequest{};
+				requests[i].state = static_cast<uint32_t>(GpuStreamRequestState::Idle);
+				mgr.gpuStream.slots[i].inFlight = false;
+				mgr.gpuStream.slots[i].imageId = UINT32_MAX;
+				mgr.gpuStream.slots[i].layer = UINT32_MAX;
+			}
+
+			VkDeviceSize pixelBufferSize = GpuStreamContext::TEXTURE_BYTES * GpuStreamContext::SLOT_COUNT;
+			createBuffer(
+				physicalDevice,
+				device,
+				pixelBufferSize,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				mgr.gpuStream.pixelBuffer);
+			mgr.gpuStream.mappedPixels = static_cast<uint8_t*>(mapMemory(device, mgr.gpuStream.pixelBuffer.memory, pixelBufferSize));
+
+			VkDescriptorSetLayoutBinding streamBindings[3]{};
+			streamBindings[0].binding = 0;
+			streamBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			streamBindings[0].descriptorCount = 1;
+			streamBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			streamBindings[1].binding = 1;
+			streamBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			streamBindings[1].descriptorCount = 1;
+			streamBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			streamBindings[2].binding = 2;
+			streamBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			streamBindings[2].descriptorCount = 1;
+			streamBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			VkDescriptorSetLayoutCreateInfo streamLayoutInfo{};
+			streamLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+			streamLayoutInfo.bindingCount = 3;
+			streamLayoutInfo.pBindings = streamBindings;
+			if (vkCreateDescriptorSetLayout(device, &streamLayoutInfo, nullptr, &mgr.gpuStream.descriptorSetLayout) != VK_SUCCESS) {
+				throw std::runtime_error("failed to create GPU stream descriptor layout");
+			}
+
+			VkPipelineLayoutCreateInfo streamPipelineLayout{};
+			streamPipelineLayout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			streamPipelineLayout.setLayoutCount = 1;
+			streamPipelineLayout.pSetLayouts = &mgr.gpuStream.descriptorSetLayout;
+			if (vkCreatePipelineLayout(device, &streamPipelineLayout, nullptr, &mgr.gpuStream.pipelineLayout) != VK_SUCCESS) {
+				throw std::runtime_error("failed to create GPU stream pipeline layout");
+			}
+
+			auto shaderPath = std::string(BR5_SHADER_DIR) + "/texture_stream.comp.spv";
+			auto shaderCode = readBinaryFile(shaderPath);
+			VkShaderModule shaderModule = createShaderModule(device, shaderCode);
+
+			VkComputePipelineCreateInfo streamPipeline{};
+			streamPipeline.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+			streamPipeline.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			streamPipeline.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+			streamPipeline.stage.module = shaderModule;
+			streamPipeline.stage.pName = "main";
+			streamPipeline.layout = mgr.gpuStream.pipelineLayout;
+
+			if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &streamPipeline, nullptr, &mgr.gpuStream.pipeline) != VK_SUCCESS) {
+				vkDestroyShaderModule(device, shaderModule, nullptr);
+				throw std::runtime_error("failed to create GPU stream compute pipeline");
+			}
+
+			vkDestroyShaderModule(device, shaderModule, nullptr);
+
+			VkDescriptorSetAllocateInfo streamAlloc{};
+			streamAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+			streamAlloc.descriptorPool = descriptorPool;
+			streamAlloc.descriptorSetCount = 1;
+			streamAlloc.pSetLayouts = &mgr.gpuStream.descriptorSetLayout;
+			if (vkAllocateDescriptorSets(device, &streamAlloc, &mgr.gpuStream.descriptorSet) != VK_SUCCESS) {
+				throw std::runtime_error("failed to allocate GPU stream descriptor set");
+			}
+
+			VkDescriptorBufferInfo requestInfo{};
+			requestInfo.buffer = mgr.gpuStream.requestBuffer.buffer;
+			requestInfo.offset = 0;
+			requestInfo.range = requestBufferSize;
+
+			VkDescriptorBufferInfo pixelInfo{};
+			pixelInfo.buffer = mgr.gpuStream.pixelBuffer.buffer;
+			pixelInfo.offset = 0;
+			pixelInfo.range = pixelBufferSize;
+
+			VkDescriptorImageInfo atlasInfo{};
+			atlasInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+			atlasInfo.imageView = mgr.atlas.atlasArray.view;
+			atlasInfo.sampler = VK_NULL_HANDLE;
+
+			VkWriteDescriptorSet streamWrites[3]{};
+			streamWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			streamWrites[0].dstSet = mgr.gpuStream.descriptorSet;
+			streamWrites[0].dstBinding = 0;
+			streamWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			streamWrites[0].descriptorCount = 1;
+			streamWrites[0].pBufferInfo = &requestInfo;
+
+			streamWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			streamWrites[1].dstSet = mgr.gpuStream.descriptorSet;
+			streamWrites[1].dstBinding = 1;
+			streamWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			streamWrites[1].descriptorCount = 1;
+			streamWrites[1].pBufferInfo = &pixelInfo;
+
+			streamWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			streamWrites[2].dstSet = mgr.gpuStream.descriptorSet;
+			streamWrites[2].dstBinding = 2;
+			streamWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			streamWrites[2].descriptorCount = 1;
+			streamWrites[2].pImageInfo = &atlasInfo;
+
+			vkUpdateDescriptorSets(device, 3, streamWrites, 0, nullptr);
+
+			std::cout << "[P4] GPU texture streaming enabled (" << GpuStreamContext::SLOT_COUNT << " slots)" << std::endl;
+		} catch (const std::exception& ex) {
+			std::cerr << "[P4] GPU texture streaming unavailable: " << ex.what() << std::endl;
+			mgr.gpuStream.enabled = false;
+			destroyGpuStreamResources(mgr);
+		}
+	}
 
 	// Create background loading thread
 	mgr.loaderThread = std::thread([&mgr]() {
@@ -4794,13 +5067,61 @@ static void destroyHudFont(VkDevice device, HudFont& font) {
 	font.ready = false;
 }
 
+static bool queueGpuStreamUpload(ImageManager& mgr, uint32_t imageId, uint32_t layer, LoadedTexture& texture) {
+	if (!mgr.gpuStream.enabled || mgr.gpuStream.mappedRequests == nullptr || mgr.gpuStream.mappedPixels == nullptr) {
+		return false;
+	}
+	if (layer >= mgr.atlas.layerLayouts.size()) {
+		return false;
+	}
+	if (texture.width != TextureAtlas::ATLAS_SIZE || texture.height != TextureAtlas::ATLAS_SIZE) {
+		return false;
+	}
+	const size_t expectedSize = static_cast<size_t>(TextureAtlas::ATLAS_SIZE) * TextureAtlas::ATLAS_SIZE * GpuStreamContext::BYTES_PER_PIXEL;
+	if (texture.data.size() != expectedSize) {
+		return false;
+	}
+
+	auto* requests = static_cast<GpuStreamRequest*>(mgr.gpuStream.mappedRequests);
+	for (uint32_t i = 0; i < GpuStreamContext::SLOT_COUNT; ++i) {
+		auto& slot = mgr.gpuStream.slots[i];
+		uint32_t state = requests[i].state;
+		if (slot.inFlight) {
+			continue;
+		}
+		if (state != static_cast<uint32_t>(GpuStreamRequestState::Idle) &&
+			state != static_cast<uint32_t>(GpuStreamRequestState::Complete)) {
+			continue;
+		}
+
+		const size_t offsetBytes = static_cast<size_t>(GpuStreamContext::TEXTURE_BYTES) * i;
+		std::memcpy(mgr.gpuStream.mappedPixels + offsetBytes, texture.data.data(), texture.data.size());
+
+		std::atomic_thread_fence(std::memory_order_release);
+		slot.inFlight = true;
+		slot.imageId = imageId;
+		slot.layer = layer;
+		requests[i].imageId = imageId;
+		requests[i].layer = layer;
+		requests[i].width = texture.width;
+		requests[i].height = texture.height;
+		requests[i].pixelOffset = i * GpuStreamContext::TEXTURE_PIXELS;
+		requests[i].state = static_cast<uint32_t>(GpuStreamRequestState::Ready);
+		return true;
+	}
+	return false;
+}
+
 static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer) {
 	auto texIt = mgr.atlas.textureCache.find(imageId);
 	if (texIt == mgr.atlas.textureCache.end()) {
 		return; // Texture not loaded
 	}
 
-	const LoadedTexture& texture = texIt->second;
+	LoadedTexture& texture = texIt->second;
+	if (queueGpuStreamUpload(mgr, imageId, layer, texture)) {
+		return;
+	}
 
 	// Create staging buffer
 	BufferWithMemory stagingBuffer;
@@ -4813,6 +5134,7 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 	// Transition image layout for transfer
 	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layer);
+	mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
 	// Copy buffer to image
 	VkCommandBuffer commandBuffer = beginSingleTimeCommands(mgr.device, mgr.commandPool);
@@ -4836,10 +5158,173 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 	// Transition image layout for shader reading
 	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer);
+	mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	// Cleanup staging buffer
 	vkDestroyBuffer(mgr.device, stagingBuffer.buffer, nullptr);
 	vkFreeMemory(mgr.device, stagingBuffer.memory, nullptr);
+}
+
+static void recordGpuStreamUploads(VkCommandBuffer cmd, ImageManager& mgr) {
+	if (!mgr.gpuStream.enabled || mgr.gpuStream.pipeline == VK_NULL_HANDLE || mgr.gpuStream.descriptorSet == VK_NULL_HANDLE) {
+		return;
+	}
+	if (mgr.gpuStream.mappedRequests == nullptr || mgr.gpuStream.mappedPixels == nullptr) {
+		return;
+	}
+
+	auto* requests = static_cast<GpuStreamRequest*>(mgr.gpuStream.mappedRequests);
+	uint32_t readySlotCount = 0;
+	std::array<uint32_t, GpuStreamContext::SLOT_COUNT> uniqueLayers{};
+	uint32_t uniqueLayerCount = 0;
+
+	for (uint32_t i = 0; i < GpuStreamContext::SLOT_COUNT; ++i) {
+		if (requests[i].state == static_cast<uint32_t>(GpuStreamRequestState::Ready)) {
+			++readySlotCount;
+			uint32_t layer = requests[i].layer;
+			bool found = false;
+			for (uint32_t j = 0; j < uniqueLayerCount; ++j) {
+				if (uniqueLayers[j] == layer) {
+					found = true;
+					break;
+				}
+			}
+			if (!found && uniqueLayerCount < uniqueLayers.size()) {
+				uniqueLayers[uniqueLayerCount++] = layer;
+			}
+		}
+	}
+
+	if (readySlotCount == 0) {
+		return;
+	}
+
+	VkBufferMemoryBarrier preBarriers[2]{};
+	preBarriers[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	preBarriers[0].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+	preBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	preBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	preBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	preBarriers[0].buffer = mgr.gpuStream.requestBuffer.buffer;
+	preBarriers[0].offset = 0;
+	preBarriers[0].size = VK_WHOLE_SIZE;
+
+	preBarriers[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	preBarriers[1].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+	preBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	preBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	preBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	preBarriers[1].buffer = mgr.gpuStream.pixelBuffer.buffer;
+	preBarriers[1].offset = 0;
+	preBarriers[1].size = VK_WHOLE_SIZE;
+
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_HOST_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0,
+		0, nullptr,
+		2, preBarriers,
+		0, nullptr);
+
+	std::vector<VkImageMemoryBarrier> toGeneral;
+	toGeneral.reserve(uniqueLayerCount);
+	for (uint32_t idx = 0; idx < uniqueLayerCount; ++idx) {
+		uint32_t layer = uniqueLayers[idx];
+		if (layer >= mgr.atlas.layerLayouts.size()) {
+			continue;
+		}
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.image = mgr.atlas.atlasArray.image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = layer;
+		barrier.subresourceRange.layerCount = 1;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.oldLayout = mgr.atlas.layerLayouts[layer];
+		barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		if (barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+			barrier.srcAccessMask = 0;
+		} else {
+			barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		}
+		barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		toGeneral.push_back(barrier);
+		mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_GENERAL;
+	}
+
+	if (!toGeneral.empty()) {
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0,
+			0, nullptr,
+			0, nullptr,
+			static_cast<uint32_t>(toGeneral.size()), toGeneral.data());
+	}
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mgr.gpuStream.pipeline);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mgr.gpuStream.pipelineLayout, 0, 1, &mgr.gpuStream.descriptorSet, 0, nullptr);
+	vkCmdDispatch(cmd, GpuStreamContext::SLOT_COUNT, 1, 1);
+
+	std::vector<VkImageMemoryBarrier> toShaderRead;
+	toShaderRead.reserve(uniqueLayerCount);
+	for (uint32_t idx = 0; idx < uniqueLayerCount; ++idx) {
+		uint32_t layer = uniqueLayers[idx];
+		if (layer >= mgr.atlas.layerLayouts.size()) {
+			continue;
+		}
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.image = mgr.atlas.atlasArray.image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = layer;
+		barrier.subresourceRange.layerCount = 1;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		toShaderRead.push_back(barrier);
+		mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+
+	if (!toShaderRead.empty()) {
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0,
+			0, nullptr,
+			0, nullptr,
+			static_cast<uint32_t>(toShaderRead.size()), toShaderRead.data());
+	}
+
+	VkBufferMemoryBarrier postBarrier{};
+	postBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	postBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	postBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+	postBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	postBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	postBarrier.buffer = mgr.gpuStream.requestBuffer.buffer;
+	postBarrier.offset = 0;
+	postBarrier.size = VK_WHOLE_SIZE;
+
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_HOST_BIT,
+		0,
+		0, nullptr,
+		1, &postBarrier,
+		0, nullptr);
 }
 
 static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
@@ -4882,6 +5367,9 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 		}
 		mgr.atlas.lruOrder.pop_back();
 		mgr.atlas.layerToLruIter.erase(layer);
+		if (layer < mgr.atlas.layerLayouts.size()) {
+			mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_UNDEFINED;
+		}
 	} else {
 		return -1; // No space
 	}
@@ -4889,6 +5377,9 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 	// Assign layer
 	mgr.atlas.imageIdToLayer[imageId] = layer;
 	mgr.atlas.layerToImageId[layer] = imageId;
+	if (layer < mgr.atlas.layerLayouts.size()) {
+		mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_UNDEFINED;
+	}
 	mgr.atlas.lruOrder.push_front(layer);
 	mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
 	if (imageId < mgr.atlas.imageLayerLookupCPU.size()) {
@@ -4901,7 +5392,29 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 	return static_cast<int32_t>(layer);
 }
 
+static void pollGpuStreamCompletions(ImageManager& mgr) {
+	if (!mgr.gpuStream.enabled || mgr.gpuStream.mappedRequests == nullptr) {
+		return;
+	}
+	auto* requests = static_cast<GpuStreamRequest*>(mgr.gpuStream.mappedRequests);
+	for (uint32_t i = 0; i < GpuStreamContext::SLOT_COUNT; ++i) {
+		auto& slot = mgr.gpuStream.slots[i];
+		if (!slot.inFlight) {
+			continue;
+		}
+		uint32_t state = requests[i].state;
+		if (state == static_cast<uint32_t>(GpuStreamRequestState::Complete)) {
+			slot.inFlight = false;
+			slot.imageId = UINT32_MAX;
+			slot.layer = UINT32_MAX;
+			requests[i].state = static_cast<uint32_t>(GpuStreamRequestState::Idle);
+			requests[i].imageId = UINT32_MAX;
+		}
+	}
+}
+
 static void updateImageManager(ImageManager& mgr) {
+	pollGpuStreamCompletions(mgr);
 	// Process pending uploads
 	std::lock_guard<std::mutex> lock(mgr.uploadMutex);
 	while (!mgr.pendingUploads.empty()) {
@@ -4918,6 +5431,52 @@ static void finalizeImageManagerUpdate(ImageManager& mgr) {
 	}
 }
 
+static void destroyGpuStreamResources(ImageManager& mgr) {
+	if (mgr.gpuStream.mappedRequests) {
+		unmapMemory(mgr.device, mgr.gpuStream.requestBuffer.memory);
+		mgr.gpuStream.mappedRequests = nullptr;
+	}
+	if (mgr.gpuStream.mappedPixels) {
+		unmapMemory(mgr.device, mgr.gpuStream.pixelBuffer.memory);
+		mgr.gpuStream.mappedPixels = nullptr;
+	}
+	if (mgr.gpuStream.requestBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(mgr.device, mgr.gpuStream.requestBuffer.buffer, nullptr);
+		mgr.gpuStream.requestBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (mgr.gpuStream.requestBuffer.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(mgr.device, mgr.gpuStream.requestBuffer.memory, nullptr);
+		mgr.gpuStream.requestBuffer.memory = VK_NULL_HANDLE;
+	}
+	if (mgr.gpuStream.pixelBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(mgr.device, mgr.gpuStream.pixelBuffer.buffer, nullptr);
+		mgr.gpuStream.pixelBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (mgr.gpuStream.pixelBuffer.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(mgr.device, mgr.gpuStream.pixelBuffer.memory, nullptr);
+		mgr.gpuStream.pixelBuffer.memory = VK_NULL_HANDLE;
+	}
+	if (mgr.gpuStream.pipeline != VK_NULL_HANDLE) {
+		vkDestroyPipeline(mgr.device, mgr.gpuStream.pipeline, nullptr);
+		mgr.gpuStream.pipeline = VK_NULL_HANDLE;
+	}
+	if (mgr.gpuStream.pipelineLayout != VK_NULL_HANDLE) {
+		vkDestroyPipelineLayout(mgr.device, mgr.gpuStream.pipelineLayout, nullptr);
+		mgr.gpuStream.pipelineLayout = VK_NULL_HANDLE;
+	}
+	if (mgr.gpuStream.descriptorSetLayout != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(mgr.device, mgr.gpuStream.descriptorSetLayout, nullptr);
+		mgr.gpuStream.descriptorSetLayout = VK_NULL_HANDLE;
+	}
+	mgr.gpuStream.descriptorSet = VK_NULL_HANDLE;
+	mgr.gpuStream.enabled = false;
+	for (auto& slot : mgr.gpuStream.slots) {
+		slot.inFlight = false;
+		slot.imageId = UINT32_MAX;
+		slot.layer = UINT32_MAX;
+	}
+}
+
 static void destroyImageManager(ImageManager& mgr) {
 	if (mgr.device == VK_NULL_HANDLE) return;
 
@@ -4925,6 +5484,8 @@ static void destroyImageManager(ImageManager& mgr) {
 	if (mgr.loaderThread.joinable()) {
 		mgr.loaderThread.join();
 	}
+
+	destroyGpuStreamResources(mgr);
 
 	if (mgr.atlas.sampler != VK_NULL_HANDLE) {
 		vkDestroySampler(mgr.device, mgr.atlas.sampler, nullptr);
@@ -4952,7 +5513,21 @@ static void destroyImageManager(ImageManager& mgr) {
 	destroyAtlasLookupBuffer(mgr);
 }
 
-int main() {
+int main(int argc, char** argv) {
+	for (int i = 1; i < argc; ++i) {
+		if (std::strcmp(argv[i], "--disable-gpu-stream") == 0) {
+			gDisableGpuStream = true;
+		}
+		if (std::strcmp(argv[i], "--disable-gpu-culling") == 0 || std::strcmp(argv[i], "--disable-gpu-cull") == 0) {
+			gDisableGpuCulling = true;
+		}
+	}
+	if (gDisableGpuStream) {
+		std::cout << "[P4] GPU texture streaming disabled via --disable-gpu-stream" << std::endl;
+	}
+	if (gDisableGpuCulling) {
+		std::cout << "[P3] GPU culling disabled via CLI flag" << std::endl;
+	}
 	glfwSetErrorCallback(glfwErrorCallback);
 	if (!glfwInit()) {
 		std::fprintf(stderr, "Failed to init GLFW\n");
@@ -5310,18 +5885,20 @@ int main() {
 		}
 	}
 
-	// Create descriptor pool for texture atlases
-	VkDescriptorPoolSize poolSizes[2]{};
+	// Create descriptor pool for texture atlases and GPU streaming
+	VkDescriptorPoolSize poolSizes[3]{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[0].descriptorCount = 2;
+	poolSizes[0].descriptorCount = 4;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[1].descriptorCount = 1;
+	poolSizes[1].descriptorCount = 8;
+	poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	poolSizes[2].descriptorCount = 4;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.poolSizeCount = 2;
+	poolInfo.poolSizeCount = 3;
 	poolInfo.pPoolSizes = poolSizes;
-	poolInfo.maxSets = 2;
+	poolInfo.maxSets = 8;
 
 	VkDescriptorPool descriptorPool;
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
@@ -5335,7 +5912,7 @@ int main() {
 	// Initialize image manager
 	std::cout << "Initializing image manager..." << std::endl; std::cout.flush();
 	ImageManager imageManager{};
-	initImageManager(imageManager, physical, device, commandPool, graphicsQueue);
+	initImageManager(imageManager, physical, device, commandPool, graphicsQueue, descriptorPool, !gDisableGpuStream);
 
 	// Create descriptor set for texture atlas
 	VkDescriptorSetAllocateInfo allocInfo{};
@@ -5437,7 +6014,8 @@ int main() {
 	std::cout << "Initializing GPU culling buffers..." << std::endl; std::cout.flush();
 	createGPUCullingBuffers(physical, device, cullingBuffers, sim.maxPlayers);
 	setupGPUCullingDescriptors(device, cullingPipeline, cullingBuffers, hizResources);
-	std::cout << "GPU culling system initialized!" << std::endl; std::cout.flush();
+	cullingBuffers.enabled = !gDisableGpuCulling;
+	std::cout << "GPU culling system initialized (" << (cullingBuffers.enabled ? "ENABLED" : "DISABLED") << ")" << std::endl; std::cout.flush();
 	
 	// P2: Initialize indirect draw buffers and descriptors
 	std::cout << "Initializing P2 indirect draw buffers..." << std::endl; std::cout.flush();
@@ -5492,8 +6070,24 @@ int main() {
 			spaceKeyPressed = false;
 		}
 
-		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
-		vkResetFences(device, 1, &inFlightFences[currentFrame]);
+	vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
+	uint32_t previousVisibleCount = 0;
+	if (cullingBuffers.counterReadbackHost) {
+		previousVisibleCount = *cullingBuffers.counterReadbackHost;
+	}
+	cullingMetrics.compactedCircles = previousVisibleCount;
+	if (previousVisibleCount <= cullingMetrics.totalInstances) {
+		cullingMetrics.culledInstances = cullingMetrics.totalInstances - previousVisibleCount;
+	}
+	if (cullingBuffers.enabled && indirectBuffers.enabled && previousVisibleCount == 0 && cullingMetrics.totalInstances > 0) {
+		std::cout << "[P2] GPU compaction yielded zero instances; falling back to CPU direct rendering." << std::endl;
+		cullingBuffers.enabled = false;
+		indirectBuffers.enabled = false;
+	}
+	if (!cullingBuffers.enabled || !indirectBuffers.enabled) {
+		cullingMetrics.indirectDrawEnabled = false;
+	}
+	vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
 		uint32_t imageIndex = 0;
 		VkResult acq = vkAcquireNextImageKHR(device, sc.swapchain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
@@ -5612,6 +6206,11 @@ int main() {
 	// Use LOD-based rendering system with fixed zoom factor
 	sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, 1.0f); // Fixed zoom factor
 	sim.buildHealthBarInstances(healthBarInstances, 1.0f);
+	cullingMetrics.totalInstances = static_cast<uint32_t>(cpuInstances.size());
+	if (!cullingBuffers.enabled || !indirectBuffers.enabled) {
+		cullingMetrics.compactedCircles = cullingMetrics.totalInstances;
+	}
+	recordGpuStreamUploads(cmd, imageManager);
 
 		// GPU-Driven Culling: Execute frustum culling on GPU (P1 implementation) - BEFORE render pass
 		if (cullingBuffers.enabled && !cpuInstances.empty()) {

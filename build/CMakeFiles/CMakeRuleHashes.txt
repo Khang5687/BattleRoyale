@@ -10,3 +10,4 @@ ce7f6f69f3d19798ce1134fce83fa379 shaders/health_bar.frag.spv
 6b924236ba0c493c116cbab37c69f64e shaders/hiz_build.comp.spv
 2f6e4ce3b64cb2b820962cefc8e0761e shaders/text.frag.spv
 fa529b3f0517150954819cb3db824123 shaders/text.vert.spv
+c2610c6f52f1dbf714f00208217713f7 shaders/texture_stream.comp.spv

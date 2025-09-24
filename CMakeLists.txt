@@ -50,6 +50,7 @@ set(SHADER_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle_cull.comp
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/frustum_cull.comp
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_build.comp
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/texture_stream.comp
 )
 
 set(COMPILED_SHADERS)

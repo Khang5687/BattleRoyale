@@ -75,6 +75,7 @@ CMakeFiles/battleroyale5_shaders: shaders/text.frag.spv
 CMakeFiles/battleroyale5_shaders: shaders/circle_cull.comp.spv
 CMakeFiles/battleroyale5_shaders: shaders/frustum_cull.comp.spv
 CMakeFiles/battleroyale5_shaders: shaders/hiz_build.comp.spv
+CMakeFiles/battleroyale5_shaders: shaders/texture_stream.comp.spv
 
 shaders/circle.frag.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/circle.frag
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Generating shaders/circle.frag.spv"
@@ -121,6 +122,11 @@ shaders/text.vert.spv: /Users/khangnguyen/working/projects/battleroyale/battlero
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=vert /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.vert -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/text.vert.spv
 
+shaders/texture_stream.comp.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/texture_stream.comp
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Generating shaders/texture_stream.comp.spv"
+	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
+	/usr/local/bin/glslc -fshader-stage=comp /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/texture_stream.comp -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/texture_stream.comp.spv
+
 CMakeFiles/battleroyale5_shaders.dir/codegen:
 .PHONY : CMakeFiles/battleroyale5_shaders.dir/codegen
 
@@ -134,6 +140,7 @@ battleroyale5_shaders: shaders/health_bar.vert.spv
 battleroyale5_shaders: shaders/hiz_build.comp.spv
 battleroyale5_shaders: shaders/text.frag.spv
 battleroyale5_shaders: shaders/text.vert.spv
+battleroyale5_shaders: shaders/texture_stream.comp.spv
 battleroyale5_shaders: CMakeFiles/battleroyale5_shaders.dir/build.make
 .PHONY : battleroyale5_shaders
 

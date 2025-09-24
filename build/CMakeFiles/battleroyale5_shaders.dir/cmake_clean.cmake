@@ -9,6 +9,7 @@ file(REMOVE_RECURSE
   "shaders/hiz_build.comp.spv"
   "shaders/text.frag.spv"
   "shaders/text.vert.spv"
+  "shaders/texture_stream.comp.spv"
 )
 
 # Per-language clean rules from dependency scanning.

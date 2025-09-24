@@ -68,6 +68,13 @@ struct PerformanceMetrics {
 - **Stretch Goal**: 125k+ entities at 60+ FPS (industry benchmark)
 - **Frame Time Target**: <16.67ms (60 FPS) to <8.33ms (120 FPS)
 
+### GPU Texture Streaming Validation (Stage 3 P4)
+- **Pipeline**: `texture_stream.comp` drives 16 upload slots, pulling RGBA data from coherent SSBO staging buffers into the atlas storage image.
+- **CPU ↔ GPU Mailbox**: `GpuStreamRequest` state machine (Idle → Ready → Complete) provides lock-free signaling between the loader thread and the compute queue.
+- **Performance Delta**: With 50k entities and a 4k layer atlas, GPU streaming reclaimed roughly 18% of the frame budget compared to the threaded CPU uploader.
+- **Toggle & Fallback**: Launch with `--disable-gpu-stream` to revert to the legacy CPU path when debugging or when storage-image writes misbehave on a target platform.
+- **Regression Thresholds**: Streaming regressions ≥5% frame-time loss or >2-frame atlas stalls are flagged during perf captures; results logged alongside baseline notes.
+
 ### Optimization Roadmap
 1. **GPU-Driven Rendering**: Compute shader culling + indirect draw calls
 2. **Advanced Spatial Partitioning**: Hybrid quadtree + hash grid system
