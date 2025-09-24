@@ -47,7 +47,9 @@ set(SHADER_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/health_bar.frag
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.frag
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle_cull.comp
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/frustum_cull.comp
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hiz_build.comp
 )
 
 set(COMPILED_SHADERS)

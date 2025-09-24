@@ -1,0 +1,59 @@
+// Compute shader to build a Hi-Z depth pyramid from the previous frame depth buffer
+#version 450
+
+// 16x16 threads per workgroup for good cache utilisation
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Binding 0: source texture (depth buffer or previous Hi-Z level)
+layout(binding = 0) uniform sampler2D srcImage;
+
+// Binding 1: destination storage image (single mip level of the Hi-Z pyramid)
+layout(r32f, binding = 1) uniform writeonly image2D dstImage;
+
+// Push constants describing the downsample operation
+layout(push_constant) uniform HiZPush {
+    ivec2 srcSize;  // Pixel dimensions of the source level
+    ivec2 dstSize;  // Pixel dimensions of the destination level
+    int   srcLevel; // Mip level sampled from srcImage
+    int   mode;     // 0 = copy depth -> level0, 1 = downsample existing Hi-Z level
+} pc;
+
+float sampleDepth(vec2 uv, float maxDepth) {
+    float d = textureLod(srcImage, uv, float(pc.srcLevel)).r;
+    return clamp(d, 0.0, maxDepth);
+}
+
+void main() {
+    ivec2 outCoord = ivec2(gl_GlobalInvocationID.xy);
+    if (outCoord.x >= pc.dstSize.x || outCoord.y >= pc.dstSize.y) {
+        return;
+    }
+
+    vec2 invSrcSize = 1.0 / vec2(pc.srcSize);
+
+    // Calculate UV for texel centre
+    vec2 baseUV = (vec2(outCoord) + 0.5) * invSrcSize;
+
+    float minDepth;
+    if (pc.mode == 0) {
+        // Direct copy from full-resolution depth buffer
+        minDepth = sampleDepth(baseUV, 1.0);
+    } else {
+        // Downsample 2x2 block from previous Hi-Z level and keep nearest (minimum depth)
+        ivec2 srcTexel = outCoord * 2;
+        vec2 uv00 = (vec2(srcTexel) + vec2(0.5, 0.5)) * invSrcSize;
+        vec2 uv10 = (vec2(srcTexel + ivec2(1, 0)) + vec2(0.5, 0.5)) * invSrcSize;
+        vec2 uv01 = (vec2(srcTexel + ivec2(0, 1)) + vec2(0.5, 0.5)) * invSrcSize;
+        vec2 uv11 = (vec2(srcTexel + ivec2(1, 1)) + vec2(0.5, 0.5)) * invSrcSize;
+
+        float d0 = sampleDepth(uv00, 1.0);
+        float d1 = sampleDepth(uv10, 1.0);
+        float d2 = sampleDepth(uv01, 1.0);
+        float d3 = sampleDepth(uv11, 1.0);
+
+        minDepth = min(min(d0, d1), min(d2, d3));
+    }
+
+    imageStore(dstImage, outCoord, vec4(minDepth));
+}
+

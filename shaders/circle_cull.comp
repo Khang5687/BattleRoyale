@@ -108,7 +108,7 @@ void main() {
     // Compact visible circle instances
     if (index < visibleCount) {
         uint visibleInstanceIndex = visibilityIndices[index];
-        if (visibleInstanceIndex < maxInstances) {
+        if (visibleInstanceIndex < pc.maxInstances) {
             compactedCircles[index] = inputInstances[visibleInstanceIndex];
         }
     }
@@ -123,7 +123,7 @@ void main() {
             
             // Simple approach: assume health bar index matches circle index
             // In a more sophisticated system, this could use a lookup table
-            if (circleIndex < maxHealthBars) {
+            if (circleIndex < pc.maxHealthBars) {
                 HealthBarData healthBar = inputHealthBars[circleIndex];
                 
                 // Check if this health bar should be visible
@@ -131,7 +131,7 @@ void main() {
                 if (healthBar.fillRatio > 0.0) {
                     uint healthBarOutputIndex = atomicAdd(healthBarCount, 1);
                     
-                    if (healthBarOutputIndex < maxHealthBars) {
+                    if (healthBarOutputIndex < pc.maxHealthBars) {
                         compactedHealthBars[healthBarOutputIndex] = healthBar;
                         healthBarIndices[healthBarOutputIndex] = circleIndex;
                     }

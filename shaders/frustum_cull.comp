@@ -34,8 +34,42 @@ layout(push_constant) uniform FrustumCullPushConstants {
     vec2 viewport;          // viewport dimensions (width, height)
     vec2 cameraOffset;      // camera center offset (for future camera system)
     uint maxInstances;      // maximum number of input instances
-    uint pad1;              // padding for alignment
+    uint hizEnabled;        // 1 when Hi-Z occlusion should run
+    uint hizMipCount;       // number of mips available in the Hi-Z pyramid
+    uint pad0;              // padding
 } pc;
+
+layout(set = 0, binding = 3) uniform sampler2D hizTexture;
+
+const float CIRCLE_DEPTH_RADIUS_SCALE = 600.0;
+const float CIRCLE_DEPTH_RANGE = 0.9;
+const float HIZ_EPSILON = 0.001;
+
+float computeCircleDepth(float radius) {
+    float t = clamp(radius / CIRCLE_DEPTH_RADIUS_SCALE, 0.0, 1.0);
+    return 1.0 - t * CIRCLE_DEPTH_RANGE;
+}
+
+bool isCircleOccluded(vec2 screenUV, float radiusPixels, float circleDepth) {
+    vec2 radiusUV = vec2(radiusPixels) / pc.viewport;
+    vec2 minUV = screenUV - radiusUV;
+    vec2 maxUV = screenUV + radiusUV;
+
+    vec2 clampedMin = clamp(minUV, vec2(0.0), vec2(1.0));
+    vec2 clampedMax = clamp(maxUV, vec2(0.0), vec2(1.0));
+
+    float diameter = max(radiusPixels * 2.0, 1.0);
+    float maxLevel = float(max(int(pc.hizMipCount) - 1, 0));
+    float level = clamp(floor(log2(diameter)), 0.0, maxLevel);
+
+    float minDepth = textureLod(hizTexture, clamp((clampedMin + clampedMax) * 0.5, vec2(0.0), vec2(1.0)), level).r;
+    minDepth = min(minDepth, textureLod(hizTexture, vec2(clampedMin.x, clampedMin.y), level).r);
+    minDepth = min(minDepth, textureLod(hizTexture, vec2(clampedMax.x, clampedMin.y), level).r);
+    minDepth = min(minDepth, textureLod(hizTexture, vec2(clampedMin.x, clampedMax.y), level).r);
+    minDepth = min(minDepth, textureLod(hizTexture, vec2(clampedMax.x, clampedMax.y), level).r);
+
+    return minDepth <= (circleDepth - HIZ_EPSILON);
+}
 
 // Simple frustum culling function for 2D circles
 bool isCircleVisible(vec2 center, float radius, vec2 viewport, vec2 cameraOffset) {
@@ -70,12 +104,20 @@ void main() {
     
     // Perform frustum culling
     bool visible = isCircleVisible(
-        instance.center, 
-        instance.radius, 
-        pc.viewport, 
+        instance.center,
+        instance.radius,
+        pc.viewport,
         pc.cameraOffset
     );
-    
+
+    if (visible && pc.hizEnabled == 1u) {
+        vec2 screenUV = (instance.center - pc.cameraOffset) / pc.viewport;
+        float circleDepth = computeCircleDepth(instance.radius);
+        if (isCircleOccluded(screenUV, instance.radius, circleDepth)) {
+            visible = false;
+        }
+    }
+
     // If visible, add to output buffer
     if (visible) {
         uint outputIndex = atomicAdd(visibleCount, 1);

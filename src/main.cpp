@@ -128,6 +128,35 @@ struct GPUIndirectBuffers {
 	bool enabled = false;  // P2 indirect draw can be disabled for debugging
 };
 
+// Depth + Hi-Z resources shared across frames
+struct HiZResources {
+	VkImage depthImage = VK_NULL_HANDLE;
+	VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+	VkImageView depthView = VK_NULL_HANDLE;         // Used as render pass attachment
+	VkImageView depthSampleView = VK_NULL_HANDLE;   // Sampled by compute shaders
+	VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+	VkImageLayout depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VkImage hiZImage = VK_NULL_HANDLE;
+	VkDeviceMemory hiZMemory = VK_NULL_HANDLE;
+	VkImageView hiZSampleView = VK_NULL_HANDLE;     // Full mip chain for sampling during culling
+	std::vector<VkImageView> hiZStorageViews;       // One view per mip for storage writes
+	uint32_t mipLevels = 1;
+	VkSampler sampler = VK_NULL_HANDLE;
+	VkExtent2D extent{};
+	VkImageLayout hiZLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	bool ready = false;                             // Valid after first build pass completes
+};
+
+// Compute pipeline used to downsample depth into the Hi-Z pyramid
+struct GPUHiZPipeline {
+	VkPipelineLayout layout = VK_NULL_HANDLE;
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+};
+
 struct GPUCullingPipeline {
 	VkPipelineLayout computeLayout = VK_NULL_HANDLE;
 	VkPipeline computePipeline = VK_NULL_HANDLE;
@@ -150,7 +179,9 @@ struct FrustumCullPushConstants {
 	float viewport[2];      // viewport dimensions (width, height)
 	float cameraOffset[2];  // camera center offset (for future camera system)
 	uint32_t maxInstances;  // maximum number of input instances
-	uint32_t pad1;          // padding for alignment
+	uint32_t hizEnabled;    // 1 when Hi-Z occlusion data is valid
+	uint32_t hizMipCount;   // available mip levels in Hi-Z pyramid
+	uint32_t pad0;          // alignment padding
 };
 
 // P2: Push constants for instance compaction shader
@@ -159,6 +190,13 @@ struct CompactionPushConstants {
 	uint32_t maxHealthBars;       // maximum number of health bar instances
 	uint32_t enableHealthBars;    // 1 if health bars should be processed, 0 otherwise
 	uint32_t pad1;                // padding for alignment
+};
+
+struct HiZBuildPushConstants {
+	int32_t srcSize[2];
+	int32_t dstSize[2];
+	int32_t srcLevel;
+	int32_t mode;
 };
 
 // Performance metrics for GPU culling and P2 indirect draw
@@ -189,6 +227,9 @@ struct HudGeometry {
 static constexpr size_t HUD_INITIAL_VERTEX_CAPACITY = 8192;
 static constexpr uint32_t HUD_FONT_ATLAS_SIZE = 1024;
 static constexpr float HUD_FONT_PIXEL_HEIGHT = 48.0f;
+
+static constexpr float CIRCLE_DEPTH_RADIUS_SCALE = 600.0f;
+static constexpr float CIRCLE_DEPTH_RANGE = 0.9f;
 
 struct InstanceLayoutCPU {
 	float center[2];
@@ -2214,38 +2255,53 @@ static VkImageView createImageView(VkDevice device, VkImage image, VkFormat form
 	return view;
 }
 
-static VkRenderPass createRenderPass(VkDevice device, VkFormat colorFormat) {
-	VkAttachmentDescription color{};
-	color.format = colorFormat;
-	color.samples = VK_SAMPLE_COUNT_1_BIT;
-	color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+static VkRenderPass createRenderPass(VkDevice device, VkFormat colorFormat, VkFormat depthFormat) {
+	VkAttachmentDescription attachments[2]{};
+
+	attachments[0].format = colorFormat;
+	attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+	attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+	attachments[1].format = depthFormat;
+	attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+	attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkAttachmentReference colorRef{};
 	colorRef.attachment = 0;
 	colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+	VkAttachmentReference depthRef{};
+	depthRef.attachment = 1;
+	depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
 	VkSubpassDescription subpass{};
 	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	subpass.colorAttachmentCount = 1;
 	subpass.pColorAttachments = &colorRef;
+	subpass.pDepthStencilAttachment = &depthRef;
 
 	VkSubpassDependency dep{};
 	dep.srcSubpass = VK_SUBPASS_EXTERNAL;
 	dep.dstSubpass = 0;
-	dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 	dep.srcAccessMask = 0;
-	dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
 	VkRenderPassCreateInfo rpci{};
 	rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	rpci.attachmentCount = 1;
-	rpci.pAttachments = &color;
+	rpci.attachmentCount = 2;
+	rpci.pAttachments = attachments;
 	rpci.subpassCount = 1;
 	rpci.pSubpasses = &subpass;
 	rpci.dependencyCount = 1;
@@ -2289,6 +2345,479 @@ static uint32_t findMemoryType(VkPhysicalDevice physical, uint32_t typeBits, VkM
 		}
 	}
 	throw std::runtime_error("Suitable memory type not found");
+}
+
+static VkFormat findDepthFormat(VkPhysicalDevice physical) {
+	const VkFormat candidates[] = {
+		VK_FORMAT_D32_SFLOAT,
+		VK_FORMAT_D32_SFLOAT_S8_UINT,
+		VK_FORMAT_D24_UNORM_S8_UINT
+	};
+
+	for (VkFormat format : candidates) {
+		VkFormatProperties props{};
+		vkGetPhysicalDeviceFormatProperties(physical, format, &props);
+		if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+			return format;
+		}
+	}
+	throw std::runtime_error("No suitable depth format found");
+}
+
+static uint32_t calculateMipLevels(uint32_t width, uint32_t height) {
+	uint32_t longest = std::max(width, height);
+	uint32_t levels = 1;
+	while (longest > 1) {
+		longest >>= 1;
+		++levels;
+	}
+	return levels;
+}
+
+static void destroyHiZResources(VkDevice device, HiZResources& hiz) {
+	for (VkImageView view : hiz.hiZStorageViews) {
+		if (view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, view, nullptr);
+		}
+	}
+	hiz.hiZStorageViews.clear();
+
+	if (hiz.hiZSampleView != VK_NULL_HANDLE) {
+		vkDestroyImageView(device, hiz.hiZSampleView, nullptr);
+		hiz.hiZSampleView = VK_NULL_HANDLE;
+	}
+	if (hiz.hiZImage != VK_NULL_HANDLE) {
+		vkDestroyImage(device, hiz.hiZImage, nullptr);
+		hiz.hiZImage = VK_NULL_HANDLE;
+	}
+	if (hiz.hiZMemory != VK_NULL_HANDLE) {
+		vkFreeMemory(device, hiz.hiZMemory, nullptr);
+		hiz.hiZMemory = VK_NULL_HANDLE;
+	}
+	if (hiz.sampler != VK_NULL_HANDLE) {
+		vkDestroySampler(device, hiz.sampler, nullptr);
+		hiz.sampler = VK_NULL_HANDLE;
+	}
+
+	if (hiz.depthSampleView != VK_NULL_HANDLE) {
+		vkDestroyImageView(device, hiz.depthSampleView, nullptr);
+		hiz.depthSampleView = VK_NULL_HANDLE;
+	}
+	if (hiz.depthView != VK_NULL_HANDLE) {
+		vkDestroyImageView(device, hiz.depthView, nullptr);
+		hiz.depthView = VK_NULL_HANDLE;
+	}
+	if (hiz.depthImage != VK_NULL_HANDLE) {
+		vkDestroyImage(device, hiz.depthImage, nullptr);
+		hiz.depthImage = VK_NULL_HANDLE;
+	}
+	if (hiz.depthMemory != VK_NULL_HANDLE) {
+		vkFreeMemory(device, hiz.depthMemory, nullptr);
+		hiz.depthMemory = VK_NULL_HANDLE;
+	}
+
+	hiz = HiZResources{};
+}
+
+static void createHiZResources(VkPhysicalDevice physical, VkDevice device, uint32_t width, uint32_t height, HiZResources& hiz) {
+	destroyHiZResources(device, hiz);
+
+	hiz.extent = { width, height };
+	hiz.depthFormat = findDepthFormat(physical);
+	hiz.mipLevels = calculateMipLevels(width, height);
+	hiz.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	hiz.hiZLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	hiz.ready = false;
+
+	VkImageCreateInfo depthInfo{};
+	depthInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	depthInfo.imageType = VK_IMAGE_TYPE_2D;
+	depthInfo.extent.width = width;
+	depthInfo.extent.height = height;
+	depthInfo.extent.depth = 1;
+	depthInfo.mipLevels = 1;
+	depthInfo.arrayLayers = 1;
+	depthInfo.format = hiz.depthFormat;
+	depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	depthInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+	if (vkCreateImage(device, &depthInfo, nullptr, &hiz.depthImage) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create depth image");
+	}
+
+	VkMemoryRequirements depthMemReq{};
+	vkGetImageMemoryRequirements(device, hiz.depthImage, &depthMemReq);
+
+	VkMemoryAllocateInfo depthAlloc{};
+	depthAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	depthAlloc.allocationSize = depthMemReq.size;
+	depthAlloc.memoryTypeIndex = findMemoryType(physical, depthMemReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+	if (vkAllocateMemory(device, &depthAlloc, nullptr, &hiz.depthMemory) != VK_SUCCESS) {
+		vkDestroyImage(device, hiz.depthImage, nullptr);
+		hiz.depthImage = VK_NULL_HANDLE;
+		throw std::runtime_error("Failed to allocate depth image memory");
+	}
+
+	vkBindImageMemory(device, hiz.depthImage, hiz.depthMemory, 0);
+
+	VkImageViewCreateInfo depthViewInfo{};
+	depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	depthViewInfo.image = hiz.depthImage;
+	depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	depthViewInfo.format = hiz.depthFormat;
+	depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	depthViewInfo.subresourceRange.baseMipLevel = 0;
+	depthViewInfo.subresourceRange.levelCount = 1;
+	depthViewInfo.subresourceRange.baseArrayLayer = 0;
+	depthViewInfo.subresourceRange.layerCount = 1;
+
+	if (vkCreateImageView(device, &depthViewInfo, nullptr, &hiz.depthView) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create depth image view");
+	}
+
+	if (vkCreateImageView(device, &depthViewInfo, nullptr, &hiz.depthSampleView) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create depth sampling view");
+	}
+
+	VkImageCreateInfo hizInfo{};
+	hizInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	hizInfo.imageType = VK_IMAGE_TYPE_2D;
+	hizInfo.extent.width = width;
+	hizInfo.extent.height = height;
+	hizInfo.extent.depth = 1;
+	hizInfo.mipLevels = hiz.mipLevels;
+	hizInfo.arrayLayers = 1;
+	hizInfo.format = VK_FORMAT_R32_SFLOAT;
+	hizInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	hizInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	hizInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+	hizInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	hizInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+	if (vkCreateImage(device, &hizInfo, nullptr, &hiz.hiZImage) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create Hi-Z image");
+	}
+
+	VkMemoryRequirements hizMemReq{};
+	vkGetImageMemoryRequirements(device, hiz.hiZImage, &hizMemReq);
+
+	VkMemoryAllocateInfo hizAlloc{};
+	hizAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	hizAlloc.allocationSize = hizMemReq.size;
+	hizAlloc.memoryTypeIndex = findMemoryType(physical, hizMemReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+	if (vkAllocateMemory(device, &hizAlloc, nullptr, &hiz.hiZMemory) != VK_SUCCESS) {
+		vkDestroyImage(device, hiz.hiZImage, nullptr);
+		hiz.hiZImage = VK_NULL_HANDLE;
+		throw std::runtime_error("Failed to allocate Hi-Z image memory");
+	}
+
+	vkBindImageMemory(device, hiz.hiZImage, hiz.hiZMemory, 0);
+
+	VkImageViewCreateInfo hizViewInfo{};
+	hizViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	hizViewInfo.image = hiz.hiZImage;
+	hizViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	hizViewInfo.format = VK_FORMAT_R32_SFLOAT;
+	hizViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	hizViewInfo.subresourceRange.baseMipLevel = 0;
+	hizViewInfo.subresourceRange.levelCount = hiz.mipLevels;
+	hizViewInfo.subresourceRange.baseArrayLayer = 0;
+	hizViewInfo.subresourceRange.layerCount = 1;
+
+	if (vkCreateImageView(device, &hizViewInfo, nullptr, &hiz.hiZSampleView) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create Hi-Z sampling view");
+	}
+
+	hiz.hiZStorageViews.resize(hiz.mipLevels);
+	for (uint32_t level = 0; level < hiz.mipLevels; ++level) {
+		VkImageViewCreateInfo levelViewInfo = hizViewInfo;
+		levelViewInfo.subresourceRange.baseMipLevel = level;
+		levelViewInfo.subresourceRange.levelCount = 1;
+		if (vkCreateImageView(device, &levelViewInfo, nullptr, &hiz.hiZStorageViews[level]) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create Hi-Z storage view");
+		}
+	}
+
+	VkSamplerCreateInfo sci{};
+	sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	sci.magFilter = VK_FILTER_NEAREST;
+	sci.minFilter = VK_FILTER_NEAREST;
+	sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sci.mipLodBias = 0.0f;
+	sci.minLod = 0.0f;
+	sci.maxLod = static_cast<float>(hiz.mipLevels - 1);
+	sci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+	sci.unnormalizedCoordinates = VK_FALSE;
+
+	if (vkCreateSampler(device, &sci, nullptr, &hiz.sampler) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create Hi-Z sampler");
+	}
+}
+
+static GPUHiZPipeline createHiZBuildPipeline(VkDevice device) {
+	std::string baseDir = std::string(BR5_SHADER_DIR);
+	std::string compPath = baseDir + "/hiz_build.comp.spv";
+	auto compCode = readBinaryFile(compPath);
+	VkShaderModule comp = createShaderModule(device, compCode);
+
+	VkDescriptorSetLayoutBinding bindings[2]{};
+	bindings[0].binding = 0;
+	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	bindings[0].descriptorCount = 1;
+	bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[1].binding = 1;
+	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	bindings[1].descriptorCount = 1;
+	bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	VkDescriptorSetLayoutCreateInfo dslci{};
+	dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	dslci.bindingCount = 2;
+	dslci.pBindings = bindings;
+
+	GPUHiZPipeline pipeline{};
+	if (vkCreateDescriptorSetLayout(device, &dslci, nullptr, &pipeline.descriptorSetLayout) != VK_SUCCESS) {
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to create Hi-Z descriptor set layout");
+	}
+
+	VkPushConstantRange pcr{};
+	pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	pcr.offset = 0;
+	pcr.size = sizeof(HiZBuildPushConstants);
+
+	VkPipelineLayoutCreateInfo plci{};
+	plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	plci.setLayoutCount = 1;
+	plci.pSetLayouts = &pipeline.descriptorSetLayout;
+	plci.pushConstantRangeCount = 1;
+	plci.pPushConstantRanges = &pcr;
+
+	if (vkCreatePipelineLayout(device, &plci, nullptr, &pipeline.layout) != VK_SUCCESS) {
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to create Hi-Z pipeline layout");
+	}
+
+	VkComputePipelineCreateInfo cpci{};
+	cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+	cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	cpci.stage.module = comp;
+	cpci.stage.pName = "main";
+	cpci.layout = pipeline.layout;
+
+	if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &pipeline.pipeline) != VK_SUCCESS) {
+		vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		vkDestroyShaderModule(device, comp, nullptr);
+		throw std::runtime_error("Failed to create Hi-Z compute pipeline");
+	}
+
+	vkDestroyShaderModule(device, comp, nullptr);
+
+	VkDescriptorPoolSize poolSizes[2]{};
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[0].descriptorCount = 1;
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	poolSizes[1].descriptorCount = 1;
+
+	VkDescriptorPoolCreateInfo dpci{};
+	dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	dpci.maxSets = 1;
+	dpci.poolSizeCount = 2;
+	dpci.pPoolSizes = poolSizes;
+
+	if (vkCreateDescriptorPool(device, &dpci, nullptr, &pipeline.descriptorPool) != VK_SUCCESS) {
+		vkDestroyPipeline(device, pipeline.pipeline, nullptr);
+		vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		throw std::runtime_error("Failed to create Hi-Z descriptor pool");
+	}
+
+	VkDescriptorSetAllocateInfo dsai{};
+	dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	dsai.descriptorPool = pipeline.descriptorPool;
+	dsai.descriptorSetCount = 1;
+	dsai.pSetLayouts = &pipeline.descriptorSetLayout;
+
+	if (vkAllocateDescriptorSets(device, &dsai, &pipeline.descriptorSet) != VK_SUCCESS) {
+		vkDestroyDescriptorPool(device, pipeline.descriptorPool, nullptr);
+		vkDestroyPipeline(device, pipeline.pipeline, nullptr);
+		vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		throw std::runtime_error("Failed to allocate Hi-Z descriptor set");
+	}
+
+	return pipeline;
+}
+
+static void destroyHiZPipeline(VkDevice device, GPUHiZPipeline& pipeline) {
+	if (pipeline.descriptorPool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(device, pipeline.descriptorPool, nullptr);
+		pipeline.descriptorPool = VK_NULL_HANDLE;
+	}
+	if (pipeline.pipeline != VK_NULL_HANDLE) {
+		vkDestroyPipeline(device, pipeline.pipeline, nullptr);
+		pipeline.pipeline = VK_NULL_HANDLE;
+	}
+	if (pipeline.layout != VK_NULL_HANDLE) {
+		vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
+		pipeline.layout = VK_NULL_HANDLE;
+	}
+	if (pipeline.descriptorSetLayout != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(device, pipeline.descriptorSetLayout, nullptr);
+		pipeline.descriptorSetLayout = VK_NULL_HANDLE;
+	}
+	pipeline.descriptorSet = VK_NULL_HANDLE;
+}
+
+static void updateHiZDescriptor(VkDevice device, const GPUHiZPipeline& pipeline,
+	VkImageView srcView, VkImageLayout srcLayout, VkSampler sampler, VkImageView dstView) {
+	VkDescriptorImageInfo srcInfo{};
+	srcInfo.imageView = srcView;
+	srcInfo.imageLayout = srcLayout;
+	srcInfo.sampler = sampler;
+
+	VkDescriptorImageInfo dstInfo{};
+	dstInfo.imageView = dstView;
+	dstInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+	VkWriteDescriptorSet writes[2]{};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = pipeline.descriptorSet;
+	writes[0].dstBinding = 0;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	writes[0].descriptorCount = 1;
+	writes[0].pImageInfo = &srcInfo;
+
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = pipeline.descriptorSet;
+	writes[1].dstBinding = 1;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	writes[1].descriptorCount = 1;
+	writes[1].pImageInfo = &dstInfo;
+
+	vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+}
+
+static inline uint32_t dispatchGroupCount(uint32_t size) {
+	return (size + 15u) / 16u;
+}
+
+static void buildHiZPyramid(VkDevice device, VkCommandBuffer cmd, GPUHiZPipeline& pipeline, HiZResources& hiz) {
+	if (hiz.mipLevels == 0) {
+		return;
+	}
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, 1, &pipeline.descriptorSet, 0, nullptr);
+
+	// Level 0: copy depth buffer into Hi-Z level 0
+	updateHiZDescriptor(device, pipeline, hiz.depthSampleView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, hiz.sampler, hiz.hiZStorageViews[0]);
+
+	HiZBuildPushConstants push{};
+	push.srcSize[0] = static_cast<int32_t>(hiz.extent.width);
+	push.srcSize[1] = static_cast<int32_t>(hiz.extent.height);
+	push.dstSize[0] = static_cast<int32_t>(hiz.extent.width);
+	push.dstSize[1] = static_cast<int32_t>(hiz.extent.height);
+	push.srcLevel = 0;
+	push.mode = 0;
+
+	vkCmdPushConstants(cmd, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+	vkCmdDispatch(cmd, dispatchGroupCount(hiz.extent.width), dispatchGroupCount(hiz.extent.height), 1);
+
+	// Ensure level 0 writes are visible before sampling in subsequent passes
+	if (hiz.mipLevels > 1) {
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = hiz.hiZImage;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = 0;
+		barrier.subresourceRange.layerCount = 1;
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+			0, nullptr, 0, nullptr, 1, &barrier);
+	}
+
+	for (uint32_t level = 1; level < hiz.mipLevels; ++level) {
+		uint32_t srcWidth = std::max(1u, hiz.extent.width >> (level - 1));
+		uint32_t srcHeight = std::max(1u, hiz.extent.height >> (level - 1));
+		uint32_t dstWidth = std::max(1u, hiz.extent.width >> level);
+		uint32_t dstHeight = std::max(1u, hiz.extent.height >> level);
+
+		updateHiZDescriptor(device, pipeline, hiz.hiZSampleView, VK_IMAGE_LAYOUT_GENERAL, hiz.sampler, hiz.hiZStorageViews[level]);
+
+		push.srcSize[0] = static_cast<int32_t>(srcWidth);
+		push.srcSize[1] = static_cast<int32_t>(srcHeight);
+		push.dstSize[0] = static_cast<int32_t>(dstWidth);
+		push.dstSize[1] = static_cast<int32_t>(dstHeight);
+		push.srcLevel = static_cast<int32_t>(level - 1);
+		push.mode = 1;
+
+		vkCmdPushConstants(cmd, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+		vkCmdDispatch(cmd, dispatchGroupCount(dstWidth), dispatchGroupCount(dstHeight), 1);
+
+		if (level + 1 < hiz.mipLevels) {
+			VkImageMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = hiz.hiZImage;
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			barrier.subresourceRange.baseMipLevel = level;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.baseArrayLayer = 0;
+			barrier.subresourceRange.layerCount = 1;
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+				0, nullptr, 0, nullptr, 1, &barrier);
+		}
+	}
+
+	VkImageMemoryBarrier finalize{};
+	finalize.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	finalize.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	finalize.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	finalize.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+	finalize.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	finalize.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalize.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalize.image = hiz.hiZImage;
+	finalize.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	finalize.subresourceRange.baseMipLevel = 0;
+	finalize.subresourceRange.levelCount = hiz.mipLevels;
+	finalize.subresourceRange.baseArrayLayer = 0;
+	finalize.subresourceRange.layerCount = 1;
+
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0, 0, nullptr, 0, nullptr, 1, &finalize);
+
+	hiz.hiZLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	hiz.ready = true;
+}
+
+static float computeCircleDepth(float radius) {
+	float t = std::clamp(radius / CIRCLE_DEPTH_RADIUS_SCALE, 0.0f, 1.0f);
+	return 1.0f - t * CIRCLE_DEPTH_RANGE;
 }
 
 static void createBuffer(VkPhysicalDevice physical, VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, BufferWithMemory& out) {
@@ -2398,9 +2927,15 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 		throw std::runtime_error("Failed to create pipeline layout");
 	}
 
-	VkPipelineRenderingCreateInfoKHR rendering{}; // not used with render pass pipeline
+	VkPipelineDepthStencilStateCreateInfo ds{};
+	ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	ds.depthTestEnable = VK_TRUE;
+	ds.depthWriteEnable = VK_TRUE;
+	ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+	ds.depthBoundsTestEnable = VK_FALSE;
+	ds.stencilTestEnable = VK_FALSE;
 
-	VkGraphicsPipelineCreateInfo gpci{}; gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpci.stageCount = 2; gpci.pStages = stages; gpci.pVertexInputState = &vi; gpci.pInputAssemblyState = &ia; gpci.pViewportState = &vps; gpci.pRasterizationState = &rs; gpci.pMultisampleState = &ms; gpci.pDepthStencilState = nullptr; gpci.pColorBlendState = &cb; gpci.pDynamicState = &dyn; gpci.layout = po.layout; gpci.renderPass = renderPass; gpci.subpass = 0;
+	VkGraphicsPipelineCreateInfo gpci{}; gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpci.stageCount = 2; gpci.pStages = stages; gpci.pVertexInputState = &vi; gpci.pInputAssemblyState = &ia; gpci.pViewportState = &vps; gpci.pRasterizationState = &rs; gpci.pMultisampleState = &ms; gpci.pDepthStencilState = &ds; gpci.pColorBlendState = &cb; gpci.pDynamicState = &dyn; gpci.layout = po.layout; gpci.renderPass = renderPass; gpci.subpass = 0;
 	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &po.pipeline) != VK_SUCCESS) {
 		vkDestroyPipelineLayout(device, po.layout, nullptr);
 		vkDestroyShaderModule(device, frag, nullptr);
@@ -2675,6 +3210,14 @@ static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat,
 		throw std::runtime_error("Failed to create text pipeline layout");
 	}
 
+	VkPipelineDepthStencilStateCreateInfo ds{};
+	ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	ds.depthTestEnable = VK_TRUE;
+	ds.depthWriteEnable = VK_FALSE;
+	ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+	ds.depthBoundsTestEnable = VK_FALSE;
+	ds.stencilTestEnable = VK_FALSE;
+
 	VkGraphicsPipelineCreateInfo gpci{};
 	gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	gpci.stageCount = 2;
@@ -2684,7 +3227,7 @@ static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat,
 	gpci.pViewportState = &vps;
 	gpci.pRasterizationState = &rs;
 	gpci.pMultisampleState = &ms;
-	gpci.pDepthStencilState = nullptr;
+	gpci.pDepthStencilState = &ds;
 	gpci.pColorBlendState = &cb;
 	gpci.pDynamicState = &dyn;
 	gpci.layout = po.layout;
@@ -2712,8 +3255,8 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device) {
 	VkShaderModule comp = createShaderModule(device, compCode);
 
 	// Create descriptor set layout for compute buffers
-	VkDescriptorSetLayoutBinding bindings[3]{};
-	
+	VkDescriptorSetLayoutBinding bindings[4]{};
+
 	// Binding 0: Input instance data (readonly)
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -2735,9 +3278,16 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device) {
 	bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	bindings[2].pImmutableSamplers = nullptr;
 
+	// Binding 3: Hi-Z depth texture (sampled)
+	bindings[3].binding = 3;
+	bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	bindings[3].descriptorCount = 1;
+	bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[3].pImmutableSamplers = nullptr;
+
 	VkDescriptorSetLayoutCreateInfo dslci{};
 	dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	dslci.bindingCount = 3;
+	dslci.bindingCount = 4;
 	dslci.pBindings = bindings;
 
 	GPUCullingPipeline pipeline{};
@@ -3039,15 +3589,17 @@ static void createGPUCullingBuffers(VkPhysicalDevice physical, VkDevice device, 
 }
 
 // GPU-Driven Culling: Setup descriptor sets for compute pipeline
-static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipeline, const GPUCullingBuffers& buffers) {
+static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipeline, const GPUCullingBuffers& buffers, const HiZResources& hiz) {
 	// Create descriptor pool
-	VkDescriptorPoolSize poolSizes[1]{};
+	VkDescriptorPoolSize poolSizes[2]{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	poolSizes[0].descriptorCount = 3; // input, visibility, counter
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[1].descriptorCount = 1; // Hi-Z texture
 
 	VkDescriptorPoolCreateInfo dpci{};
 	dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	dpci.poolSizeCount = 1;
+	dpci.poolSizeCount = 2;
 	dpci.pPoolSizes = poolSizes;
 	dpci.maxSets = 1;
 
@@ -3068,7 +3620,7 @@ static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipe
 
 	// Update descriptor set with buffer bindings
 	VkDescriptorBufferInfo bufferInfos[3]{};
-	
+
 	// Input instance buffer
 	bufferInfos[0].buffer = buffers.inputInstanceBuffer.buffer;
 	bufferInfos[0].offset = 0;
@@ -3084,7 +3636,12 @@ static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipe
 	bufferInfos[2].offset = 0;
 	bufferInfos[2].range = sizeof(uint32_t);
 
-	VkWriteDescriptorSet writes[3]{};
+	VkDescriptorImageInfo hizInfo{};
+	hizInfo.imageView = hiz.hiZSampleView;
+	hizInfo.imageLayout = hiz.ready ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+	hizInfo.sampler = hiz.sampler;
+
+	VkWriteDescriptorSet writes[4]{};
 	for (int i = 0; i < 3; ++i) {
 		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[i].dstSet = pipeline.descriptorSet;
@@ -3095,7 +3652,37 @@ static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipe
 		writes[i].pBufferInfo = &bufferInfos[i];
 	}
 
-	vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+	writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[3].dstSet = pipeline.descriptorSet;
+	writes[3].dstBinding = 3;
+	writes[3].dstArrayElement = 0;
+	writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	writes[3].descriptorCount = 1;
+	writes[3].pImageInfo = &hizInfo;
+
+	vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+}
+
+static void updateGPUCullingHiZDescriptor(VkDevice device, GPUCullingPipeline& pipeline, const HiZResources& hiz) {
+	if (pipeline.descriptorSet == VK_NULL_HANDLE) {
+		return;
+	}
+
+	VkDescriptorImageInfo hizInfo{};
+	hizInfo.imageView = hiz.hiZSampleView;
+	hizInfo.imageLayout = hiz.hiZLayout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_GENERAL : hiz.hiZLayout;
+	hizInfo.sampler = hiz.sampler;
+
+	VkWriteDescriptorSet write{};
+	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet = pipeline.descriptorSet;
+	write.dstBinding = 3;
+	write.dstArrayElement = 0;
+	write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	write.descriptorCount = 1;
+	write.pImageInfo = &hizInfo;
+
+	vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 // P2: Setup descriptor sets for instance compaction pipeline
@@ -3172,8 +3759,9 @@ static void setupGPUCompactionDescriptors(VkDevice device,
 }
 
 // GPU-Driven Culling: Execute compute shader for frustum culling
-static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCullingPipeline& pipeline, 
-	const GPUCullingBuffers& buffers, GPUCullingMetrics& metrics, 
+static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCullingPipeline& pipeline,
+	const GPUCullingBuffers& buffers, GPUCullingMetrics& metrics,
+	const HiZResources& hiz,
 	const std::vector<InstanceLayoutCPU>& inputInstances, uint32_t framebufferWidth, uint32_t framebufferHeight) {
 	
 	metrics.computeStartTime = std::chrono::high_resolution_clock::now();
@@ -3221,7 +3809,9 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 	pushConstants.cameraOffset[0] = 0.0f; // No camera offset for now
 	pushConstants.cameraOffset[1] = 0.0f;
 	pushConstants.maxInstances = metrics.totalInstances;
-	pushConstants.pad1 = 0;
+	pushConstants.hizEnabled = (hiz.ready && hiz.hiZSampleView != VK_NULL_HANDLE && hiz.sampler != VK_NULL_HANDLE) ? 1u : 0u;
+	pushConstants.hizMipCount = hiz.mipLevels;
+	pushConstants.pad0 = 0;
 
 	vkCmdPushConstants(cmd, pipeline.computeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
@@ -4456,13 +5046,17 @@ int main() {
 	SwapchainObjects sc{};
 	createSwapchainObjects(sc, VK_NULL_HANDLE);
 
-	VkRenderPass renderPass = createRenderPass(device, sc.colorFormat);
+	HiZResources hizResources{};
+	createHiZResources(physical, device, sc.extent.width, sc.extent.height, hizResources);
+
+	VkRenderPass renderPass = createRenderPass(device, sc.colorFormat, hizResources.depthFormat);
 	PipelineObjects circlePipeline = createCirclePipeline(device, sc.colorFormat, renderPass);
 	PipelineObjects healthBarPipeline = createHealthBarPipeline(device, sc.colorFormat, renderPass);
 	PipelineObjects textPipeline = createTextPipeline(device, sc.colorFormat, renderPass);
 
 	// GPU-Driven Culling: Create compute pipeline (buffers will be created after sim is initialized)
 	GPUCullingPipeline cullingPipeline = createFrustumCullingPipeline(device);
+	GPUHiZPipeline hizPipeline = createHiZBuildPipeline(device);
 	GPUCullingBuffers cullingBuffers{};
 	GPUCullingMetrics cullingMetrics{};
 	
@@ -4509,11 +5103,11 @@ int main() {
 	// Framebuffers
 	sc.framebuffers.resize(sc.imageViews.size());
 	for (size_t i = 0; i < sc.imageViews.size(); ++i) {
-		VkImageView attachments[] = { sc.imageViews[i] };
+		VkImageView attachments[] = { sc.imageViews[i], hizResources.depthView };
 		VkFramebufferCreateInfo fci{};
 		fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 		fci.renderPass = renderPass;
-		fci.attachmentCount = 1;
+		fci.attachmentCount = 2;
 		fci.pAttachments = attachments;
 		fci.width = sc.extent.width;
 		fci.height = sc.extent.height;
@@ -4680,7 +5274,7 @@ int main() {
 	// GPU-Driven Culling: Initialize buffers and descriptors after sim is available
 	std::cout << "Initializing GPU culling buffers..." << std::endl; std::cout.flush();
 	createGPUCullingBuffers(physical, device, cullingBuffers, sim.maxPlayers);
-	setupGPUCullingDescriptors(device, cullingPipeline, cullingBuffers);
+	setupGPUCullingDescriptors(device, cullingPipeline, cullingBuffers, hizResources);
 	std::cout << "GPU culling system initialized!" << std::endl; std::cout.flush();
 	
 	// P2: Initialize indirect draw buffers and descriptors
@@ -4744,17 +5338,19 @@ int main() {
 		if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
 			vkDeviceWaitIdle(device);
 			destroySwapchainObjects(sc);
+			destroyHiZResources(device, hizResources);
 			vkDestroyRenderPass(device, renderPass, nullptr);
 			createSwapchainObjects(sc, VK_NULL_HANDLE);
-			renderPass = createRenderPass(device, sc.colorFormat);
+			createHiZResources(physical, device, sc.extent.width, sc.extent.height, hizResources);
+			renderPass = createRenderPass(device, sc.colorFormat, hizResources.depthFormat);
 			// Recreate framebuffers
 			sc.framebuffers.resize(sc.imageViews.size());
 			for (size_t i = 0; i < sc.imageViews.size(); ++i) {
-				VkImageView attachments[] = { sc.imageViews[i] };
+				VkImageView attachments[] = { sc.imageViews[i], hizResources.depthView };
 				VkFramebufferCreateInfo fci2{};
 				fci2.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 				fci2.renderPass = renderPass;
-				fci2.attachmentCount = 1;
+				fci2.attachmentCount = 2;
 				fci2.pAttachments = attachments;
 				fci2.width = sc.extent.width;
 				fci2.height = sc.extent.height;
@@ -4784,6 +5380,7 @@ int main() {
 				vkCreateSemaphore(device, &sci2, nullptr, &renderFinishedSemaphores[i]);
 				vkCreateFence(device, &fci3, nullptr, &inFlightFences[i]);
 			}
+			updateGPUCullingHiZDescriptor(device, cullingPipeline, hizResources);
 			currentFrame = 0;
 			continue;
 		}
@@ -4794,33 +5391,40 @@ int main() {
 		VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 		vkBeginCommandBuffer(cmd, &begin);
 
-		VkClearValue clearColor{};
-		clearColor.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+		// Ensure depth attachment is ready for rendering
+		if (hizResources.depthLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+			VkImageMemoryBarrier depthBarrier{};
+			depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			depthBarrier.oldLayout = hizResources.depthLayout;
+			depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			depthBarrier.image = hizResources.depthImage;
+			depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			depthBarrier.subresourceRange.baseMipLevel = 0;
+			depthBarrier.subresourceRange.levelCount = 1;
+			depthBarrier.subresourceRange.baseArrayLayer = 0;
+			depthBarrier.subresourceRange.layerCount = 1;
 
-		VkRenderPassBeginInfo rpbi{};
-		rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-		rpbi.renderPass = renderPass;
-		rpbi.framebuffer = sc.framebuffers[imageIndex];
-		rpbi.renderArea.offset = {0, 0};
-		rpbi.renderArea.extent = sc.extent;
-		rpbi.clearValueCount = 1;
-		rpbi.pClearValues = &clearColor;
-		vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+			VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			if (hizResources.depthLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+				depthBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			} else {
+				depthBarrier.srcAccessMask = 0;
+			}
+			depthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-		// Set dynamic viewport/scissor
-		VkViewport viewport{}; viewport.x = 0.0f; viewport.y = 0.0f; viewport.width = static_cast<float>(sc.extent.width); viewport.height = static_cast<float>(sc.extent.height); viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
-		VkRect2D scissor{}; scissor.offset = {0,0}; scissor.extent = sc.extent;
-		vkCmdSetViewport(cmd, 0, 1, &viewport);
-		vkCmdSetScissor(cmd, 0, 1, &scissor);
+			vkCmdPipelineBarrier(cmd,
+				srcStage,
+				VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+				0,
+				0, nullptr,
+				0, nullptr,
+				1, &depthBarrier);
 
-		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.pipeline);
-
-		// Bind descriptor set for texture atlas
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
-
-		// Push constants for circles: actual framebuffer viewport size
-		float circleViewport[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
-		vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(circleViewport), circleViewport);
+			hizResources.depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		}
 
 		// Update simulation and instance buffer
 		const float dt = 1.0f / 120.0f; // fixed step
@@ -4877,8 +5481,12 @@ int main() {
 					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 						0, 0, nullptr, 1, &uploadBarrier, 0, nullptr);
 
+					// Refresh Hi-Z descriptor to match current layout
+					updateGPUCullingHiZDescriptor(device, cullingPipeline, hizResources);
+
 					// Execute GPU culling pass
-					executeGPUCulling(device, cmd, cullingPipeline, cullingBuffers, cullingMetrics, 
+					executeGPUCulling(device, cmd, cullingPipeline, cullingBuffers, cullingMetrics,
+						hizResources,
 						cpuInstances, sc.extent.width, sc.extent.height);
 					
 					// P2: Execute instance compaction pass if indirect draw is enabled
@@ -5072,7 +5680,39 @@ int main() {
 			std::cout << "\n";
 			lastAliveCount = currentAlive;
 		}
-		geom.instanceCount = static_cast<uint32_t>(cpuInstances.size());
+	VkClearValue clearValues[2]{};
+	clearValues[0].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+	clearValues[1].depthStencil = { 1.0f, 0 };
+
+	VkRenderPassBeginInfo rpbi{};
+	rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	rpbi.renderPass = renderPass;
+	rpbi.framebuffer = sc.framebuffers[imageIndex];
+	rpbi.renderArea.offset = {0, 0};
+	rpbi.renderArea.extent = sc.extent;
+	rpbi.clearValueCount = 2;
+	rpbi.pClearValues = clearValues;
+	vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+	VkViewport viewport{};
+	viewport.x = 0.0f;
+	viewport.y = 0.0f;
+	viewport.width = static_cast<float>(sc.extent.width);
+	viewport.height = static_cast<float>(sc.extent.height);
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+	VkRect2D scissor{};
+	scissor.offset = {0, 0};
+	scissor.extent = sc.extent;
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+	vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.pipeline);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
+	float circleViewport[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
+	vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(circleViewport), circleViewport);
+
+	geom.instanceCount = static_cast<uint32_t>(cpuInstances.size());
 		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * cpuInstances.size();
 		if (ibSize > geom.instanceBufferCapacity) {
 			// Grow the instance buffer to accommodate large player counts
@@ -5168,6 +5808,67 @@ int main() {
 		}
 
 		vkCmdEndRenderPass(cmd);
+
+		// Transition depth image to shader read for Hi-Z construction
+		{
+			VkImageMemoryBarrier depthBarrier{};
+			depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			depthBarrier.oldLayout = hizResources.depthLayout;
+			depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			depthBarrier.image = hizResources.depthImage;
+			depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			depthBarrier.subresourceRange.baseMipLevel = 0;
+			depthBarrier.subresourceRange.levelCount = 1;
+			depthBarrier.subresourceRange.baseArrayLayer = 0;
+			depthBarrier.subresourceRange.layerCount = 1;
+			depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+			vkCmdPipelineBarrier(cmd,
+				VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0,
+				0, nullptr,
+				0, nullptr,
+				1, &depthBarrier);
+
+			hizResources.depthLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		}
+
+		// Transition Hi-Z image to GENERAL for compute writes
+		if (hizResources.hiZLayout != VK_IMAGE_LAYOUT_GENERAL) {
+			VkImageMemoryBarrier hizBarrier{};
+			hizBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			hizBarrier.oldLayout = hizResources.hiZLayout;
+			hizBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+			hizBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			hizBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			hizBarrier.image = hizResources.hiZImage;
+			hizBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			hizBarrier.subresourceRange.baseMipLevel = 0;
+			hizBarrier.subresourceRange.levelCount = hizResources.mipLevels;
+			hizBarrier.subresourceRange.baseArrayLayer = 0;
+			hizBarrier.subresourceRange.layerCount = 1;
+			hizBarrier.srcAccessMask = hizResources.ready ? VK_ACCESS_SHADER_READ_BIT : 0;
+			hizBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+			VkPipelineStageFlags srcStage = hizResources.ready ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			vkCmdPipelineBarrier(cmd,
+				srcStage,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0,
+				0, nullptr,
+				0, nullptr,
+				1, &hizBarrier);
+
+			hizResources.hiZLayout = VK_IMAGE_LAYOUT_GENERAL;
+		}
+
+		// Build Hi-Z depth pyramid from current frame depth buffer
+		buildHiZPyramid(device, cmd, hizPipeline, hizResources);
+
 		vkEndCommandBuffer(cmd);
 
 		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
@@ -5225,6 +5926,8 @@ int main() {
 
 	// GPU-Driven Culling: Cleanup compute pipeline and buffers
 	destroyGPUCullingResources(device, cullingPipeline, cullingBuffers);
+	destroyHiZPipeline(device, hizPipeline);
+	destroyHiZResources(device, hizResources);
 	if (hud.vertexBuffer.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, hud.vertexBuffer.buffer, nullptr);
 	if (hud.vertexBuffer.memory != VK_NULL_HANDLE) vkFreeMemory(device, hud.vertexBuffer.memory, nullptr);
 	vkDestroyCommandPool(device, commandPool, nullptr);
