@@ -429,13 +429,13 @@ struct Simulation {
 	static constexpr float GRID_CELL_MIN = 32.0f;
 	static constexpr float GRID_CELL_MAX = 2048.0f;
 	static constexpr float PI = 3.14159265358979323846f;
-	static constexpr float PIXEL_DUST_THRESHOLD = 1.0f;
-	static constexpr float SIMPLE_SHAPE_THRESHOLD = 4.0f;
-	static constexpr float BASIC_TEXTURE_THRESHOLD = 12.0f;
-	static constexpr float TEXTURE_LOAD_THRESHOLD = 4.0f;
-	static constexpr float DETAIL_THRESHOLD = 12.0f;
-	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 1.0f;
-	static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 0.6f; // Reduced from 1.6f
+	static constexpr float PIXEL_DUST_THRESHOLD = 1.2f;
+	static constexpr float SIMPLE_SHAPE_THRESHOLD = 5.0f;
+	static constexpr float BASIC_TEXTURE_THRESHOLD = 16.0f;
+	static constexpr float TEXTURE_LOAD_THRESHOLD = 5.0f;
+	static constexpr float DETAIL_THRESHOLD = 16.0f;
+	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 1.25f;
+	static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 0.65f; // Reduced from 1.6f
 	static constexpr float HEALTH_BAR_HEIGHT_MULTIPLIER = 0.1f; // Reduced from 0.2f
 	static constexpr float HEALTH_BAR_MIN_HEIGHT = 1.0f;
 	static constexpr float HEALTH_BAR_VERTICAL_PADDING = 20.0f;
@@ -3039,6 +3039,14 @@ static PipelineObjects createHealthBarPipeline(VkDevice device, VkFormat colorFo
 	dyn.dynamicStateCount = 2;
 	dyn.pDynamicStates = dynamics;
 
+	VkPipelineDepthStencilStateCreateInfo ds{};
+	ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	ds.depthTestEnable = VK_FALSE;
+	ds.depthWriteEnable = VK_FALSE;
+	ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+	ds.depthBoundsTestEnable = VK_FALSE;
+	ds.stencilTestEnable = VK_FALSE;
+
 	VkPushConstantRange pcr{};
 	pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 	pcr.offset = 0;
@@ -3066,7 +3074,7 @@ static PipelineObjects createHealthBarPipeline(VkDevice device, VkFormat colorFo
 	gpci.pViewportState = &vps;
 	gpci.pRasterizationState = &rs;
 	gpci.pMultisampleState = &ms;
-	gpci.pDepthStencilState = nullptr;
+	gpci.pDepthStencilState = &ds;
 	gpci.pColorBlendState = &cb;
 	gpci.pDynamicState = &dyn;
 	gpci.layout = po.layout;

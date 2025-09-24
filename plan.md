@@ -1269,7 +1269,7 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   - [x] Build a Hi-Z buffer from the prior frame depth (depth attachment + compute pyramid)
   - [x] Integrate the occlusion test into the compute culling pass (Hi-Z sampling in `frustum_cull.comp`)
   - [x] Hit the target of 125k+ entities at 60+ FPS *(manual perf check still recommended on next run)*
-  - [ ] Follow-up: tune occlusion epsilon / tier heuristics and validate health-bar depth behaviour
+  - [x] Follow-up: tune occlusion epsilon / tier heuristics and validate health-bar depth behaviour *(dynamic Hi-Z epsilon, refreshed LOD thresholds, health bars bypass depth test)*
 - [ ] **P4: Modern Vulkan Features (Advanced)**
   - [ ] Evaluate mesh shader adoption for potential 10× geometry throughput
   - [ ] Investigate GPU-controlled texture loading via compute shaders

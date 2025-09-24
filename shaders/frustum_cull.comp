@@ -43,11 +43,21 @@ layout(set = 0, binding = 3) uniform sampler2D hizTexture;
 
 const float CIRCLE_DEPTH_RADIUS_SCALE = 600.0;
 const float CIRCLE_DEPTH_RANGE = 0.9;
-const float HIZ_EPSILON = 0.001;
+const float HIZ_EPSILON_MIN = 0.0006;
+const float HIZ_EPSILON_MAX = 0.0035;
+const float HIZ_EPSILON_SMALL_RADIUS = 2.0;
+const float HIZ_EPSILON_LARGE_RADIUS = 48.0;
 
 float computeCircleDepth(float radius) {
     float t = clamp(radius / CIRCLE_DEPTH_RADIUS_SCALE, 0.0, 1.0);
     return 1.0 - t * CIRCLE_DEPTH_RANGE;
+}
+
+float computeHiZEpsilon(float radiusPixels) {
+    float blend = clamp((radiusPixels - HIZ_EPSILON_SMALL_RADIUS) /
+                        max(HIZ_EPSILON_LARGE_RADIUS - HIZ_EPSILON_SMALL_RADIUS, 1.0),
+                        0.0, 1.0);
+    return mix(HIZ_EPSILON_MAX, HIZ_EPSILON_MIN, blend);
 }
 
 bool isCircleOccluded(vec2 screenUV, float radiusPixels, float circleDepth) {
@@ -68,7 +78,8 @@ bool isCircleOccluded(vec2 screenUV, float radiusPixels, float circleDepth) {
     minDepth = min(minDepth, textureLod(hizTexture, vec2(clampedMin.x, clampedMax.y), level).r);
     minDepth = min(minDepth, textureLod(hizTexture, vec2(clampedMax.x, clampedMax.y), level).r);
 
-    return minDepth <= (circleDepth - HIZ_EPSILON);
+    float epsilon = computeHiZEpsilon(radiusPixels);
+    return minDepth <= (circleDepth - epsilon);
 }
 
 // Simple frustum culling function for 2D circles
