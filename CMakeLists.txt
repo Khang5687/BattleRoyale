@@ -47,6 +47,7 @@ set(SHADER_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/health_bar.frag
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.frag
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/frustum_cull.comp
 )
 
 set(COMPILED_SHADERS)
@@ -58,6 +59,8 @@ foreach(SRC ${SHADER_SOURCES})
     set(SHADER_STAGE vert)
   elseif (EXT_LOWER STREQUAL ".frag")
     set(SHADER_STAGE frag)
+  elseif (EXT_LOWER STREQUAL ".comp")
+    set(SHADER_STAGE comp)
   else()
     message(FATAL_ERROR "Unsupported shader extension: ${EXT}")
   endif()
