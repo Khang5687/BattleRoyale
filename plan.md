@@ -1271,8 +1271,12 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
   - [x] Hit the target of 125k+ entities at 60+ FPS *(manual perf check still recommended on next run)*
   - [x] Follow-up: tune occlusion epsilon / tier heuristics and validate health-bar depth behaviour *(dynamic Hi-Z epsilon, refreshed LOD thresholds, health bars bypass depth test)*
 - [ ] **P4: Modern Vulkan Features (Advanced)**
-  - [ ] Evaluate mesh shader adoption for potential 10× geometry throughput
+  - [x] Evaluate mesh shader adoption for potential 10× geometry throughput *(MoltenVK currently exposes neither `VK_EXT_mesh_shader` nor `VK_NV_mesh_shader`; runtime now logs the absence and keeps raster path)*
   - [ ] Investigate GPU-controlled texture loading via compute shaders
+    - [x] Phase A: Refactor atlas upload path to expose GPU-visible indirection tables (descriptor indexing prep) *(imageId→layer storage buffer, descriptor updates, per-frame sync hook)*
+    - [ ] Phase B: Author compute shader that reads disk staging pages and writes into sparse atlas layers
+    - [ ] Phase C: Add GPU ↔ CPU mailbox for streaming requests and completion fences
+    - [ ] Phase D: Perf validation against existing threaded loader and fall back toggles
 
 ### Stage 4 – Long-Term Enhancements (tackle after core goals)
 - [ ] **Ultra-Massive Scale Support** (500k+ files; currently out of scope)

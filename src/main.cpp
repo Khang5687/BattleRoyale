@@ -47,6 +47,12 @@
 #ifndef VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
 #define VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME "VK_KHR_get_physical_device_properties2"
 #endif
+#ifndef VK_EXT_MESH_SHADER_EXTENSION_NAME
+#define VK_EXT_MESH_SHADER_EXTENSION_NAME "VK_EXT_mesh_shader"
+#endif
+#ifndef VK_NV_MESH_SHADER_EXTENSION_NAME
+#define VK_NV_MESH_SHADER_EXTENSION_NAME "VK_NV_mesh_shader"
+#endif
 
 // Global damage curve instance for dynamic damage scaling
 static DamageCurve globalDamageCurve;
@@ -345,6 +351,11 @@ struct TextureAtlas {
 	ImageWithMemory atlasArray;
 	VkSampler sampler = VK_NULL_HANDLE;
 	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+	BufferWithMemory imageLayerLookupBuffer;
+	VkDeviceSize imageLayerLookupCapacity = 0;
+	VkDeviceSize imageLayerLookupRange = sizeof(int32_t);
+	std::vector<int32_t> imageLayerLookupCPU;
+	bool lookupDirty = false;
 
 	// LRU management
 	std::unordered_map<uint32_t, uint32_t> imageIdToLayer; // imageId -> layer index
@@ -413,6 +424,7 @@ struct HudFont {
 // Forward declarations
 static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId);
 static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer);
+static void ensureAtlasLookupBuffer(ImageManager& mgr, size_t entryCount);
 
 struct Simulation {
 	// Constants
@@ -598,6 +610,7 @@ struct Simulation {
 		// Populate image manager with file list
 		if (imageManager) {
 			imageManager->atlas.imageFiles = files;
+			ensureAtlasLookupBuffer(*imageManager, imageManager->atlas.imageFiles.size());
 		}
 
 		uint32_t count;
@@ -2865,9 +2878,9 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	VkPipelineShaderStageCreateInfo stages[] = { vs, fs };
 
 	// Vertex bindings: 0 = quad vertices (vec2), 1 = instance data (center vec2, radius float, color vec4, imageLayer float)
-	VkVertexInputBindingDescription bindings[2]{};
-	bindings[0].binding = 0; bindings[0].stride = sizeof(float) * 2; bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-	bindings[1].binding = 1; bindings[1].stride = sizeof(InstanceLayoutCPU); bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+	VkVertexInputBindingDescription vertexBindings[2]{};
+	vertexBindings[0].binding = 0; vertexBindings[0].stride = sizeof(float) * 2; vertexBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+	vertexBindings[1].binding = 1; vertexBindings[1].stride = sizeof(InstanceLayoutCPU); vertexBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
 	VkVertexInputAttributeDescription attrs[5]{};
 	attrs[0].location = 0; attrs[0].binding = 0; attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0; // inPos
@@ -2877,7 +2890,7 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	attrs[4].location = 4; attrs[4].binding = 1; attrs[4].format = VK_FORMAT_R32_SFLOAT; attrs[4].offset = offsetof(InstanceLayoutCPU, imageLayer); // inImageLayer
 
 	VkPipelineVertexInputStateCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vi.vertexBindingDescriptionCount = 2; vi.pVertexBindingDescriptions = bindings;
+	vi.vertexBindingDescriptionCount = 2; vi.pVertexBindingDescriptions = vertexBindings;
 	vi.vertexAttributeDescriptionCount = 5; vi.pVertexAttributeDescriptions = attrs;
 
 	VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -2901,17 +2914,22 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; pcr.offset = 0; pcr.size = sizeof(float) * 2;
 
 	// Create descriptor set layout for texture atlas
-	VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-	samplerLayoutBinding.binding = 0;
-	samplerLayoutBinding.descriptorCount = 1;
-	samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	samplerLayoutBinding.pImmutableSamplers = nullptr;
-	samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	VkDescriptorSetLayoutBinding descriptorBindings[2]{};
+	descriptorBindings[0].binding = 0;
+	descriptorBindings[0].descriptorCount = 1;
+	descriptorBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorBindings[0].pImmutableSamplers = nullptr;
+	descriptorBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	descriptorBindings[1].binding = 1;
+	descriptorBindings[1].descriptorCount = 1;
+	descriptorBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	descriptorBindings[1].pImmutableSamplers = nullptr;
+	descriptorBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.bindingCount = 1;
-	layoutInfo.pBindings = &samplerLayoutBinding;
+	layoutInfo.bindingCount = 2;
+	layoutInfo.pBindings = descriptorBindings;
 
 	PipelineObjects po{};
 	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &po.descriptorSetLayout) != VK_SUCCESS) {
@@ -4320,6 +4338,84 @@ static VkSampler createTextureSampler(VkDevice device) {
 	return sampler;
 }
 
+static void destroyAtlasLookupBuffer(ImageManager& mgr) {
+	if (mgr.atlas.imageLayerLookupBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(mgr.device, mgr.atlas.imageLayerLookupBuffer.buffer, nullptr);
+		mgr.atlas.imageLayerLookupBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (mgr.atlas.imageLayerLookupBuffer.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(mgr.device, mgr.atlas.imageLayerLookupBuffer.memory, nullptr);
+		mgr.atlas.imageLayerLookupBuffer.memory = VK_NULL_HANDLE;
+	}
+	mgr.atlas.imageLayerLookupCapacity = 0;
+	mgr.atlas.imageLayerLookupRange = sizeof(int32_t);
+}
+
+static void syncAtlasLookupBuffer(ImageManager& mgr) {
+	if (!mgr.atlas.lookupDirty) {
+		return;
+	}
+	if (mgr.atlas.imageLayerLookupBuffer.buffer == VK_NULL_HANDLE || mgr.atlas.imageLayerLookupCapacity == 0) {
+		return;
+	}
+
+	void* data = mapMemory(mgr.device, mgr.atlas.imageLayerLookupBuffer.memory, mgr.atlas.imageLayerLookupCapacity);
+	auto* lookup = static_cast<int32_t*>(data);
+	size_t entryCapacity = static_cast<size_t>(mgr.atlas.imageLayerLookupCapacity / sizeof(int32_t));
+	std::fill_n(lookup, entryCapacity, -1);
+	if (!mgr.atlas.imageLayerLookupCPU.empty()) {
+		std::memcpy(lookup,
+				 mgr.atlas.imageLayerLookupCPU.data(),
+				 mgr.atlas.imageLayerLookupCPU.size() * sizeof(int32_t));
+	}
+	unmapMemory(mgr.device, mgr.atlas.imageLayerLookupBuffer.memory);
+	mgr.atlas.lookupDirty = false;
+}
+
+static void updateAtlasLookupDescriptor(ImageManager& mgr) {
+	if (mgr.atlas.descriptorSet == VK_NULL_HANDLE) {
+		return;
+	}
+	if (mgr.atlas.imageLayerLookupBuffer.buffer == VK_NULL_HANDLE) {
+		return;
+	}
+	VkDescriptorBufferInfo bufferInfo{};
+	bufferInfo.buffer = mgr.atlas.imageLayerLookupBuffer.buffer;
+	bufferInfo.offset = 0;
+	bufferInfo.range = mgr.atlas.imageLayerLookupRange;
+
+	VkWriteDescriptorSet write{};
+	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet = mgr.atlas.descriptorSet;
+	write.dstBinding = 1;
+	write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	write.descriptorCount = 1;
+	write.pBufferInfo = &bufferInfo;
+
+	vkUpdateDescriptorSets(mgr.device, 1, &write, 0, nullptr);
+}
+
+static void ensureAtlasLookupBuffer(ImageManager& mgr, size_t entryCount) {
+	size_t clampedEntries = std::max(entryCount, static_cast<size_t>(1));
+	VkDeviceSize requiredSize = static_cast<VkDeviceSize>(sizeof(int32_t) * clampedEntries);
+	if (requiredSize > mgr.atlas.imageLayerLookupCapacity) {
+		destroyAtlasLookupBuffer(mgr);
+		createBuffer(
+			mgr.physicalDevice,
+			mgr.device,
+			requiredSize,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			mgr.atlas.imageLayerLookupBuffer);
+		mgr.atlas.imageLayerLookupCapacity = requiredSize;
+	}
+	mgr.atlas.imageLayerLookupCPU.assign(entryCount, -1);
+	mgr.atlas.imageLayerLookupRange = static_cast<VkDeviceSize>(sizeof(int32_t) * (entryCount > 0 ? entryCount : 1));
+	mgr.atlas.lookupDirty = true;
+	syncAtlasLookupBuffer(mgr);
+	updateAtlasLookupDescriptor(mgr);
+}
+
 static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue) {
 	mgr.physicalDevice = physicalDevice;
 	mgr.device = device;
@@ -4341,6 +4437,8 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 	for (uint32_t i = 0; i < TextureAtlas::MAX_LAYERS; ++i) {
 		mgr.atlas.freeLayers.push(i);
 	}
+
+	ensureAtlasLookupBuffer(mgr, 0);
 
 	// Create placeholder texture (4x4 magenta)
 	createImage(physicalDevice, device, 4, 4, 1, VK_FORMAT_R8G8B8A8_UNORM,
@@ -4778,6 +4876,10 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 		layer = mgr.atlas.lruOrder.back();
 		uint32_t evictedImageId = mgr.atlas.layerToImageId[layer];
 		mgr.atlas.imageIdToLayer.erase(evictedImageId);
+		if (evictedImageId < mgr.atlas.imageLayerLookupCPU.size()) {
+			mgr.atlas.imageLayerLookupCPU[evictedImageId] = -1;
+			mgr.atlas.lookupDirty = true;
+		}
 		mgr.atlas.lruOrder.pop_back();
 		mgr.atlas.layerToLruIter.erase(layer);
 	} else {
@@ -4789,6 +4891,10 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 	mgr.atlas.layerToImageId[layer] = imageId;
 	mgr.atlas.lruOrder.push_front(layer);
 	mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
+	if (imageId < mgr.atlas.imageLayerLookupCPU.size()) {
+		mgr.atlas.imageLayerLookupCPU[imageId] = static_cast<int32_t>(layer);
+		mgr.atlas.lookupDirty = true;
+	}
 
 	// Upload texture data to atlas layer
 	uploadTextureToAtlasLayer(mgr, imageId, layer);
@@ -4802,6 +4908,13 @@ static void updateImageManager(ImageManager& mgr) {
 		auto& [imageId, texture] = mgr.pendingUploads.front();
 		mgr.atlas.textureCache[imageId] = std::move(texture);
 		mgr.pendingUploads.pop();
+	}
+	// lock_guard scope ends here
+}
+
+static void finalizeImageManagerUpdate(ImageManager& mgr) {
+	if (mgr.atlas.lookupDirty) {
+		syncAtlasLookupBuffer(mgr);
 	}
 }
 
@@ -4835,6 +4948,8 @@ static void destroyImageManager(ImageManager& mgr) {
 	if (mgr.placeholderTexture.memory != VK_NULL_HANDLE) {
 		vkFreeMemory(mgr.device, mgr.placeholderTexture.memory, nullptr);
 	}
+
+	destroyAtlasLookupBuffer(mgr);
 }
 
 int main() {
@@ -4947,6 +5062,30 @@ int main() {
 		qci.queueCount = 1;
 		qci.pQueuePriorities = &priority;
 		qcis.push_back(qci);
+	}
+
+	uint32_t deviceExtCount = 0;
+	vkEnumerateDeviceExtensionProperties(physical, nullptr, &deviceExtCount, nullptr);
+	std::vector<VkExtensionProperties> availableDeviceExts(deviceExtCount);
+	if (deviceExtCount > 0) {
+		vkEnumerateDeviceExtensionProperties(physical, nullptr, &deviceExtCount, availableDeviceExts.data());
+	}
+
+	auto hasDeviceExtension = [&](const char* name) {
+		for (const auto& ext : availableDeviceExts) {
+			if (std::strcmp(ext.extensionName, name) == 0) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	bool supportsExtMeshShader = hasDeviceExtension(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+	bool supportsNvMeshShader = hasDeviceExtension(VK_NV_MESH_SHADER_EXTENSION_NAME);
+	if (supportsExtMeshShader || supportsNvMeshShader) {
+		std::cout << "[P4] Mesh shader extensions reported by driver; MoltenVK backend currently lacks Metal mesh shading support, so extension remains disabled.\n";
+	} else {
+		std::cout << "[P4] Mesh shader extensions unavailable on this device (MoltenVK)." << std::endl;
 	}
 
 	std::vector<const char*> deviceExts = {
@@ -5172,14 +5311,16 @@ int main() {
 	}
 
 	// Create descriptor pool for texture atlases
-	VkDescriptorPoolSize poolSize{};
-	poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSize.descriptorCount = 2;
+	VkDescriptorPoolSize poolSizes[2]{};
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[0].descriptorCount = 2;
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	poolSizes[1].descriptorCount = 1;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.poolSizeCount = 1;
-	poolInfo.pPoolSizes = &poolSize;
+	poolInfo.poolSizeCount = 2;
+	poolInfo.pPoolSizes = poolSizes;
 	poolInfo.maxSets = 2;
 
 	VkDescriptorPool descriptorPool;
@@ -5214,16 +5355,29 @@ int main() {
 	imageInfo.imageView = imageManager.atlas.atlasArray.view;
 	imageInfo.sampler = imageManager.atlas.sampler;
 
-	VkWriteDescriptorSet descriptorWrite{};
-	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrite.dstSet = imageManager.atlas.descriptorSet;
-	descriptorWrite.dstBinding = 0;
-	descriptorWrite.dstArrayElement = 0;
-	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	descriptorWrite.descriptorCount = 1;
-	descriptorWrite.pImageInfo = &imageInfo;
+	VkDescriptorBufferInfo bufferInfo{};
+	bufferInfo.buffer = imageManager.atlas.imageLayerLookupBuffer.buffer;
+	bufferInfo.offset = 0;
+	bufferInfo.range = imageManager.atlas.imageLayerLookupRange;
 
-	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+	VkWriteDescriptorSet writes[2]{};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = imageManager.atlas.descriptorSet;
+	writes[0].dstBinding = 0;
+	writes[0].dstArrayElement = 0;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	writes[0].descriptorCount = 1;
+	writes[0].pImageInfo = &imageInfo;
+
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = imageManager.atlas.descriptorSet;
+	writes[1].dstBinding = 1;
+	writes[1].dstArrayElement = 0;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[1].descriptorCount = 1;
+	writes[1].pBufferInfo = &bufferInfo;
+
+	vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
 	if (hudFont.ready) {
 		VkDescriptorSet hudDescriptor = VK_NULL_HANDLE;
@@ -5437,6 +5591,7 @@ int main() {
 		// Update simulation and instance buffer
 		const float dt = 1.0f / 120.0f; // fixed step
 		updateImageManager(imageManager); // Process pending texture uploads
+		finalizeImageManagerUpdate(imageManager);
 
 		// Always update zoom factor to prevent teleportation on unpause
 		// TODO: New camera system update will go here
