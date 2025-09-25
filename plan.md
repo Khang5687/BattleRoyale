@@ -316,11 +316,11 @@ struct VRAMBudget {
 - [x] Reduce queue submissions from O(N) to O(N/128)
 - [x] Check for dedicated transfer queue and use if available
 
-**Priority 0.5c: Startup Preloading** (1 day after 0.5b)
-- [ ] Detect simulation pause state in main loop
-- [ ] Implement 3-phase preload strategy (512 → 2048 → all)
-- [ ] Add priority calculation based on circle distance/size
-- [ ] Show progress UI during startup preload
+**Priority 0.5c: Startup Preloading** ✅ COMPLETED
+- [x] Detect simulation pause state in main loop
+- [x] Implement 3-phase preload strategy (512 → 2048 → all)
+- [x] Add priority calculation based on circle distance/size
+- [x] Show progress UI during startup preload
 
 **Priority 0.5d: Polish & Validation** (1 day)
 - [ ] Add performance metrics (images/sec, total time)

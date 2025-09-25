@@ -489,6 +489,19 @@ struct ImageManager {
 	std::atomic<uint32_t> loadSuccessCount{0};
 	std::atomic<uint32_t> loadFailCount{0};
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
+
+	// Startup preloading system
+	enum class PreloadPhase {
+		NONE,
+		PHASE_1_512,   // Load first 512 images
+		PHASE_2_2048,  // Load next 1536 images (total 2048)
+		PHASE_3_ALL    // Load remaining images
+	};
+
+	PreloadPhase currentPreloadPhase = PreloadPhase::NONE;
+	std::atomic<bool> preloadingActive{false};
+	std::atomic<size_t> preloadTarget{0};
+	std::chrono::steady_clock::time_point preloadStartTime;
 };
 
 // Forward declarations
@@ -5229,6 +5242,114 @@ static bool queueGpuStreamUpload(ImageManager& mgr, uint32_t imageId, uint32_t l
 	return false;
 }
 
+static void startPreloading(ImageManager& mgr, const class Simulation& sim) {
+	if (mgr.preloadingActive.load() || mgr.atlas.imageFiles.empty()) {
+		return;
+	}
+
+	mgr.preloadingActive = true;
+	mgr.currentPreloadPhase = ImageManager::PreloadPhase::PHASE_1_512;
+	mgr.preloadTarget = std::min(static_cast<size_t>(512), mgr.atlas.imageFiles.size());
+	mgr.preloadStartTime = std::chrono::steady_clock::now();
+
+	std::cout << "Starting preload phase 1: loading first " << mgr.preloadTarget << " images..." << std::endl;
+
+	// Calculate priorities and load images based on circle positions
+	std::vector<std::pair<float, uint32_t>> priorities; // (priority, imageId)
+	priorities.reserve(mgr.preloadTarget);
+
+	// For the first phase, use simple distance-based priority from center
+	const float centerX = 0.0f, centerY = 0.0f; // Assume world center
+
+	const size_t targetCount = mgr.preloadTarget.load();
+	for (size_t i = 0; i < std::min(targetCount, sim.posX.size()); ++i) {
+		if (sim.alive[i] && sim.imageId[i] != UINT32_MAX) {
+			float dist = std::sqrt((sim.posX[i] - centerX) * (sim.posX[i] - centerX) +
+								  (sim.posY[i] - centerY) * (sim.posY[i] - centerY));
+			float priority = 1.0f / (1.0f + dist); // Higher priority for closer circles
+			priorities.emplace_back(priority, sim.imageId[i]);
+		}
+	}
+
+	// Sort by priority (highest first)
+	std::sort(priorities.begin(), priorities.end(), std::greater<>());
+
+	// Remove duplicates and request loading
+	std::unordered_set<uint32_t> requestedIds;
+	for (const auto& [priority, imageId] : priorities) {
+		if (requestedIds.insert(imageId).second) {
+			requestImageLoad(mgr, imageId);
+			if (requestedIds.size() >= targetCount) {
+				break;
+			}
+		}
+	}
+
+	// Fill remaining slots with sequential loading if needed
+	for (uint32_t imageId = 0; imageId < mgr.atlas.imageFiles.size() && requestedIds.size() < targetCount; ++imageId) {
+		if (requestedIds.insert(imageId).second) {
+			requestImageLoad(mgr, imageId);
+		}
+	}
+}
+
+static void updatePreloading(ImageManager& mgr, const class Simulation& sim) {
+	if (!mgr.preloadingActive.load()) {
+		return;
+	}
+
+	const uint32_t currentLoaded = mgr.loadSuccessCount.load();
+	const size_t preloadTarget = mgr.preloadTarget.load();
+	const float progress = static_cast<float>(currentLoaded) / static_cast<float>(preloadTarget);
+
+	// Check if current phase is complete
+	bool phaseComplete = false;
+	switch (mgr.currentPreloadPhase) {
+		case ImageManager::PreloadPhase::PHASE_1_512:
+			if (currentLoaded >= 512 || progress >= 0.95f) {
+				phaseComplete = true;
+				mgr.currentPreloadPhase = ImageManager::PreloadPhase::PHASE_2_2048;
+				mgr.preloadTarget = std::min(static_cast<size_t>(2048), mgr.atlas.imageFiles.size());
+				std::cout << "Starting preload phase 2: loading " << (mgr.preloadTarget.load() - currentLoaded) << " more images (total " << mgr.preloadTarget.load() << ")..." << std::endl;
+
+				// Request additional images for phase 2
+				std::unordered_set<uint32_t> alreadyRequested;
+				for (uint32_t imageId = 512; imageId < mgr.preloadTarget.load() && imageId < mgr.atlas.imageFiles.size(); ++imageId) {
+					requestImageLoad(mgr, imageId);
+				}
+			}
+			break;
+
+		case ImageManager::PreloadPhase::PHASE_2_2048:
+			if (currentLoaded >= 2048 || progress >= 0.95f) {
+				phaseComplete = true;
+				mgr.currentPreloadPhase = ImageManager::PreloadPhase::PHASE_3_ALL;
+				mgr.preloadTarget = mgr.atlas.imageFiles.size();
+				std::cout << "Starting preload phase 3: loading remaining " << (mgr.preloadTarget.load() - currentLoaded) << " images..." << std::endl;
+
+				// Request remaining images
+				for (uint32_t imageId = 2048; imageId < mgr.atlas.imageFiles.size(); ++imageId) {
+					requestImageLoad(mgr, imageId);
+				}
+			}
+			break;
+
+		case ImageManager::PreloadPhase::PHASE_3_ALL:
+			if (currentLoaded >= mgr.atlas.imageFiles.size() * 0.95f) {
+				phaseComplete = true;
+				mgr.preloadingActive = false;
+
+				auto endTime = std::chrono::steady_clock::now();
+				auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - mgr.preloadStartTime);
+				std::cout << "Preloading complete! Loaded " << currentLoaded << " images in " << duration.count() << "ms" << std::endl;
+			}
+			break;
+
+		default:
+			break;
+	}
+}
+
 static bool addTextureToBatch(ImageManager& mgr, uint32_t imageId, uint32_t layer, const LoadedTexture& texture) {
 	if (!mgr.mappedStagingMemory) return false;
 
@@ -6474,6 +6595,15 @@ int main(int argc, char** argv) {
 		updateImageManager(imageManager); // Process pending texture uploads
 		finalizeImageManagerUpdate(imageManager);
 
+		// Startup preloading system - runs during pause state
+		if (isPaused && !imageManager.preloadingActive.load()) {
+			// Start preloading on first paused frame
+			startPreloading(imageManager, sim);
+		} else if (imageManager.preloadingActive.load()) {
+			// Update preloading progress
+			updatePreloading(imageManager, sim);
+		}
+
 		// Always update zoom factor to prevent teleportation on unpause
 		// TODO: New camera system update will go here
 
@@ -6620,6 +6750,37 @@ int main(int argc, char** argv) {
 				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, imageText, diagTextSize, diagShadow);
 				appendHudText(hudFont, hudVertices, 24.0f, yOffset, imageText, diagTextSize, diagColor);
 				yOffset += 35.0f;
+
+				// Preload progress (when active)
+				if (imageManager.preloadingActive.load()) {
+					std::string phaseText;
+					switch (imageManager.currentPreloadPhase) {
+						case ImageManager::PreloadPhase::PHASE_1_512:
+							phaseText = "Preload Phase 1: ";
+							break;
+						case ImageManager::PreloadPhase::PHASE_2_2048:
+							phaseText = "Preload Phase 2: ";
+							break;
+						case ImageManager::PreloadPhase::PHASE_3_ALL:
+							phaseText = "Preload Phase 3: ";
+							break;
+						default:
+							phaseText = "Preloading: ";
+							break;
+					}
+
+					uint32_t currentLoaded = imageManager.loadSuccessCount.load();
+					float progress = static_cast<float>(currentLoaded) / static_cast<float>(imageManager.preloadTarget.load());
+					int progressPercent = static_cast<int>(progress * 100.0f);
+
+					phaseText += std::to_string(currentLoaded) + " / " + std::to_string(imageManager.preloadTarget.load()) +
+								" (" + std::to_string(progressPercent) + "%)";
+
+					const std::array<float, 4> preloadColor{0.2f, 0.8f, 1.0f, 1.0f}; // Light blue
+					appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, phaseText, diagTextSize, diagShadow);
+					appendHudText(hudFont, hudVertices, 24.0f, yOffset, phaseText, diagTextSize, preloadColor);
+					yOffset += 35.0f;
+				}
 
 				// Atlas usage stats (calculate used layers from imageIdToLayer size)
 				uint32_t usedLayers = static_cast<uint32_t>(imageManager.atlas.imageIdToLayer.size());
