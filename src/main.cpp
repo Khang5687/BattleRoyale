@@ -1430,12 +1430,12 @@ struct Simulation {
 			switch (tier) {
 				case CircleRenderTier::PIXEL_DUST:
 				case CircleRenderTier::SIMPLE_SHAPE:
-					imageTier[i] = 0;
+					if (imageTier[i] == 0) {
+						imageTier[i] = 1;
+					}
 					break;
 				case CircleRenderTier::BASIC_TEXTURE:
-					if (imageTier[i] > 1) {
-						imageTier[i] = 1;
-					} else if (imageTier[i] < 1) {
+					if (imageTier[i] < 1) {
 						imageTier[i] = 1;
 					}
 					break;
@@ -1485,36 +1485,37 @@ struct Simulation {
 			float h = std::clamp(health[i], 0.0f, 1.0f);
 
 			// Set image layer based on tier
-			if (imageTier[i] == 0 || imageId[i] == UINT32_MAX) {
-				// Flat color
-				inst.imageLayer = -1.0f;
-				// Green to red gradient by health
-				inst.color[0] = 1.0f - h;
-				inst.color[1] = h;
-				inst.color[2] = 0.2f;
-				inst.color[3] = 1.0f;
-			} else if (imageTier[i] >= 2 && imageManager) {
-				// Try to get texture layer from image manager
-				int32_t layer = getAtlasLayerForImage(*imageManager, imageId[i]);
-				if (layer >= 0) {
-					inst.imageLayer = static_cast<float>(layer);
-					// Health tint for texture
-					inst.color[0] = 1.0f - h * 0.5f;
-					inst.color[1] = 1.0f - h * 0.5f;
-					inst.color[2] = 1.0f - h * 0.5f;
-					inst.color[3] = 1.0f;
-				} else {
-					// Fallback to flat color while loading
+				if (imageTier[i] == 0 || imageId[i] == UINT32_MAX) {
+					// Flat color
 					inst.imageLayer = -1.0f;
+					// Green to red gradient by health
 					inst.color[0] = 1.0f - h;
 					inst.color[1] = h;
 					inst.color[2] = 0.2f;
 					inst.color[3] = 1.0f;
-				}
-			} else {
-				// Placeholder or other tiers
-				inst.imageLayer = -1.0f;
-				inst.color[0] = 1.0f - h;
+				} else if (imageTier[i] >= 1 && imageManager) {
+					// Try to get texture layer from image manager (triggers lazy load)
+					int32_t layer = getAtlasLayerForImage(*imageManager, imageId[i]);
+					if (layer >= 0) {
+						inst.imageLayer = static_cast<float>(layer);
+						// Subtle health tint for texture
+						inst.color[0] = 1.0f - h * 0.5f;
+						inst.color[1] = 1.0f - h * 0.5f;
+						inst.color[2] = 1.0f - h * 0.5f;
+						inst.color[3] = 1.0f;
+					} else {
+						// Neutral placeholder tint while loading completes
+						inst.imageLayer = -1.0f;
+						const float placeholderTint = 0.7f;
+						inst.color[0] = placeholderTint;
+						inst.color[1] = placeholderTint;
+						inst.color[2] = placeholderTint;
+						inst.color[3] = 1.0f;
+					}
+				} else {
+					// Placeholder or other tiers
+					inst.imageLayer = -1.0f;
+					inst.color[0] = 1.0f - h;
 				inst.color[1] = h;
 				inst.color[2] = 0.2f;
 				inst.color[3] = 1.0f;
@@ -2444,43 +2445,35 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.radius = radius[idx];
 		inst.lodTier = static_cast<float>(static_cast<uint32_t>(tier));
 
-		switch (tier) {
-			case CircleRenderTier::SIMPLE_SHAPE:
+			if (imageTier[idx] == 0 || imageId[idx] == UINT32_MAX) {
 				inst.imageLayer = -1.0f;
 				inst.color[0] = 1.0f - h;
 				inst.color[1] = h;
 				inst.color[2] = 0.2f;
 				inst.color[3] = 1.0f;
-				break;
-			case CircleRenderTier::BASIC_TEXTURE:
-				inst.imageLayer = -1.0f;
-				inst.color[0] = std::lerp(0.4f, 1.0f - h, 0.7f);
-				inst.color[1] = std::lerp(0.4f, h, 0.7f);
-				inst.color[2] = 0.25f;
-				inst.color[3] = 1.0f;
-				break;
-			case CircleRenderTier::FULL_DETAIL:
-				if (imageTier[idx] >= 2 && imageManager) {
-					int32_t layer = getAtlasLayerForImage(*imageManager, imageId[idx]);
-					if (layer >= 0) {
-						inst.imageLayer = static_cast<float>(layer);
-						inst.color[0] = 1.0f - h * 0.5f;
-						inst.color[1] = 1.0f - h * 0.5f;
-						inst.color[2] = 1.0f - h * 0.5f;
-						inst.color[3] = 1.0f;
-						break;
-					}
+			} else if (imageTier[idx] >= 1 && imageManager) {
+				int32_t layer = getAtlasLayerForImage(*imageManager, imageId[idx]);
+				if (layer >= 0) {
+					inst.imageLayer = static_cast<float>(layer);
+					inst.color[0] = 1.0f - h * 0.5f;
+					inst.color[1] = 1.0f - h * 0.5f;
+					inst.color[2] = 1.0f - h * 0.5f;
+					inst.color[3] = 1.0f;
+				} else {
+					inst.imageLayer = -1.0f;
+					const float placeholderTint = 0.7f;
+					inst.color[0] = placeholderTint;
+					inst.color[1] = placeholderTint;
+					inst.color[2] = placeholderTint;
+					inst.color[3] = 1.0f;
 				}
-				// Fallback to flat color if texture unavailable
+			} else {
 				inst.imageLayer = -1.0f;
 				inst.color[0] = 1.0f - h;
 				inst.color[1] = h;
 				inst.color[2] = 0.2f;
 				inst.color[3] = 1.0f;
-				break;
-			case CircleRenderTier::PIXEL_DUST:
-				break;
-		}
+			}
 
 		// Winner highlighting
 		if (inVictory && static_cast<int>(idx) == winnerIndex) {
