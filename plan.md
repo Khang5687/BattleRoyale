@@ -309,12 +309,12 @@ struct VRAMBudget {
 - [x] Enable STB SIMD optimizations (`STBI_SSE2`, `STBIR_SSE2`)
 - [x] Replace single loader thread in `initImageManager()`
 
-**Priority 0.5b: Batched GPU Upload** (1-2 days after 0.5a)
-- [ ] Create persistent 256MB staging buffer at init
-- [ ] Implement batch command buffer recording (128 images/batch)
-- [ ] Batch VkBufferImageCopy regions and image barriers
-- [ ] Reduce queue submissions from O(N) to O(N/128)
-- [ ] Check for dedicated transfer queue and use if available
+**Priority 0.5b: Batched GPU Upload** ✅ COMPLETED
+- [x] Create persistent 256MB staging buffer at init
+- [x] Implement batch command buffer recording (128 images/batch)
+- [x] Batch VkBufferImageCopy regions and image barriers
+- [x] Reduce queue submissions from O(N) to O(N/128)
+- [x] Check for dedicated transfer queue and use if available
 
 **Priority 0.5c: Startup Preloading** (1 day after 0.5b)
 - [ ] Detect simulation pause state in main loop

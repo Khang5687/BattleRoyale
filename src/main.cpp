@@ -457,6 +457,27 @@ struct ImageManager {
 	std::mutex uploadMutex;
 	std::queue<std::pair<uint32_t, LoadedTexture>> pendingUploads;
 
+	// Batched GPU upload system
+	static constexpr size_t BATCH_SIZE = 128;
+	static constexpr VkDeviceSize STAGING_BUFFER_SIZE = 256 * 1024 * 1024; // 256MB
+	BufferWithMemory persistentStagingBuffer;
+	void* mappedStagingMemory = nullptr;
+	VkDeviceSize stagingOffset = 0;
+
+	struct BatchedUpload {
+		uint32_t imageId;
+		uint32_t layer;
+		VkDeviceSize bufferOffset;
+		uint32_t width;
+		uint32_t height;
+	};
+	std::vector<BatchedUpload> currentBatch;
+
+	// Transfer queue support
+	VkQueue transferQueue = VK_NULL_HANDLE;
+	VkCommandPool transferCommandPool = VK_NULL_HANDLE;
+	bool useTransferQueue = false;
+
 	// Placeholder texture (small 4x4)
 	ImageWithMemory placeholderTexture;
 
@@ -4743,6 +4764,57 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 		}
 	}
 
+	// Initialize batched upload system
+	try {
+		// Check for dedicated transfer queue
+		VkPhysicalDeviceProperties props;
+		vkGetPhysicalDeviceProperties(physicalDevice, &props);
+
+		uint32_t queueFamilyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+		// Look for dedicated transfer queue (supports transfer but not graphics)
+		int32_t transferFamily = -1;
+		for (uint32_t i = 0; i < queueFamilyCount; i++) {
+			if ((queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT) &&
+				!(queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+				transferFamily = static_cast<int32_t>(i);
+				break;
+			}
+		}
+
+		if (transferFamily >= 0) {
+			// Create transfer command pool and get transfer queue
+			VkCommandPoolCreateInfo poolInfo{};
+			poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+			poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+			poolInfo.queueFamilyIndex = static_cast<uint32_t>(transferFamily);
+
+			if (vkCreateCommandPool(device, &poolInfo, nullptr, &mgr.transferCommandPool) == VK_SUCCESS) {
+				vkGetDeviceQueue(device, static_cast<uint32_t>(transferFamily), 0, &mgr.transferQueue);
+				mgr.useTransferQueue = true;
+				std::cout << "Using dedicated transfer queue for batched uploads" << std::endl;
+			}
+		}
+
+		// Create persistent staging buffer
+		createBuffer(physicalDevice, device, ImageManager::STAGING_BUFFER_SIZE,
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			mgr.persistentStagingBuffer);
+
+		mgr.mappedStagingMemory = mapMemory(device, mgr.persistentStagingBuffer.memory, ImageManager::STAGING_BUFFER_SIZE);
+		mgr.currentBatch.reserve(ImageManager::BATCH_SIZE);
+
+		std::cout << "Batched GPU upload system initialized (256MB staging buffer, " << ImageManager::BATCH_SIZE << " images/batch)" << std::endl;
+
+	} catch (const std::exception& ex) {
+		std::cerr << "Failed to initialize batched upload system: " << ex.what() << std::endl;
+		mgr.mappedStagingMemory = nullptr;
+	}
+
 	// Initialize decode buffers and create thread pool
 	const uint32_t numThreads = std::max(8u, std::thread::hardware_concurrency());
 	mgr.decodeBuffers.resize(numThreads);
@@ -5157,6 +5229,141 @@ static bool queueGpuStreamUpload(ImageManager& mgr, uint32_t imageId, uint32_t l
 	return false;
 }
 
+static bool addTextureToBatch(ImageManager& mgr, uint32_t imageId, uint32_t layer, const LoadedTexture& texture) {
+	if (!mgr.mappedStagingMemory) return false;
+
+	const VkDeviceSize imageSize = texture.data.size();
+
+	// Check if staging buffer has enough space
+	if (mgr.stagingOffset + imageSize > ImageManager::STAGING_BUFFER_SIZE) {
+		return false; // Not enough space, batch needs to be flushed
+	}
+
+	// Copy texture data to staging buffer
+	void* dstPtr = static_cast<char*>(mgr.mappedStagingMemory) + mgr.stagingOffset;
+	memcpy(dstPtr, texture.data.data(), imageSize);
+
+	// Add to current batch
+	ImageManager::BatchedUpload upload;
+	upload.imageId = imageId;
+	upload.layer = layer;
+	upload.bufferOffset = mgr.stagingOffset;
+	upload.width = texture.width;
+	upload.height = texture.height;
+	mgr.currentBatch.push_back(upload);
+
+	mgr.stagingOffset += imageSize;
+	return true;
+}
+
+static void flushBatchedUploads(ImageManager& mgr) {
+	if (mgr.currentBatch.empty() || !mgr.mappedStagingMemory) {
+		return;
+	}
+
+	VkCommandPool cmdPool = mgr.useTransferQueue ? mgr.transferCommandPool : mgr.commandPool;
+	VkQueue queue = mgr.useTransferQueue ? mgr.transferQueue : mgr.graphicsQueue;
+
+	// Begin command buffer
+	VkCommandBuffer commandBuffer = beginSingleTimeCommands(mgr.device, cmdPool);
+
+	// Collect all layer transitions and copy regions
+	std::vector<VkImageMemoryBarrier> preTransitions;
+	std::vector<VkBufferImageCopy> copyRegions;
+	std::vector<VkImageMemoryBarrier> postTransitions;
+
+	preTransitions.reserve(mgr.currentBatch.size());
+	copyRegions.reserve(mgr.currentBatch.size());
+	postTransitions.reserve(mgr.currentBatch.size());
+
+	// Build batch operations
+	for (const auto& upload : mgr.currentBatch) {
+		// Pre-transition: Undefined -> Transfer Dst
+		if (mgr.atlas.layerLayouts[upload.layer] != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+			VkImageMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barrier.oldLayout = mgr.atlas.layerLayouts[upload.layer];
+			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = mgr.atlas.atlasArray.image;
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			barrier.subresourceRange.baseMipLevel = 0;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.baseArrayLayer = upload.layer;
+			barrier.subresourceRange.layerCount = 1;
+			barrier.srcAccessMask = 0;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			preTransitions.push_back(barrier);
+			mgr.atlas.layerLayouts[upload.layer] = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		}
+
+		// Copy region
+		VkBufferImageCopy region{};
+		region.bufferOffset = upload.bufferOffset;
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = 0;
+		region.imageSubresource.baseArrayLayer = upload.layer;
+		region.imageSubresource.layerCount = 1;
+		region.imageOffset = {0, 0, 0};
+		region.imageExtent = {upload.width, upload.height, 1};
+
+		copyRegions.push_back(region);
+
+		// Post-transition: Transfer Dst -> Shader Read Only
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = mgr.atlas.atlasArray.image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = upload.layer;
+		barrier.subresourceRange.layerCount = 1;
+		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		postTransitions.push_back(barrier);
+		mgr.atlas.layerLayouts[upload.layer] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+
+	// Execute pre-transitions
+	if (!preTransitions.empty()) {
+		vkCmdPipelineBarrier(commandBuffer,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, nullptr, 0, nullptr,
+			static_cast<uint32_t>(preTransitions.size()), preTransitions.data());
+	}
+
+	// Execute batch copy
+	if (!copyRegions.empty()) {
+		vkCmdCopyBufferToImage(commandBuffer, mgr.persistentStagingBuffer.buffer,
+			mgr.atlas.atlasArray.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			static_cast<uint32_t>(copyRegions.size()), copyRegions.data());
+	}
+
+	// Execute post-transitions
+	if (!postTransitions.empty()) {
+		vkCmdPipelineBarrier(commandBuffer,
+			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0, 0, nullptr, 0, nullptr,
+			static_cast<uint32_t>(postTransitions.size()), postTransitions.data());
+	}
+
+	// Submit command buffer
+	endSingleTimeCommands(mgr.device, cmdPool, queue, commandBuffer);
+
+	// Clear batch and reset staging offset
+	mgr.currentBatch.clear();
+	mgr.stagingOffset = 0;
+}
+
 static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer) {
 	auto texIt = mgr.atlas.textureCache.find(imageId);
 	if (texIt == mgr.atlas.textureCache.end()) {
@@ -5168,7 +5375,24 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 		return;
 	}
 
-	// Create staging buffer
+	// Try to add to batch
+	if (addTextureToBatch(mgr, imageId, layer, texture)) {
+		// Check if batch is full or should be flushed
+		if (mgr.currentBatch.size() >= ImageManager::BATCH_SIZE) {
+			flushBatchedUploads(mgr);
+		}
+		return;
+	}
+
+	// If batching failed (e.g., staging buffer full), flush and try again
+	if (!mgr.currentBatch.empty()) {
+		flushBatchedUploads(mgr);
+		if (addTextureToBatch(mgr, imageId, layer, texture)) {
+			return;
+		}
+	}
+
+	// Fallback to individual upload if batching completely failed
 	BufferWithMemory stagingBuffer;
 	VkDeviceSize imageSize = texture.data.size();
 	createBuffer(mgr.physicalDevice, mgr.device, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer);
@@ -5177,11 +5401,9 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 	memcpy(data, texture.data.data(), static_cast<size_t>(imageSize));
 	unmapMemory(mgr.device, stagingBuffer.memory);
 
-	// Transition image layout for transfer
 	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layer);
 	mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-	// Copy buffer to image
 	VkCommandBuffer commandBuffer = beginSingleTimeCommands(mgr.device, mgr.commandPool);
 
 	VkBufferImageCopy region{};
@@ -5193,19 +5415,14 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 	region.imageSubresource.baseArrayLayer = layer;
 	region.imageSubresource.layerCount = 1;
 	region.imageOffset = {0, 0, 0};
-
-	// Images are now pre-resized to atlas size
 	region.imageExtent = {texture.width, texture.height, 1};
 
 	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, mgr.atlas.atlasArray.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
 	endSingleTimeCommands(mgr.device, mgr.commandPool, mgr.graphicsQueue, commandBuffer);
 
-	// Transition image layout for shader reading
 	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer);
 	mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-	// Cleanup staging buffer
 	vkDestroyBuffer(mgr.device, stagingBuffer.buffer, nullptr);
 	vkFreeMemory(mgr.device, stagingBuffer.memory, nullptr);
 }
@@ -5471,6 +5688,11 @@ static void updateImageManager(ImageManager& mgr) {
 }
 
 static void finalizeImageManagerUpdate(ImageManager& mgr) {
+	// Flush any pending batched uploads
+	if (!mgr.currentBatch.empty()) {
+		flushBatchedUploads(mgr);
+	}
+
 	if (mgr.atlas.lookupDirty) {
 		syncAtlasLookupBuffer(mgr);
 	}
@@ -5530,6 +5752,24 @@ static void destroyImageManager(ImageManager& mgr) {
 		if (thread.joinable()) {
 			thread.join();
 		}
+	}
+
+	// Clean up batching resources
+	if (mgr.mappedStagingMemory) {
+		unmapMemory(mgr.device, mgr.persistentStagingBuffer.memory);
+		mgr.mappedStagingMemory = nullptr;
+	}
+	if (mgr.persistentStagingBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(mgr.device, mgr.persistentStagingBuffer.buffer, nullptr);
+		mgr.persistentStagingBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (mgr.persistentStagingBuffer.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(mgr.device, mgr.persistentStagingBuffer.memory, nullptr);
+		mgr.persistentStagingBuffer.memory = VK_NULL_HANDLE;
+	}
+	if (mgr.transferCommandPool != VK_NULL_HANDLE) {
+		vkDestroyCommandPool(mgr.device, mgr.transferCommandPool, nullptr);
+		mgr.transferCommandPool = VK_NULL_HANDLE;
 	}
 
 	destroyGpuStreamResources(mgr);
