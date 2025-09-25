@@ -302,12 +302,12 @@ struct VRAMBudget {
 
 #### Implementation Roadmap
 
-**Priority 0.5a: Parallel Decoding** (Immediate - 1-2 days)
-- [ ] Create thread pool with 8 decoder threads (tune to `std::thread::hardware_concurrency()`)
-- [ ] Implement lock-free work queue using atomic operations
-- [ ] Pre-allocate decode buffers (one 256×256×4 buffer per thread)
-- [ ] Enable STB SIMD optimizations (`STBI_SSE2`, `STBIR_SSE2`)
-- [ ] Replace single loader thread in `initImageManager()`
+**Priority 0.5a: Parallel Decoding** ✅ COMPLETED
+- [x] Create thread pool with 8 decoder threads (tune to `std::thread::hardware_concurrency()`)
+- [x] Implement lock-free work queue using atomic operations
+- [x] Pre-allocate decode buffers (one 256×256×4 buffer per thread)
+- [x] Enable STB SIMD optimizations (`STBI_SSE2`, `STBIR_SSE2`)
+- [x] Replace single loader thread in `initImageManager()`
 
 **Priority 0.5b: Batched GPU Upload** (1-2 days after 0.5a)
 - [ ] Create persistent 256MB staging buffer at init

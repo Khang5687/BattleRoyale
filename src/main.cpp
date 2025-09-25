@@ -30,6 +30,12 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../stb/stb_truetype.h"
 
+// Enable SIMD optimizations for STB
+#ifdef __SSE2__
+#include <emmintrin.h>
+#define STBI_SSE2
+#define STBIR_SSE2
+#endif
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -426,11 +432,28 @@ struct ImageManager {
 	TextureAtlas atlas;
 	GpuStreamContext gpuStream;
 
-	// Background loading thread
-	std::thread loaderThread;
+	// Thread pool for parallel decoding
+	std::vector<std::thread> decoderThreads;
 	std::atomic<bool> stopLoading{false};
-	std::mutex requestMutex;
-	std::queue<uint32_t> loadRequests;
+
+	// Lock-free work queue using atomic operations
+	struct alignas(64) WorkItem {
+		std::atomic<uint32_t> imageId{UINT32_MAX};
+	};
+	static constexpr size_t WORK_QUEUE_SIZE = 1024;
+	std::array<WorkItem, WORK_QUEUE_SIZE> workQueue;
+	std::atomic<size_t> workHead{0};
+	std::atomic<size_t> workTail{0};
+
+	// Pre-allocated decode buffers per thread
+	struct DecodeBuffer {
+		std::vector<unsigned char> data;
+		DecodeBuffer() {
+			data.resize(256 * 256 * 4); // Pre-allocate 256x256x4 buffer
+		}
+	};
+	std::vector<DecodeBuffer> decodeBuffers;
+
 	std::mutex uploadMutex;
 	std::queue<std::pair<uint32_t, LoadedTexture>> pendingUploads;
 
@@ -4720,87 +4743,109 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 		}
 	}
 
-	// Create background loading thread
-	mgr.loaderThread = std::thread([&mgr]() {
-		while (!mgr.stopLoading) {
-			uint32_t imageId = UINT32_MAX;
+	// Initialize decode buffers and create thread pool
+	const uint32_t numThreads = std::max(8u, std::thread::hardware_concurrency());
+	mgr.decodeBuffers.resize(numThreads);
 
-			// Check for load requests
-			{
-				std::lock_guard<std::mutex> lock(mgr.requestMutex);
-				if (!mgr.loadRequests.empty()) {
-					imageId = mgr.loadRequests.front();
-					mgr.loadRequests.pop();
+	// Create decoder thread pool
+	mgr.decoderThreads.reserve(numThreads);
+	for (uint32_t threadIndex = 0; threadIndex < numThreads; ++threadIndex) {
+		mgr.decoderThreads.emplace_back([&mgr, threadIndex]() {
+			ImageManager::DecodeBuffer& buffer = mgr.decodeBuffers[threadIndex];
+
+			while (!mgr.stopLoading) {
+				uint32_t imageId = UINT32_MAX;
+
+				// Try to dequeue work from lock-free queue
+				const size_t head = mgr.workHead.load(std::memory_order_acquire);
+				if (head != mgr.workTail.load(std::memory_order_acquire)) {
+					const size_t index = head % ImageManager::WORK_QUEUE_SIZE;
+					imageId = mgr.workQueue[index].imageId.exchange(UINT32_MAX, std::memory_order_acq_rel);
+
+					if (imageId != UINT32_MAX) {
+						mgr.workHead.store(head + 1, std::memory_order_release);
+					}
 				}
-			}
 
-			if (imageId == UINT32_MAX) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				continue;
-			}
+				if (imageId == UINT32_MAX) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					continue;
+				}
 
-			// Load image using stb_image
-			if (imageId < mgr.atlas.imageFiles.size()) {
-				std::string path = mgr.atlas.imageFiles[imageId].string();
-				int width, height, channels;
-				unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4); // Force RGBA
+				// Load image using stb_image
+				if (imageId < mgr.atlas.imageFiles.size()) {
+					std::string path = mgr.atlas.imageFiles[imageId].string();
+					int width, height, channels;
+					unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4); // Force RGBA
 
-				if (data) {
-					LoadedTexture tex;
-					
-					// Resize image to atlas size if needed
-					if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
-						// Allocate buffer for resized image
-						tex.data.resize(TextureAtlas::ATLAS_SIZE * TextureAtlas::ATLAS_SIZE * 4);
-						
-						// Resize using stb_image_resize2
-						unsigned char* result = stbir_resize_uint8_linear(
-							data, width, height, 0,
-							tex.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
-							STBIR_RGBA
-						);
-						
-						if (result == nullptr) {
-							// Resize failed, skip this image
-							stbi_image_free(data);
-							mgr.loadFailCount++;
-							continue;
+					if (data) {
+						LoadedTexture tex;
+
+						// Resize image to atlas size if needed
+						if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
+							// Use pre-allocated buffer for resize
+							unsigned char* result = stbir_resize_uint8_linear(
+								data, width, height, 0,
+								buffer.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
+								STBIR_RGBA
+							);
+
+							if (result == nullptr) {
+								// Resize failed, skip this image
+								stbi_image_free(data);
+								mgr.loadFailCount++;
+								continue;
+							}
+
+							// Copy from pre-allocated buffer to texture
+							tex.data.resize(TextureAtlas::ATLAS_SIZE * TextureAtlas::ATLAS_SIZE * 4);
+							std::memcpy(tex.data.data(), buffer.data.data(), tex.data.size());
+							tex.width = TextureAtlas::ATLAS_SIZE;
+							tex.height = TextureAtlas::ATLAS_SIZE;
+						} else {
+							// Image is already the right size
+							tex.width = static_cast<uint32_t>(width);
+							tex.height = static_cast<uint32_t>(height);
+							tex.data.resize(width * height * 4);
+							std::memcpy(tex.data.data(), data, tex.data.size());
 						}
-						
-						tex.width = TextureAtlas::ATLAS_SIZE;
-						tex.height = TextureAtlas::ATLAS_SIZE;
+
+						tex.refCount = 1;
+						tex.lastUsed = mgr.atlas.frameCounter;
+
+						stbi_image_free(data);
+
+						// Queue for GPU upload
+						{
+							std::lock_guard<std::mutex> lock(mgr.uploadMutex);
+							mgr.pendingUploads.emplace(imageId, std::move(tex));
+						}
+						mgr.loadSuccessCount++;
 					} else {
-						// Image is already the right size
-						tex.width = static_cast<uint32_t>(width);
-						tex.height = static_cast<uint32_t>(height);
-						tex.data.resize(width * height * 4);
-						std::memcpy(tex.data.data(), data, tex.data.size());
+						// Loading failed
+						mgr.loadFailCount++;
+						std::cout << "ERROR: Failed to load image ID " << imageId << std::endl;
 					}
-					
-					tex.refCount = 1;
-					tex.lastUsed = mgr.atlas.frameCounter;
-
-					stbi_image_free(data);
-
-					// Queue for GPU upload
-					{
-						std::lock_guard<std::mutex> lock(mgr.uploadMutex);
-						mgr.pendingUploads.emplace(imageId, std::move(tex));
-					}
-					mgr.loadSuccessCount++;
-				} else {
-					// Loading failed
-					mgr.loadFailCount++;
-					std::cout << "ERROR: Failed to load image ID " << imageId << std::endl;
 				}
 			}
-		}
-	});
+		});
+	}
 }
 
 static void requestImageLoad(ImageManager& mgr, uint32_t imageId) {
-	std::lock_guard<std::mutex> lock(mgr.requestMutex);
-	mgr.loadRequests.push(imageId);
+	// Enqueue work to lock-free queue
+	const size_t tail = mgr.workTail.load(std::memory_order_acquire);
+	const size_t nextTail = tail + 1;
+
+	// Check if queue is full
+	if (nextTail - mgr.workHead.load(std::memory_order_acquire) >= ImageManager::WORK_QUEUE_SIZE) {
+		// Queue is full, could handle overflow here (for now, just return)
+		return;
+	}
+
+	const size_t index = tail % ImageManager::WORK_QUEUE_SIZE;
+	mgr.workQueue[index].imageId.store(imageId, std::memory_order_release);
+	mgr.workTail.store(nextTail, std::memory_order_release);
 }
 
 static VkCommandBuffer beginSingleTimeCommands(VkDevice device, VkCommandPool commandPool) {
@@ -5481,8 +5526,10 @@ static void destroyImageManager(ImageManager& mgr) {
 	if (mgr.device == VK_NULL_HANDLE) return;
 
 	mgr.stopLoading = true;
-	if (mgr.loaderThread.joinable()) {
-		mgr.loaderThread.join();
+	for (auto& thread : mgr.decoderThreads) {
+		if (thread.joinable()) {
+			thread.join();
+		}
 	}
 
 	destroyGpuStreamResources(mgr);
