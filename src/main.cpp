@@ -416,11 +416,34 @@ struct LoadPriority {
 	uint64_t currentFrame = 0;
 
 	float computeScore() const {
-		float distanceScore = 1000.0f / (1.0f + std::max(distanceToPlayer, 0.0f));
-		float radiusScore = circleRadius * 10.0f;
-		float recencyScore = lastAccessFrame > 0 ? 500.0f : 0.0f;
-		float agingScore = (currentFrame > lastRequestFrame) ? static_cast<float>(currentFrame - lastRequestFrame) * 5.0f : 0.0f;
-		return distanceScore + radiusScore + recencyScore + agingScore;
+		// Enhanced lazy loading priority calculation
+
+		// Visibility threshold - skip images for circles too small to be meaningful
+		const float MIN_VISIBLE_RADIUS = 1.5f; // Below this, use solid color fallback
+		if (circleRadius < MIN_VISIBLE_RADIUS) {
+			return 0.0f; // Skip loading entirely - will use fallback rendering
+		}
+
+		// Enhanced distance scoring with exponential falloff for proximity
+		float distanceScore = 2000.0f / (1.0f + distanceToPlayer * distanceToPlayer * 0.01f);
+
+		// Radius scoring with diminishing returns for very large circles
+		float radiusScore = std::min(circleRadius * 15.0f, 300.0f);
+
+		// Strong boost for recently accessed images (memory locality)
+		float recencyScore = lastAccessFrame > 0 ? 800.0f : 0.0f;
+
+		// Progressive aging bonus for pending requests (prevent starvation)
+		float agingScore = (currentFrame > lastRequestFrame) ?
+			std::min(static_cast<float>(currentFrame - lastRequestFrame) * 8.0f, 400.0f) : 0.0f;
+
+		// Immediate visibility bonus for close, large circles
+		float visibilityBonus = 0.0f;
+		if (distanceToPlayer < 50.0f && circleRadius > 5.0f) {
+			visibilityBonus = 1000.0f; // High priority for immediately visible content
+		}
+
+		return distanceScore + radiusScore + recencyScore + agingScore + visibilityBonus;
 	}
 };
 
@@ -588,6 +611,7 @@ struct ImageManager {
 
 	PreloadPhase currentPreloadPhase = PreloadPhase::NONE;
 	std::atomic<bool> preloadingActive{false};
+	std::atomic<bool> preloadingCompleted{false};
 	std::atomic<size_t> preloadTarget{0};
 	std::chrono::steady_clock::time_point preloadStartTime;
 };
@@ -5650,7 +5674,7 @@ static bool queueGpuStreamUpload(ImageManager& mgr, uint32_t imageId, uint32_t l
 }
 
 static void startPreloading(ImageManager& mgr, const class Simulation& sim) {
-	if (mgr.preloadingActive.load() || mgr.atlas.imageFiles.empty()) {
+	if (mgr.preloadingActive.load() || mgr.preloadingCompleted.load() || mgr.atlas.imageFiles.empty()) {
 		return;
 	}
 
@@ -5761,10 +5785,12 @@ static void updatePreloading(ImageManager& mgr, const class Simulation& sim) {
 			if (currentLoaded >= mgr.atlas.imageFiles.size() * 0.95f) {
 				phaseComplete = true;
 				mgr.preloadingActive = false;
+				mgr.preloadingCompleted = true;
 
 				auto endTime = std::chrono::steady_clock::now();
 				auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - mgr.preloadStartTime);
 				std::cout << "Preloading complete! Loaded " << currentLoaded << " images in " << duration.count() << "ms" << std::endl;
+				std::cout << "Press SPACE to start the battle!" << std::endl;
 			}
 			break;
 
@@ -6161,8 +6187,13 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 	auto texIt = mgr.atlas.textureCache.find(imageId);
 	if (texIt == mgr.atlas.textureCache.end()) {
 		LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
-		requestImageLoad(mgr, imageId, priority);
-		return -1; // Not available yet
+
+		// Enhanced lazy loading: only request if priority score indicates the image is worth loading
+		float score = priority.computeScore();
+		if (score > 0.0f) {
+			requestImageLoad(mgr, imageId, priority);
+		}
+		return -1; // Not available yet (either loading or skipped due to low priority)
 	}
 
 	// Find free layer or evict LRU
@@ -6879,7 +6910,7 @@ int main(int argc, char** argv) {
 	hudVertices.reserve(1024);
 
 	uint32_t currentFrame = 0;
-	bool isPaused = true; // Start paused by default
+	bool isPaused = false; // Start unpaused - lazy loading handles images on-demand
 
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
@@ -7027,14 +7058,9 @@ int main(int argc, char** argv) {
 		updateImageManager(imageManager); // Process pending texture uploads
 		finalizeImageManagerUpdate(imageManager);
 
-		// Startup preloading system - runs during pause state
-		if (isPaused && !imageManager.preloadingActive.load()) {
-			// Start preloading on first paused frame
-			startPreloading(imageManager, sim);
-		} else if (imageManager.preloadingActive.load()) {
-			// Update preloading progress
-			updatePreloading(imageManager, sim);
-		}
+		// Lazy loading system - images loaded on-demand during rendering
+		// Note: Aggressive preloading has been disabled in favor of proximity-based lazy loading
+		// Images are now loaded automatically via getAtlasLayerForImage() when needed for rendering
 
 		// Always update zoom factor to prevent teleportation on unpause
 		// TODO: New camera system update will go here
