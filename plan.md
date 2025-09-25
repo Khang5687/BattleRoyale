@@ -1226,6 +1226,245 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
 
 ---
 
+### 🚀 PRIORITY 0.75 – Massive Scale Circle Support (50k-500k Players) ⚡ CRITICAL SCALING
+**TARGET**: Enable battle royale simulations with 50,000 to 500,000+ circles while maintaining 60+ FPS through aggressive "speck of dust" optimizations and adaptive simulation tiers.
+
+**CURRENT STATUS ANALYSIS**:
+✅ **Excellent Foundation Already Implemented**:
+- **AdaptiveCircleSimulation** with 4-tier system (Individual/Clustered/Statistical/Invisible) ✅ `main.cpp:1519-2142`
+- **CircleRenderTier LOD** with 4 levels (PixelDust/SimpleShape/BasicTexture/FullDetail) ✅ `main.cpp:260-819`
+- **Statistical clustering** for dust-level circles (100k-1M+ entities) ✅ `main.cpp:1408-1476`
+- **GPU-driven culling** (P1-P4 stages) with frustum/occlusion culling ✅ Implemented
+- **writeInstancesWithLOD()** sophisticated rendering system ✅ `main.cpp:2145-2271`
+- **Pixel aggregation** for overlapping sub-pixel entities ✅ `main.cpp:1773-1808`
+
+**CURRENT LIMITATIONS** (Blocking 50k+ scale):
+❌ **Configuration Scaling**: size_factors.txt only covers up to 5,000 players, but system has 5,809 real images
+❌ **Memory Pre-allocation**: All entity arrays (posX, posY, etc.) allocated for full maxPlayers count
+❌ **GPU Buffer Sizing**: Culling/indirect buffers sized for maxPlayers regardless of visible entities
+❌ **Fake Player Generation**: No synthetic player system beyond real images (needed for 50k+ scale)
+❌ **Image Loading Bottleneck**: Single-threaded loader cannot handle 50k+ image files efficiently
+
+### 🎯 Massive Scale Architecture Strategy
+
+#### Phase 1: Configuration & Fake Player System (Immediate - 2 days)
+
+**Problem**: Current system limited to 5,809 real images but adaptive architecture designed for 1M+ entities
+
+**Solution**: Hybrid real/fake player system with procedural generation
+```cpp
+struct MassiveScaleConfig {
+    uint32_t realPlayerCount = 5809;      // Actual image files available
+    uint32_t fakePlayerThreshold = 10000; // Below this, use some real images
+    uint32_t targetPlayerCount = 50000;   // Total desired players
+
+    // Fake player generation strategy
+    struct FakePlayerSpec {
+        float radiusVariance = 0.1f;       // Slight size variation
+        uint32_t colorPaletteSize = 16;    // Limited color palette for fakes
+        bool enableProceduralTextures = true; // Generate simple patterns
+    };
+};
+
+void generateFakePlayers(Simulation& sim, const MassiveScaleConfig& config) {
+    uint32_t fakeCount = config.targetPlayerCount - std::min(config.realPlayerCount, config.fakePlayerThreshold);
+
+    for (uint32_t i = 0; i < fakeCount; ++i) {
+        uint32_t idx = config.realPlayerCount + i;
+
+        // Assign fake properties optimized for dust-tier rendering
+        sim.imageId[idx] = UINT32_MAX;  // No texture - flat color only
+        sim.imageTier[idx] = 0;         // Start as flat color tier
+
+        // Procedural color from limited palette
+        uint32_t colorIndex = i % config.fakePlayerSpec.colorPaletteSize;
+        sim.fakePlayerColors[idx] = generatePaletteColor(colorIndex);
+
+        // Slightly varied radius for realism
+        sim.initialRadius[idx] = sim.baseRadius * (1.0f + (rand() % 200 - 100) * 0.001f);
+    }
+}
+```
+
+**Extended size_factors.txt Configuration**:
+```txt
+# Massive Scale Size Factors Configuration
+50000: 0.002    # 50k players: very small initial circles
+100000: 0.001   # 100k players: speck-level
+200000: 0.0008  # 200k players: dust-level
+500000: 0.0005  # 500k players: barely visible
+```
+
+#### Phase 2: Memory Optimization & Lazy Allocation (2-3 days)
+
+**Problem**: O(N) memory allocation for all entities regardless of simulation tier
+
+**Solution**: Tiered memory pools with lazy allocation
+```cpp
+struct TieredMemoryManager {
+    // Only allocate full data for individual-tier entities
+    struct IndividualPool {
+        std::vector<float> posX, posY, velX, velY;  // Full physics data
+        std::vector<float> health, radius;
+        std::vector<uint32_t> imageId;
+        void resize(size_t count) { /* resize all vectors */ }
+    };
+
+    // Clustered entities: reduced data per cluster
+    struct ClusteredPool {
+        std::vector<vec2> clusterPositions;
+        std::vector<float> clusterMass;
+        std::vector<std::vector<uint32_t>> memberIndices;  // Sparse storage
+        void addToCluster(uint32_t clusterId, uint32_t entityId);
+    };
+
+    // Statistical entities: minimal statistical data
+    struct StatisticalPool {
+        std::vector<StatisticalCluster> clusters;  // Already implemented!
+        uint32_t totalStatisticalEntities = 0;     // Just count, not individual data
+    };
+
+    // Memory usage tracking
+    size_t calculateMemoryUsage() const {
+        return individualPool.posX.size() * sizeof(float) * 6 +  // pos, vel, health, radius
+               clusteredPool.clusterPositions.size() * sizeof(vec2) +
+               statisticalPool.clusters.size() * sizeof(StatisticalCluster);
+    }
+};
+```
+
+**Adaptive Memory Strategy**:
+- **Individual Tier** (>10px apparent): Full SoA memory allocation
+- **Clustered Tier** (2-10px): Sparse cluster storage with member indices
+- **Statistical Tier** (0.5-2px): Aggregate statistical data only
+- **Invisible Tier** (<0.5px): Just count, no memory allocation
+
+#### Phase 3: GPU Buffer Scaling & Dynamic Allocation (2-3 days)
+
+**Problem**: GPU buffers pre-allocated for maxPlayers but most entities are invisible/clustered
+
+**Solution**: Dynamic GPU buffer allocation based on visible entity estimates
+```cpp
+struct AdaptiveGPUBuffers {
+    // Estimate visible entities based on zoom level and circle scaling
+    uint32_t estimateVisibleEntities(const Simulation& sim, float zoomFactor) const {
+        float avgRadius = sim.globalCurrentRadius;
+        float apparentRadius = avgRadius * zoomFactor;
+
+        if (apparentRadius < PIXEL_DUST_THRESHOLD) {
+            // Most entities invisible - only render statistical clusters
+            return static_cast<uint32_t>(sim.adaptiveSim.dustClusters.size() * 0.1f);
+        }
+
+        // Use tier classification to estimate visible count
+        uint32_t estimated = sim.adaptiveSim.individualCircles.size() +
+                            sim.adaptiveSim.mediumClusters.size() +
+                            static_cast<uint32_t>(sim.adaptiveSim.dustClusters.size() * 0.2f);
+
+        return std::min(estimated, sim.maxPlayers);
+    }
+
+    void resizeBuffersForFrame(VkDevice device, uint32_t estimatedVisible) {
+        uint32_t bufferSize = std::max(estimatedVisible * 2, 1024u);  // 2x headroom, min 1024
+
+        if (bufferSize != currentBufferSize) {
+            // Resize GPU buffers: instance buffer, culling buffer, indirect buffer
+            resizeInstanceBuffer(device, bufferSize);
+            resizeCullingBuffers(device, bufferSize);
+            resizeIndirectBuffers(device, bufferSize);
+            currentBufferSize = bufferSize;
+        }
+    }
+};
+```
+
+#### Phase 4: Procedural Texture System for Fake Players (1-2 days)
+
+**Problem**: 50k+ players need textures but only 5,809 real images available
+
+**Solution**: GPU-generated procedural textures for fake players
+```cpp
+struct ProceduralTextureGenerator {
+    // Simple patterns generated on GPU via compute shader
+    enum class PatternType {
+        SOLID_COLOR,        // Just solid color circle
+        SIMPLE_GRADIENT,    // Radial gradient
+        GEOMETRIC_PATTERN,  // Simple shapes (stripes, dots)
+        NOISE_BASED        // Procedural noise pattern
+    };
+
+    void generateProceduralTexture(uint32_t fakePlayerId, PatternType pattern,
+                                  vec3 baseColor, uint32_t atlasLayer) {
+        // Use compute shader to generate 256x256 texture directly in atlas
+        // Much faster than CPU generation + upload
+        dispatchProceduralGen(fakePlayerId, pattern, baseColor, atlasLayer);
+    }
+
+    // Pre-generate common patterns at startup
+    void preGenerateCommonPatterns() {
+        const vec3 commonColors[] = {
+            {1,0,0}, {0,1,0}, {0,0,1}, {1,1,0}, {1,0,1}, {0,1,1},
+            {0.8,0.4,0}, {0.4,0.8,0.2}, {0.6,0.2,0.8}, {0.9,0.5,0.1}
+        };
+
+        for (size_t i = 0; i < 16; ++i) {  // Generate 16 base patterns
+            uint32_t layer = allocateAtlasLayer();
+            PatternType pattern = static_cast<PatternType>(i % 4);
+            vec3 color = commonColors[i % 10];
+            generateProceduralTexture(FAKE_PLAYER_BASE_ID + i, pattern, color, layer);
+        }
+    }
+};
+```
+
+#### Performance Projections for Massive Scale
+
+| Player Count | Individual Tier | Clustered Tier | Statistical Tier | Invisible Tier | GPU Instances | Expected FPS |
+|--------------|-----------------|----------------|------------------|----------------|---------------|--------------|
+| **5,000** (Current) | 2,000 | 2,000 | 1,000 | 0 | ~4,000 | 60+ FPS ✅ |
+| **50,000** (Target) | 2,000 | 5,000 | 30,000 | 13,000 | ~7,000 | 60+ FPS |
+| **100,000** (Stretch) | 2,000 | 5,000 | 50,000 | 43,000 | ~7,000 | 45+ FPS |
+| **500,000** (Ultimate) | 2,000 | 3,000 | 100,000 | 395,000 | ~5,000 | 30+ FPS |
+
+**Key Insight**: GPU rendering load stays nearly constant (~2-7k instances) regardless of total player count due to adaptive simulation tiers. Most players become invisible "dust" that doesn't render individually.
+
+#### Implementation Roadmap
+
+**Priority 0.75a: Configuration Scaling** (1 day)
+- [ ] Extend size_factors.txt with 50k-500k player configurations
+- [ ] Implement fake player generation system with procedural colors
+- [ ] Add command-line parameter for target player count (`--players 50000`)
+- [ ] Validate current adaptive simulation works with large fake player counts
+
+**Priority 0.75b: Memory Optimization** (2 days)
+- [ ] Implement tiered memory pools (Individual/Clustered/Statistical/Invisible)
+- [ ] Add memory usage tracking and reporting in F3 diagnostics
+- [ ] Optimize entity array allocation based on simulation tiers
+- [ ] Stress test with 50k+ entities to validate memory efficiency
+
+**Priority 0.75c: GPU Buffer Scaling** (2 days)
+- [ ] Implement dynamic GPU buffer sizing based on visible entity estimates
+- [ ] Add frame-by-frame buffer resizing with headroom management
+- [ ] Optimize culling/indirect buffers for massive entity counts
+- [ ] Integration testing with P1-P4 GPU culling stages
+
+**Priority 0.75d: Procedural Texture System** (1-2 days)
+- [ ] GPU compute shader for procedural texture generation
+- [ ] Pre-generate common patterns at startup (16 base patterns)
+- [ ] Integrate with existing texture atlas system
+- [ ] Validate visual quality of procedural vs real textures
+
+**Success Criteria**:
+- ✅ **50k players**: 60+ FPS with realistic "speck of dust" rendering
+- ✅ **100k players**: 45+ FPS with statistical clustering dominance
+- ✅ **500k players**: 30+ FPS with mostly invisible/statistical entities
+- ✅ **Memory efficiency**: <4GB RAM usage regardless of total player count
+- ✅ **Visual realism**: Convincing battle royale experience despite massive scale optimizations
+
+**Integration with Image Loading**: This massive scale system works synergistically with the parallel image loading optimization - as player counts increase, the percentage needing actual textures decreases (most become "dust"), making image loading even more efficient.
+
+---
+
 ### 🚨 PRIORITY 0 – Dynamic Damage Scaling Curve System ⚡ IMMEDIATE DEVELOPMENT
 **BLOCKING ALL OTHER FEATURES** - Critical pacing control system for battle royale simulation
 
