@@ -289,20 +289,20 @@ struct VRAMBudget {
 - **Outcomes**: deterministic load ordering, predictable memory usage, and actionable metrics surfaced in debug HUD + logs.
 
 **Task Breakdown (1 day engineering + 0.5 day validation)**
-- [ ] Wire `LoadPriority` into the existing request queue:
+- [x] Wire `LoadPriority` into the existing request queue:
   - replace the FIFO vector with a binary heap keyed by `computeScore()`.
   - merge position/zoom data from `AdaptiveCircleSimulation` every 8 frames; cache per-entity priority state to avoid recomputing when unchanged.
-- [ ] Implement periodic priority rebalance:
+- [x] Implement periodic priority rebalance:
   - schedule a lightweight job on the simulation thread that rebuilds the heap every 60 frames (configurable).
   - expose `loader.setPriorityRefreshInterval()` for tuning and hook into bias/zoom events for immediate refresh.
-- [ ] Enforce VRAM budget dynamically:
+- [x] Enforce VRAM budget dynamically:
   - query `VkPhysicalDeviceMemoryProperties` during initialization, compute allowed atlas layer count via `VRAMBudget::calculateMaxLayers()`.
   - add runtime guard that blocks new uploads when `atlasLayersInUse >= budget`; trigger batched eviction before resuming uploads.
   - surface budget + usage to the HUD debug panel (text overlay) and `ImageManager` logs.
-- [ ] Batch eviction policy update:
+- [x] Batch eviction policy update:
   - extend the LRU to return a vector of candidate layers sized to match the pending upload batch.
   - ensure eviction happens on the loader thread with a fence wait so we never recycle an image still in-flight.
-- [ ] Metrics + observability:
+- [x] Metrics + observability:
   - emit `Images/sec`, `Average score of loaded batch`, and `VRAM usage %` counters once per second.
   - add a scoped timer around batch uploads and dump to log when exceeding 5 ms.
 

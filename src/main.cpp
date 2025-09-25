@@ -19,6 +19,8 @@
 #include <unordered_set>
 #include <list>
 #include <queue>
+#include <iomanip>
+#include <condition_variable>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -374,6 +376,8 @@ struct TextureAtlas {
 	std::unordered_map<uint32_t, std::list<uint32_t>::iterator> layerToLruIter;
 	std::queue<uint32_t> freeLayers;
 	std::vector<VkImageLayout> layerLayouts;
+	uint32_t layerBudget = MAX_LAYERS;
+	uint32_t layersInUse = 0;
 
 	// Texture cache
 	std::unordered_map<uint32_t, LoadedTexture> textureCache;
@@ -381,6 +385,71 @@ struct TextureAtlas {
 
 	uint32_t nextFreeLayer = 0;
 	int64_t frameCounter = 0;
+};
+
+struct VRAMBudget {
+	VkDeviceSize totalVRAM = 0;
+	VkDeviceSize textureBudgetBytes = 0;
+	float textureBudgetRatio = 0.6f;
+
+	uint32_t calculateMaxLayers() const {
+		if (textureBudgetBytes == 0) {
+			return TextureAtlas::MAX_LAYERS;
+		}
+		VkDeviceSize perLayerBytes = static_cast<VkDeviceSize>(TextureAtlas::ATLAS_SIZE) * TextureAtlas::ATLAS_SIZE * 4;
+		if (perLayerBytes == 0) {
+			return TextureAtlas::MAX_LAYERS;
+		}
+		VkDeviceSize maxByBudget = textureBudgetBytes / perLayerBytes;
+		if (maxByBudget == 0) {
+			return std::min<uint32_t>(TextureAtlas::MAX_LAYERS, 64);
+		}
+		return static_cast<uint32_t>(std::min<VkDeviceSize>(maxByBudget, TextureAtlas::MAX_LAYERS));
+	}
+};
+
+struct LoadPriority {
+	float distanceToPlayer = 10'000.0f;
+	float circleRadius = 1.0f;
+	uint64_t lastAccessFrame = 0;
+	uint64_t lastRequestFrame = 0;
+	uint64_t currentFrame = 0;
+
+	float computeScore() const {
+		float distanceScore = 1000.0f / (1.0f + std::max(distanceToPlayer, 0.0f));
+		float radiusScore = circleRadius * 10.0f;
+		float recencyScore = lastAccessFrame > 0 ? 500.0f : 0.0f;
+		float agingScore = (currentFrame > lastRequestFrame) ? static_cast<float>(currentFrame - lastRequestFrame) * 5.0f : 0.0f;
+		return distanceScore + radiusScore + recencyScore + agingScore;
+	}
+};
+
+struct CachedPriority {
+	LoadPriority metrics{};
+	float score = 0.0f;
+	uint64_t stamp = 0;
+};
+
+struct PendingInfo {
+	LoadPriority metrics{};
+	float score = 0.0f;
+	uint64_t sequence = 0;
+};
+
+struct PendingQueueEntry {
+	uint32_t imageId = UINT32_MAX;
+	float score = 0.0f;
+	LoadPriority metrics{};
+	uint64_t sequence = 0;
+};
+
+struct RequestQueueComparator {
+	bool operator()(const PendingQueueEntry& lhs, const PendingQueueEntry& rhs) const {
+		if (lhs.score == rhs.score) {
+			return lhs.sequence < rhs.sequence;
+		}
+		return lhs.score < rhs.score;
+	}
 };
 
 enum class GpuStreamRequestState : uint32_t {
@@ -431,19 +500,27 @@ struct ImageManager {
 
 	TextureAtlas atlas;
 	GpuStreamContext gpuStream;
+	VRAMBudget vramBudget;
 
 	// Thread pool for parallel decoding
 	std::vector<std::thread> decoderThreads;
 	std::atomic<bool> stopLoading{false};
 
-	// Lock-free work queue using atomic operations
-	struct alignas(64) WorkItem {
-		std::atomic<uint32_t> imageId{UINT32_MAX};
-	};
-	static constexpr size_t WORK_QUEUE_SIZE = 1024;
-	std::array<WorkItem, WORK_QUEUE_SIZE> workQueue;
-	std::atomic<size_t> workHead{0};
-	std::atomic<size_t> workTail{0};
+	// Priority-based request scheduling
+	std::priority_queue<PendingQueueEntry, std::vector<PendingQueueEntry>, RequestQueueComparator> requestQueue;
+	std::unordered_map<uint32_t, PendingInfo> pendingInfos;
+	std::unordered_set<uint32_t> decodeInFlight;
+	std::mutex requestMutex;
+	std::condition_variable requestCv;
+	std::atomic<uint64_t> requestSequence{0};
+	std::atomic<bool> priorityRebuildRequested{false};
+	uint32_t priorityRefreshInterval = 60;
+	uint32_t priorityMergeInterval = 8;
+	uint64_t lastPriorityRefreshFrame = 0;
+	uint64_t lastPriorityMergeFrame = 0;
+	std::vector<CachedPriority> cachedPriorities;
+	std::vector<uint64_t> imageLastAccessFrame;
+	std::vector<uint64_t> imageLastRequestFrame;
 
 	// Pre-allocated decode buffers per thread
 	struct DecodeBuffer {
@@ -490,6 +567,17 @@ struct ImageManager {
 	std::atomic<uint32_t> loadFailCount{0};
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 
+	// Diagnostics and metrics
+	std::atomic<uint32_t> metricsDecodedThisSecond{0};
+	std::atomic<uint64_t> metricsAccumulatedScore{0}; // score * 1000
+	std::atomic<uint32_t> metricsScoreSamples{0};
+	std::chrono::steady_clock::time_point metricsWindowStart{};
+	float metricsImagesPerSecond = 0.0f;
+	float metricsAverageScore = 0.0f;
+	float metricsVRAMUsagePercent = 0.0f;
+	float metricsLastBatchMs = 0.0f;
+	uint32_t metricsLastBatchCount = 0;
+
 	// Startup preloading system
 	enum class PreloadPhase {
 		NONE,
@@ -505,6 +593,7 @@ struct ImageManager {
 };
 
 // Forward declarations
+struct Simulation;
 class AdaptiveCircleSimulation;
 static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkDescriptorPool descriptorPool, bool enableGpuStream);
 static void pollGpuStreamCompletions(ImageManager& mgr);
@@ -535,6 +624,10 @@ struct HudFont {
 static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId);
 static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer);
 static void ensureAtlasLookupBuffer(ImageManager& mgr, size_t entryCount);
+static void prepareImageManagerForImageCount(ImageManager& mgr, size_t imageCount);
+static LoadPriority resolvePriorityForImage(ImageManager& mgr, uint32_t imageId, uint64_t currentFrame);
+static void requestPriorityRefresh(ImageManager& mgr);
+static void updateLoaderPriorityCache(ImageManager& mgr, const Simulation& sim, const AdaptiveCircleSimulation& adaptiveSim, uint64_t frameIndex, bool forceMerge);
 
 struct Simulation {
 	// Constants
@@ -721,6 +814,8 @@ struct Simulation {
 		if (imageManager) {
 			imageManager->atlas.imageFiles = files;
 			ensureAtlasLookupBuffer(*imageManager, imageManager->atlas.imageFiles.size());
+			prepareImageManagerForImageCount(*imageManager, imageManager->atlas.imageFiles.size());
+			requestPriorityRefresh(*imageManager);
 		}
 
 		uint32_t count;
@@ -2197,6 +2292,98 @@ private:
 		}
 	}
 };
+
+static void rebuildLoaderPriorityQueue(ImageManager& mgr, uint64_t frameIndex, bool force) {
+	bool shouldRebuild = force || (frameIndex >= mgr.lastPriorityRefreshFrame + mgr.priorityRefreshInterval);
+	if (!shouldRebuild) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(mgr.requestMutex);
+	if (mgr.pendingInfos.empty()) {
+		mgr.lastPriorityRefreshFrame = frameIndex;
+		return;
+	}
+	std::priority_queue<PendingQueueEntry, std::vector<PendingQueueEntry>, RequestQueueComparator> refreshed;
+	for (auto& entry : mgr.pendingInfos) {
+		uint32_t imageId = entry.first;
+		PendingInfo& info = entry.second;
+		LoadPriority refreshedPriority = resolvePriorityForImage(mgr, imageId, frameIndex);
+		if (imageId < mgr.cachedPriorities.size()) {
+			const auto& cached = mgr.cachedPriorities[imageId];
+			if (cached.stamp == frameIndex && cached.score > 0.0f) {
+				refreshedPriority = cached.metrics;
+				refreshedPriority.currentFrame = frameIndex;
+			}
+		}
+		uint64_t seq = mgr.requestSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+		refreshedPriority.lastRequestFrame = std::max(refreshedPriority.lastRequestFrame, info.metrics.lastRequestFrame);
+		info.metrics = refreshedPriority;
+		info.score = info.metrics.computeScore();
+		info.sequence = seq;
+		refreshed.push(PendingQueueEntry{imageId, info.score, info.metrics, info.sequence});
+	}
+	mgr.requestQueue.swap(refreshed);
+	mgr.lastPriorityRefreshFrame = frameIndex;
+}
+
+static void updateLoaderPriorityCache(ImageManager& mgr, const Simulation& sim, const AdaptiveCircleSimulation& adaptiveSim, uint64_t frameIndex, bool forceMerge) {
+	bool force = forceMerge;
+	if (mgr.priorityRebuildRequested.exchange(false, std::memory_order_relaxed)) {
+		force = true;
+	}
+	if (!force && mgr.priorityMergeInterval != 0 && frameIndex < mgr.lastPriorityMergeFrame + mgr.priorityMergeInterval) {
+		rebuildLoaderPriorityQueue(mgr, frameIndex, false);
+		return;
+	}
+
+	prepareImageManagerForImageCount(mgr, mgr.atlas.imageFiles.size());
+	mgr.lastPriorityMergeFrame = frameIndex;
+
+	const float zoomFactor = std::max(0.1f, adaptiveSim.currentZoomFactor);
+	const size_t entityCount = sim.posX.size();
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		if (idx >= sim.alive.size() || !sim.alive[idx]) continue;
+		uint32_t imageId = sim.imageId[idx];
+		if (imageId == UINT32_MAX || imageId >= mgr.cachedPriorities.size()) continue;
+
+		LoadPriority priority;
+		priority.distanceToPlayer = std::hypot(sim.posX[idx], sim.posY[idx]) / zoomFactor;
+		priority.circleRadius = sim.radius[idx];
+		priority.currentFrame = frameIndex;
+		if (imageId < mgr.imageLastAccessFrame.size()) {
+			priority.lastAccessFrame = mgr.imageLastAccessFrame[imageId];
+		}
+		if (imageId < mgr.imageLastRequestFrame.size()) {
+			priority.lastRequestFrame = mgr.imageLastRequestFrame[imageId];
+		}
+		if (idx < adaptiveSim.entityTiers.size()) {
+			switch (adaptiveSim.entityTiers[idx]) {
+				case CircleSimulationTier::INDIVIDUAL:
+					priority.circleRadius *= 1.2f;
+					break;
+				case CircleSimulationTier::CLUSTERED:
+					priority.circleRadius *= 0.9f;
+					break;
+				case CircleSimulationTier::STATISTICAL:
+					priority.circleRadius *= 0.6f;
+					break;
+				case CircleSimulationTier::INVISIBLE:
+					priority.circleRadius *= 0.3f;
+					break;
+			}
+		}
+
+		float score = priority.computeScore();
+		CachedPriority& cache = mgr.cachedPriorities[imageId];
+		if (cache.stamp != frameIndex || score > cache.score) {
+			cache.metrics = priority;
+			cache.score = score;
+			cache.stamp = frameIndex;
+		}
+	}
+
+	rebuildLoaderPriorityQueue(mgr, frameIndex, force);
+}
 
 // Implementation of density-based rendering system with LOD thresholds
 void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, const AdaptiveCircleSimulation& adaptiveSim, float zoomFactor) const {
@@ -4542,6 +4729,181 @@ static void destroyAtlasLookupBuffer(ImageManager& mgr) {
 	mgr.atlas.imageLayerLookupRange = sizeof(int32_t);
 }
 
+static VRAMBudget queryVRAMBudget(VkPhysicalDevice physicalDevice, float ratio) {
+	VRAMBudget budget{};
+	budget.textureBudgetRatio = ratio;
+	VkPhysicalDeviceMemoryProperties props{};
+	vkGetPhysicalDeviceMemoryProperties(physicalDevice, &props);
+	for (uint32_t i = 0; i < props.memoryHeapCount; ++i) {
+		if (props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+			budget.totalVRAM += props.memoryHeaps[i].size;
+		}
+	}
+	if (budget.totalVRAM > 0) {
+		double scaled = static_cast<double>(budget.totalVRAM) * static_cast<double>(ratio);
+		budget.textureBudgetBytes = static_cast<VkDeviceSize>(scaled);
+	} else {
+		budget.textureBudgetBytes = 0;
+	}
+	return budget;
+}
+
+static bool isLayerInFlight(const ImageManager& mgr, uint32_t layer) {
+	if (!mgr.gpuStream.enabled) {
+		return false;
+	}
+	for (const auto& slot : mgr.gpuStream.slots) {
+		if (slot.inFlight && slot.layer == layer) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void ensureAtlasLayerCapacity(ImageManager& mgr, size_t desiredFreeLayers) {
+	if (desiredFreeLayers == 0) {
+		return;
+	}
+	if (mgr.atlas.freeLayers.size() >= desiredFreeLayers) {
+		return;
+	}
+
+	size_t needed = desiredFreeLayers - mgr.atlas.freeLayers.size();
+	size_t guard = mgr.atlas.lruOrder.size();
+	while (needed > 0 && guard-- > 0 && !mgr.atlas.lruOrder.empty()) {
+		uint32_t layer = mgr.atlas.lruOrder.back();
+		if (isLayerInFlight(mgr, layer)) {
+			mgr.atlas.lruOrder.pop_back();
+			mgr.atlas.lruOrder.push_front(layer);
+			mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
+			continue;
+		}
+		mgr.atlas.lruOrder.pop_back();
+		mgr.atlas.layerToLruIter.erase(layer);
+		uint32_t evictedImageId = mgr.atlas.layerToImageId[layer];
+		if (evictedImageId != UINT32_MAX) {
+			mgr.atlas.imageIdToLayer.erase(evictedImageId);
+			if (evictedImageId < mgr.atlas.imageLayerLookupCPU.size()) {
+				mgr.atlas.imageLayerLookupCPU[evictedImageId] = -1;
+				mgr.atlas.lookupDirty = true;
+			}
+			mgr.atlas.layerToImageId[layer] = UINT32_MAX;
+		}
+		if (layer < mgr.atlas.layerLayouts.size()) {
+			mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_UNDEFINED;
+		}
+		mgr.atlas.freeLayers.push(layer);
+		if (needed > 0) {
+			--needed;
+		}
+	}
+	uint32_t freeCount = static_cast<uint32_t>(mgr.atlas.freeLayers.size());
+	if (freeCount <= mgr.atlas.layerBudget) {
+		mgr.atlas.layersInUse = mgr.atlas.layerBudget - freeCount;
+	} else {
+		mgr.atlas.layersInUse = 0;
+	}
+}
+
+static void prepareImageManagerForImageCount(ImageManager& mgr, size_t imageCount) {
+	std::lock_guard<std::mutex> lock(mgr.requestMutex);
+	mgr.cachedPriorities.resize(imageCount);
+	mgr.imageLastAccessFrame.resize(imageCount, 0);
+	mgr.imageLastRequestFrame.resize(imageCount, 0);
+}
+
+static LoadPriority resolvePriorityForImage(ImageManager& mgr, uint32_t imageId, uint64_t currentFrame) {
+	LoadPriority priority{};
+	priority.currentFrame = currentFrame;
+	if (imageId < mgr.cachedPriorities.size()) {
+		const auto& cached = mgr.cachedPriorities[imageId];
+		if (cached.score > 0.0f) {
+			priority = cached.metrics;
+			priority.currentFrame = currentFrame;
+		}
+	}
+	if (imageId < mgr.imageLastAccessFrame.size()) {
+		priority.lastAccessFrame = mgr.imageLastAccessFrame[imageId];
+	}
+	if (imageId < mgr.imageLastRequestFrame.size()) {
+		priority.lastRequestFrame = mgr.imageLastRequestFrame[imageId];
+	}
+	return priority;
+}
+
+static void requestPriorityRefresh(ImageManager& mgr) {
+	mgr.priorityRebuildRequested.store(true, std::memory_order_relaxed);
+}
+
+static void updateLoaderMetricsOnDecode(ImageManager& mgr, float score) {
+	mgr.metricsDecodedThisSecond.fetch_add(1, std::memory_order_relaxed);
+	float clampedScore = std::max(0.0f, score);
+	uint64_t scaled = static_cast<uint64_t>(clampedScore * 1000.0f);
+	mgr.metricsAccumulatedScore.fetch_add(scaled, std::memory_order_relaxed);
+	mgr.metricsScoreSamples.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void updateLoaderMetricsWindow(ImageManager& mgr) {
+	auto now = std::chrono::steady_clock::now();
+	if (mgr.metricsWindowStart.time_since_epoch().count() == 0) {
+		mgr.metricsWindowStart = now;
+	}
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - mgr.metricsWindowStart);
+	if (elapsed.count() >= 1000) {
+		uint32_t decoded = mgr.metricsDecodedThisSecond.exchange(0, std::memory_order_relaxed);
+		uint64_t scoreSum = mgr.metricsAccumulatedScore.exchange(0, std::memory_order_relaxed);
+		uint32_t samples = mgr.metricsScoreSamples.exchange(0, std::memory_order_relaxed);
+		float seconds = static_cast<float>(elapsed.count()) / 1000.0f;
+		mgr.metricsImagesPerSecond = seconds > 0.0f ? static_cast<float>(decoded) / seconds : 0.0f;
+		mgr.metricsAverageScore = (samples > 0u) ? (static_cast<float>(scoreSum) / 1000.0f) / static_cast<float>(samples) : 0.0f;
+		mgr.metricsWindowStart = now;
+	}
+	if (mgr.atlas.layerBudget > 0) {
+		float layersInUse = static_cast<float>(mgr.atlas.layerBudget - static_cast<uint32_t>(mgr.atlas.freeLayers.size()));
+		mgr.metricsVRAMUsagePercent = std::clamp(layersInUse / static_cast<float>(mgr.atlas.layerBudget) * 100.0f, 0.0f, 100.0f);
+	} else {
+		mgr.metricsVRAMUsagePercent = 0.0f;
+	}
+}
+
+static void updateLoaderMetricsOnUpload(ImageManager& mgr, size_t imageCount, float batchMs) {
+	mgr.metricsLastBatchCount = static_cast<uint32_t>(imageCount);
+	mgr.metricsLastBatchMs = batchMs;
+	if (batchMs > 5.0f) {
+		std::cout << "[P4] Texture upload batch took " << batchMs << "ms for " << imageCount << " images" << std::endl;
+	}
+}
+
+static bool dequeueNextImageRequest(ImageManager& mgr, uint32_t& imageId, LoadPriority& priority, float& score) {
+	std::unique_lock<std::mutex> lock(mgr.requestMutex);
+	while (true) {
+		mgr.requestCv.wait(lock, [&]() {
+			return mgr.stopLoading.load(std::memory_order_relaxed) || !mgr.requestQueue.empty();
+		});
+		if (mgr.stopLoading.load(std::memory_order_relaxed)) {
+			return false;
+		}
+		while (!mgr.requestQueue.empty()) {
+			PendingQueueEntry entry = mgr.requestQueue.top();
+			mgr.requestQueue.pop();
+			auto it = mgr.pendingInfos.find(entry.imageId);
+			if (it == mgr.pendingInfos.end()) {
+				continue;
+			}
+			if (it->second.sequence != entry.sequence) {
+				continue;
+			}
+			mgr.decodeInFlight.insert(entry.imageId);
+			imageId = entry.imageId;
+			priority = entry.metrics;
+			score = entry.score;
+			mgr.pendingInfos.erase(it);
+			lock.unlock();
+			return true;
+		}
+	}
+}
+
 static void syncAtlasLookupBuffer(ImageManager& mgr) {
 	if (!mgr.atlas.lookupDirty) {
 		return;
@@ -4613,7 +4975,16 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 	mgr.commandPool = commandPool;
 	mgr.graphicsQueue = graphicsQueue;
 
-	// Create texture atlas array
+	mgr.vramBudget = queryVRAMBudget(physicalDevice, mgr.vramBudget.textureBudgetRatio);
+	uint32_t computedBudget = mgr.vramBudget.calculateMaxLayers();
+	if (computedBudget == 0) {
+		computedBudget = TextureAtlas::MAX_LAYERS;
+	}
+	computedBudget = std::clamp<uint32_t>(computedBudget, 64u, TextureAtlas::MAX_LAYERS);
+	mgr.atlas.layerBudget = computedBudget;
+	mgr.metricsWindowStart = std::chrono::steady_clock::now();
+
+	// Create texture atlas array (still allocate max layers for simplicity; enforce budget logically)
 	createImage(physicalDevice, device,
 		TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, TextureAtlas::MAX_LAYERS,
 		VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
@@ -4626,9 +4997,29 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 	// Initialize LRU structures
 	mgr.atlas.layerToImageId.resize(TextureAtlas::MAX_LAYERS, UINT32_MAX);
 	mgr.atlas.layerLayouts.resize(TextureAtlas::MAX_LAYERS, VK_IMAGE_LAYOUT_UNDEFINED);
-	for (uint32_t i = 0; i < TextureAtlas::MAX_LAYERS; ++i) {
-		mgr.atlas.freeLayers.push(i);
+	{
+		std::queue<uint32_t> empty;
+		std::swap(mgr.atlas.freeLayers, empty);
+		for (uint32_t i = 0; i < mgr.atlas.layerBudget; ++i) {
+			mgr.atlas.freeLayers.push(i);
+		}
 	}
+	mgr.atlas.layersInUse = 0;
+	const double bytesToMB = 1.0 / (1024.0 * 1024.0);
+	double totalMB = static_cast<double>(mgr.vramBudget.totalVRAM) * bytesToMB;
+	VkDeviceSize perLayerBytes = static_cast<VkDeviceSize>(TextureAtlas::ATLAS_SIZE) * TextureAtlas::ATLAS_SIZE * 4;
+	double budgetMB = static_cast<double>(perLayerBytes) * static_cast<double>(mgr.atlas.layerBudget) * bytesToMB;
+	if (mgr.vramBudget.totalVRAM == 0) {
+		std::cout << "[P4] VRAM budget fallback: driver reported 0 bytes; using "
+			  << mgr.atlas.layerBudget << " atlas layers (~" << std::fixed << std::setprecision(1)
+			  << budgetMB << " MB)." << std::endl;
+	} else {
+		std::cout << "[P4] VRAM budget: device-local ~" << std::fixed << std::setprecision(1)
+			  << totalMB << " MB, reserving " << budgetMB << " MB for texture atlas ("
+			  << mgr.atlas.layerBudget << " layers)." << std::endl;
+	}
+	std::cout.unsetf(std::ios::floatfield);
+	std::cout << std::setprecision(6);
 
 	ensureAtlasLookupBuffer(mgr, 0);
 
@@ -4838,99 +5229,122 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 		mgr.decoderThreads.emplace_back([&mgr, threadIndex]() {
 			ImageManager::DecodeBuffer& buffer = mgr.decodeBuffers[threadIndex];
 
-			while (!mgr.stopLoading) {
+			while (!mgr.stopLoading.load(std::memory_order_relaxed)) {
 				uint32_t imageId = UINT32_MAX;
-
-				// Try to dequeue work from lock-free queue
-				const size_t head = mgr.workHead.load(std::memory_order_acquire);
-				if (head != mgr.workTail.load(std::memory_order_acquire)) {
-					const size_t index = head % ImageManager::WORK_QUEUE_SIZE;
-					imageId = mgr.workQueue[index].imageId.exchange(UINT32_MAX, std::memory_order_acq_rel);
-
-					if (imageId != UINT32_MAX) {
-						mgr.workHead.store(head + 1, std::memory_order_release);
-					}
+				LoadPriority priority{};
+				float score = 0.0f;
+				if (!dequeueNextImageRequest(mgr, imageId, priority, score)) {
+					break;
 				}
-
-				if (imageId == UINT32_MAX) {
-					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				if (imageId == UINT32_MAX || imageId >= mgr.atlas.imageFiles.size()) {
+					std::lock_guard<std::mutex> lock(mgr.requestMutex);
+					mgr.decodeInFlight.erase(imageId);
 					continue;
 				}
 
-				// Load image using stb_image
-				if (imageId < mgr.atlas.imageFiles.size()) {
-					std::string path = mgr.atlas.imageFiles[imageId].string();
-					int width, height, channels;
-					unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4); // Force RGBA
-
-					if (data) {
-						LoadedTexture tex;
-
-						// Resize image to atlas size if needed
-						if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
-							// Use pre-allocated buffer for resize
-							unsigned char* result = stbir_resize_uint8_linear(
-								data, width, height, 0,
-								buffer.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
-								STBIR_RGBA
-							);
-
-							if (result == nullptr) {
-								// Resize failed, skip this image
-								stbi_image_free(data);
-								mgr.loadFailCount++;
-								continue;
-							}
-
-							// Copy from pre-allocated buffer to texture
+				std::string path = mgr.atlas.imageFiles[imageId].string();
+				int width = 0, height = 0, channels = 0;
+				unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+				bool success = false;
+				if (data) {
+					LoadedTexture tex;
+					if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
+						unsigned char* result = stbir_resize_uint8_linear(
+							data, width, height, 0,
+							buffer.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
+							STBIR_RGBA);
+						if (result != nullptr) {
 							tex.data.resize(TextureAtlas::ATLAS_SIZE * TextureAtlas::ATLAS_SIZE * 4);
 							std::memcpy(tex.data.data(), buffer.data.data(), tex.data.size());
 							tex.width = TextureAtlas::ATLAS_SIZE;
 							tex.height = TextureAtlas::ATLAS_SIZE;
-						} else {
-							// Image is already the right size
-							tex.width = static_cast<uint32_t>(width);
-							tex.height = static_cast<uint32_t>(height);
-							tex.data.resize(width * height * 4);
-							std::memcpy(tex.data.data(), data, tex.data.size());
+							success = true;
 						}
+					} else {
+						tex.width = static_cast<uint32_t>(width);
+						tex.height = static_cast<uint32_t>(height);
+						tex.data.resize(static_cast<size_t>(width) * height * 4);
+						std::memcpy(tex.data.data(), data, tex.data.size());
+						success = true;
+					}
 
+					if (success) {
 						tex.refCount = 1;
 						tex.lastUsed = mgr.atlas.frameCounter;
 
-						stbi_image_free(data);
-
-						// Queue for GPU upload
 						{
 							std::lock_guard<std::mutex> lock(mgr.uploadMutex);
 							mgr.pendingUploads.emplace(imageId, std::move(tex));
 						}
 						mgr.loadSuccessCount++;
+						updateLoaderMetricsOnDecode(mgr, score);
 					} else {
-						// Loading failed
 						mgr.loadFailCount++;
 						std::cout << "ERROR: Failed to load image ID " << imageId << std::endl;
 					}
+
+					stbi_image_free(data);
+				} else {
+					mgr.loadFailCount++;
+					std::cout << "ERROR: Failed to open image path for ID " << imageId << std::endl;
+				}
+
+				{
+					std::lock_guard<std::mutex> lock(mgr.requestMutex);
+					mgr.decodeInFlight.erase(imageId);
 				}
 			}
 		});
 	}
 }
 
-static void requestImageLoad(ImageManager& mgr, uint32_t imageId) {
-	// Enqueue work to lock-free queue
-	const size_t tail = mgr.workTail.load(std::memory_order_acquire);
-	const size_t nextTail = tail + 1;
-
-	// Check if queue is full
-	if (nextTail - mgr.workHead.load(std::memory_order_acquire) >= ImageManager::WORK_QUEUE_SIZE) {
-		// Queue is full, could handle overflow here (for now, just return)
+static void requestImageLoad(ImageManager& mgr, uint32_t imageId, const LoadPriority& priority) {
+	if (imageId == UINT32_MAX) {
 		return;
 	}
+	if (imageId >= mgr.atlas.imageFiles.size()) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(mgr.requestMutex);
+		if (mgr.atlas.textureCache.find(imageId) != mgr.atlas.textureCache.end()) {
+			return; // already resident
+		}
+		if (mgr.decodeInFlight.find(imageId) != mgr.decodeInFlight.end()) {
+			if (imageId < mgr.imageLastRequestFrame.size()) {
+				mgr.imageLastRequestFrame[imageId] = priority.currentFrame;
+			}
+			return; // decoding in progress; let it finish
+		}
+		uint64_t seq = mgr.requestSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+		auto pendingIt = mgr.pendingInfos.find(imageId);
+		if (pendingIt == mgr.pendingInfos.end()) {
+			PendingInfo info{};
+			info.metrics = priority;
+			info.metrics.lastRequestFrame = priority.currentFrame;
+			info.score = priority.computeScore();
+			info.sequence = seq;
+			mgr.pendingInfos.emplace(imageId, info);
+			mgr.requestQueue.push(PendingQueueEntry{imageId, info.score, info.metrics, info.sequence});
+		} else {
+			PendingInfo& info = pendingIt->second;
+			info.metrics = priority;
+			info.metrics.lastRequestFrame = priority.currentFrame;
+			info.score = priority.computeScore();
+			info.sequence = seq;
+			mgr.requestQueue.push(PendingQueueEntry{imageId, info.score, info.metrics, info.sequence});
+		}
+		if (imageId < mgr.imageLastRequestFrame.size()) {
+			mgr.imageLastRequestFrame[imageId] = priority.currentFrame;
+		}
+	}
+	mgr.requestCv.notify_one();
+}
 
-	const size_t index = tail % ImageManager::WORK_QUEUE_SIZE;
-	mgr.workQueue[index].imageId.store(imageId, std::memory_order_release);
-	mgr.workTail.store(nextTail, std::memory_order_release);
+static void requestImageLoad(ImageManager& mgr, uint32_t imageId) {
+	uint64_t frame = static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter));
+	LoadPriority priority = resolvePriorityForImage(mgr, imageId, frame);
+	requestImageLoad(mgr, imageId, priority);
 }
 
 static VkCommandBuffer beginSingleTimeCommands(VkDevice device, VkCommandPool commandPool) {
@@ -5254,9 +5668,13 @@ static void startPreloading(ImageManager& mgr, const class Simulation& sim) {
 
 	std::cout << "Starting preload phase 1: loading first " << mgr.preloadTarget << " images..." << std::endl;
 
-	// Calculate priorities and load images based on circle positions
-	std::vector<std::pair<float, uint32_t>> priorities; // (priority, imageId)
-	priorities.reserve(mgr.preloadTarget);
+	struct PreloadCandidate {
+		float score;
+		uint32_t imageId;
+		LoadPriority priority;
+	};
+	std::vector<PreloadCandidate> candidates;
+	candidates.reserve(mgr.preloadTarget);
 
 	// For the first phase, use simple distance-based priority from center
 	const float centerX = 0.0f, centerY = 0.0f; // Assume world center
@@ -5266,19 +5684,26 @@ static void startPreloading(ImageManager& mgr, const class Simulation& sim) {
 		if (sim.alive[i] && sim.imageId[i] != UINT32_MAX) {
 			float dist = std::sqrt((sim.posX[i] - centerX) * (sim.posX[i] - centerX) +
 								  (sim.posY[i] - centerY) * (sim.posY[i] - centerY));
-			float priority = 1.0f / (1.0f + dist); // Higher priority for closer circles
-			priorities.emplace_back(priority, sim.imageId[i]);
+			LoadPriority priority = resolvePriorityForImage(mgr, sim.imageId[i], static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
+			priority.distanceToPlayer = dist;
+			priority.circleRadius = sim.radius[i];
+			priority.currentFrame = static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter));
+			float score = priority.computeScore();
+			candidates.push_back(PreloadCandidate{score, sim.imageId[i], priority});
 		}
 	}
 
 	// Sort by priority (highest first)
-	std::sort(priorities.begin(), priorities.end(), std::greater<>());
+	std::sort(candidates.begin(), candidates.end(), [](const PreloadCandidate& a, const PreloadCandidate& b) {
+		if (a.score == b.score) return a.imageId < b.imageId;
+		return a.score > b.score;
+	});
 
 	// Remove duplicates and request loading
 	std::unordered_set<uint32_t> requestedIds;
-	for (const auto& [priority, imageId] : priorities) {
-		if (requestedIds.insert(imageId).second) {
-			requestImageLoad(mgr, imageId);
+	for (const auto& candidate : candidates) {
+		if (requestedIds.insert(candidate.imageId).second) {
+			requestImageLoad(mgr, candidate.imageId, candidate.priority);
 			if (requestedIds.size() >= targetCount) {
 				break;
 			}
@@ -5288,9 +5713,11 @@ static void startPreloading(ImageManager& mgr, const class Simulation& sim) {
 	// Fill remaining slots with sequential loading if needed
 	for (uint32_t imageId = 0; imageId < mgr.atlas.imageFiles.size() && requestedIds.size() < targetCount; ++imageId) {
 		if (requestedIds.insert(imageId).second) {
-			requestImageLoad(mgr, imageId);
+			LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
+			requestImageLoad(mgr, imageId, priority);
 		}
 	}
+	requestPriorityRefresh(mgr);
 }
 
 static void updatePreloading(ImageManager& mgr, const class Simulation& sim) {
@@ -5313,10 +5740,11 @@ static void updatePreloading(ImageManager& mgr, const class Simulation& sim) {
 				std::cout << "Starting preload phase 2: loading " << (mgr.preloadTarget.load() - currentLoaded) << " more images (total " << mgr.preloadTarget.load() << ")..." << std::endl;
 
 				// Request additional images for phase 2
-				std::unordered_set<uint32_t> alreadyRequested;
 				for (uint32_t imageId = 512; imageId < mgr.preloadTarget.load() && imageId < mgr.atlas.imageFiles.size(); ++imageId) {
-					requestImageLoad(mgr, imageId);
+					LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
+					requestImageLoad(mgr, imageId, priority);
 				}
+				requestPriorityRefresh(mgr);
 			}
 			break;
 
@@ -5329,8 +5757,10 @@ static void updatePreloading(ImageManager& mgr, const class Simulation& sim) {
 
 				// Request remaining images
 				for (uint32_t imageId = 2048; imageId < mgr.atlas.imageFiles.size(); ++imageId) {
-					requestImageLoad(mgr, imageId);
+					LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
+					requestImageLoad(mgr, imageId, priority);
 				}
+				requestPriorityRefresh(mgr);
 			}
 			break;
 
@@ -5381,6 +5811,8 @@ static void flushBatchedUploads(ImageManager& mgr) {
 	if (mgr.currentBatch.empty() || !mgr.mappedStagingMemory) {
 		return;
 	}
+	auto start = std::chrono::steady_clock::now();
+	size_t batchCount = mgr.currentBatch.size();
 
 	VkCommandPool cmdPool = mgr.useTransferQueue ? mgr.transferCommandPool : mgr.commandPool;
 	VkQueue queue = mgr.useTransferQueue ? mgr.transferQueue : mgr.graphicsQueue;
@@ -5479,6 +5911,9 @@ static void flushBatchedUploads(ImageManager& mgr) {
 
 	// Submit command buffer
 	endSingleTimeCommands(mgr.device, cmdPool, queue, commandBuffer);
+	auto end = std::chrono::steady_clock::now();
+	float elapsedMs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0f;
+	updateLoaderMetricsOnUpload(mgr, batchCount, elapsedMs);
 
 	// Clear batch and reset staging offset
 	mgr.currentBatch.clear();
@@ -5723,14 +6158,17 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 		}
 		mgr.atlas.lruOrder.push_front(layer);
 		mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
+		if (imageId < mgr.imageLastAccessFrame.size()) {
+			mgr.imageLastAccessFrame[imageId] = static_cast<uint64_t>(mgr.atlas.frameCounter);
+		}
 		return static_cast<int32_t>(layer);
 	}
 
 	// Check if texture is loaded but not in atlas
 	auto texIt = mgr.atlas.textureCache.find(imageId);
 	if (texIt == mgr.atlas.textureCache.end()) {
-		// Request loading
-		requestImageLoad(mgr, imageId);
+		LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
+		requestImageLoad(mgr, imageId, priority);
 		return -1; // Not available yet
 	}
 
@@ -5740,19 +6178,12 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 		layer = mgr.atlas.freeLayers.front();
 		mgr.atlas.freeLayers.pop();
 	} else if (!mgr.atlas.lruOrder.empty()) {
-		// Evict LRU
-		layer = mgr.atlas.lruOrder.back();
-		uint32_t evictedImageId = mgr.atlas.layerToImageId[layer];
-		mgr.atlas.imageIdToLayer.erase(evictedImageId);
-		if (evictedImageId < mgr.atlas.imageLayerLookupCPU.size()) {
-			mgr.atlas.imageLayerLookupCPU[evictedImageId] = -1;
-			mgr.atlas.lookupDirty = true;
+		ensureAtlasLayerCapacity(mgr, std::max<size_t>(1, std::min<size_t>(ImageManager::BATCH_SIZE, mgr.atlas.lruOrder.size())));
+		if (mgr.atlas.freeLayers.empty()) {
+			return -1;
 		}
-		mgr.atlas.lruOrder.pop_back();
-		mgr.atlas.layerToLruIter.erase(layer);
-		if (layer < mgr.atlas.layerLayouts.size()) {
-			mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_UNDEFINED;
-		}
+		layer = mgr.atlas.freeLayers.front();
+		mgr.atlas.freeLayers.pop();
 	} else {
 		return -1; // No space
 	}
@@ -5769,6 +6200,10 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 		mgr.atlas.imageLayerLookupCPU[imageId] = static_cast<int32_t>(layer);
 		mgr.atlas.lookupDirty = true;
 	}
+	if (imageId < mgr.imageLastAccessFrame.size()) {
+		mgr.imageLastAccessFrame[imageId] = static_cast<uint64_t>(mgr.atlas.frameCounter);
+	}
+	mgr.atlas.layersInUse = mgr.atlas.layerBudget - static_cast<uint32_t>(mgr.atlas.freeLayers.size());
 
 	// Upload texture data to atlas layer
 	uploadTextureToAtlasLayer(mgr, imageId, layer);
@@ -5799,13 +6234,15 @@ static void pollGpuStreamCompletions(ImageManager& mgr) {
 static void updateImageManager(ImageManager& mgr) {
 	pollGpuStreamCompletions(mgr);
 	// Process pending uploads
-	std::lock_guard<std::mutex> lock(mgr.uploadMutex);
-	while (!mgr.pendingUploads.empty()) {
-		auto& [imageId, texture] = mgr.pendingUploads.front();
-		mgr.atlas.textureCache[imageId] = std::move(texture);
-		mgr.pendingUploads.pop();
+	{
+		std::lock_guard<std::mutex> lock(mgr.uploadMutex);
+		while (!mgr.pendingUploads.empty()) {
+			auto& [imageId, texture] = mgr.pendingUploads.front();
+			mgr.atlas.textureCache[imageId] = std::move(texture);
+			mgr.pendingUploads.pop();
+		}
 	}
-	// lock_guard scope ends here
+	updateLoaderMetricsWindow(mgr);
 }
 
 static void finalizeImageManagerUpdate(ImageManager& mgr) {
@@ -5869,6 +6306,7 @@ static void destroyImageManager(ImageManager& mgr) {
 	if (mgr.device == VK_NULL_HANDLE) return;
 
 	mgr.stopLoading = true;
+	mgr.requestCv.notify_all();
 	for (auto& thread : mgr.decoderThreads) {
 		if (thread.joinable()) {
 			thread.join();
@@ -6469,14 +6907,15 @@ int main(int argc, char** argv) {
 
 		// Handle spacebar for pause/unpause toggle
 		static bool spaceKeyPressed = false;
-		if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-			if (!spaceKeyPressed) {
-				isPaused = !isPaused;
-				spaceKeyPressed = true;
-			}
-		} else {
-			spaceKeyPressed = false;
+	if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+		if (!spaceKeyPressed) {
+			isPaused = !isPaused;
+			spaceKeyPressed = true;
+			requestPriorityRefresh(imageManager);
 		}
+	} else {
+		spaceKeyPressed = false;
+	}
 
 	vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
 	uint32_t previousVisibleCount = 0;
@@ -6615,10 +7054,15 @@ int main(int argc, char** argv) {
 		if (!isPaused) {
 			sim.step(dt);
 			sim.updateImageTiers(); // Update image loading tiers based on radius
+			if (imageManager.priorityMergeInterval != 0 && (frameCount % imageManager.priorityMergeInterval) == 0) {
+				requestPriorityRefresh(imageManager);
+			}
 
 			// Process optimized collision detection for clustered vs individual entities
 			adaptiveSim.processClusterCollisions(dt, sim);
 		}
+		uint64_t loaderFrameIndex = metrics.totalFrames;
+		updateLoaderPriorityCache(imageManager, sim, adaptiveSim, loaderFrameIndex, false);
 
 	// Use LOD-based rendering system with fixed zoom factor
 	sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, 1.0f); // Fixed zoom factor
@@ -6751,6 +7195,24 @@ int main(int argc, char** argv) {
 				appendHudText(hudFont, hudVertices, 24.0f, yOffset, imageText, diagTextSize, diagColor);
 				yOffset += 35.0f;
 
+				// Loader throughput metrics
+				std::ostringstream loaderSpeed;
+				loaderSpeed << std::fixed << std::setprecision(1) << imageManager.metricsImagesPerSecond;
+				std::ostringstream loaderScore;
+				loaderScore << std::fixed << std::setprecision(1) << imageManager.metricsAverageScore;
+				std::string loaderText = "Loader: " + loaderSpeed.str() + " imgs/s (score " + loaderScore.str() + ")";
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, loaderText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, loaderText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
+				std::ostringstream batchInfo;
+				batchInfo << std::fixed << std::setprecision(2) << imageManager.metricsLastBatchMs;
+				std::string batchText = "Last batch: " + std::to_string(imageManager.metricsLastBatchCount) +
+									  " textures in " + batchInfo.str() + "ms";
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, batchText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, batchText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
 				// Preload progress (when active)
 				if (imageManager.preloadingActive.load()) {
 					std::string phaseText;
@@ -6782,10 +7244,13 @@ int main(int argc, char** argv) {
 					yOffset += 35.0f;
 				}
 
-				// Atlas usage stats (calculate used layers from imageIdToLayer size)
-				uint32_t usedLayers = static_cast<uint32_t>(imageManager.atlas.imageIdToLayer.size());
+				// Atlas usage stats (calculate used layers vs budget)
+				uint32_t usedLayers = imageManager.atlas.layersInUse;
+				uint32_t budgetLayers = std::max<uint32_t>(1, imageManager.atlas.layerBudget);
+				std::ostringstream vramText;
+				vramText << std::fixed << std::setprecision(1) << imageManager.metricsVRAMUsagePercent;
 				std::string atlasText = "Atlas layers: " + std::to_string(usedLayers) +
-									   " / " + std::to_string(TextureAtlas::MAX_LAYERS);
+									   " / " + std::to_string(budgetLayers) + " (" + vramText.str() + "% VRAM)";
 				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, atlasText, diagTextSize, diagShadow);
 				appendHudText(hudFont, hudVertices, 24.0f, yOffset, atlasText, diagTextSize, diagColor);
 				yOffset += 35.0f;
