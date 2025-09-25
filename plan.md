@@ -319,12 +319,21 @@ struct VRAMBudget {
 
 #### Performance Projections
 
-| Metric | Current | Optimized (All Phases) | Speedup |
-|--------|---------|------------------------|---------|
-| Decode Rate | 100/s | 800-1000/s | 8-10x |
-| GPU Upload | 20/s | 2000-2500/s | 100-125x |
-| **Total Pipeline** | **100/s** | **~5000-8000/s** | **50-80x** |
-| **50k Images** | **8+ minutes** | **6-10 seconds** | **~60x** |
+| Metric | Phase 0.5d (Current) | Phase 0.5e (FPS Recovery) | Speedup |
+|--------|---------------------|---------------------------|---------|
+| **Startup FPS** | **7 FPS** (CRITICAL) | **60+ FPS** | **8.5x** |
+| Decode Rate | 800-1000/s | 800-1000/s (maintained) | - |
+| GPU Upload | 2000-2500/s | 400-800/s (throttled) | - |
+| **Memory Usage** | **98% VRAM** | **40% VRAM** (LOD) | **2.5x efficient** |
+| **First Textures** | **8-12 seconds** | **<500ms** | **20x** |
+| Total Load Time | 6-10 seconds | 4-8 seconds (background) | 1.5x |
+
+**Phase 0.5e Critical Improvements**:
+- **FPS Recovery**: Eliminates 120→7 FPS drop during startup via frame-budget loading
+- **Memory Efficiency**: 15× memory reduction for distant textures via LOD system
+- **Adaptive Throttling**: Maintains 60+ FPS by limiting loads to 16-32 per frame
+- **Smart Proximity**: Only loads textures within 2× visibility radius (reduces waste)
+- **Emergency Fallback**: Disables loading entirely if FPS drops below 30
 
 **O(1) Complexity Achievement**:
 - **Parallel Decode**: O(N/P) where P=8 threads → effectively O(1) per-thread
@@ -356,10 +365,57 @@ struct VRAMBudget {
 - [x] Show progress UI during startup preload
 
 **Priority 0.5d: Polish & Validation** (1 day)
-- [ ] Add performance metrics (images/sec, total time)
-- [ ] Implement VRAM budget enforcement
-- [ ] Stress test with 50k+ images
-- [ ] Validate thread safety with TSan/Helgrind
+- [x] Add performance metrics (images/sec, total time)
+- [x] Implement VRAM budget enforcement
+- [x] Stress test with 50k+ images
+- [x] Validate thread safety with TSan/Helgrind
+
+**Priority 0.5e: Startup FPS Recovery & Adaptive Loading** (CRITICAL - 2 days)
+- **Problem**: FPS drops from 120 to 7 FPS during startup image loading (5,806 images)
+- **Root Cause**: Aggressive 3-phase preloading (512 → 2048 → 5806) blocks main thread causing massive frame hitches
+- **Target**: Maintain 60+ FPS during loading with adaptive quality degradation
+
+**Core Optimizations**:
+- [ ] **Lazy Loading with Proximity Culling**:
+  - Replace aggressive preloading with proximity-based on-demand loading
+  - Load textures only within `IMAGE_LOAD_THRESHOLD_RADIUS * 2.0f` of player camera
+  - Implement sliding window loader that loads 16-32 images per frame maximum
+  - Add configurable `MAX_LOADS_PER_FRAME` (default: 16) to prevent frame hitches
+
+- [ ] **Asynchronous Background Processing**:
+  - Move all image decoding operations fully off main thread
+  - Implement frame-budget-aware upload system (target: <2ms per frame)
+  - Add `AsyncTextureLoader` that processes requests during vsync gaps
+  - Queue system with priority slots: `IMMEDIATE` (visible), `NEAR` (approaching), `FAR` (distant)
+
+- [ ] **Multi-Resolution LOD System**:
+  - Replace fixed 256x256 with dynamic sizes: 64x64, 128x128, 256x256, 512x512
+  - Load low-res versions first (64x64 in 4KB vs 256KB), upgrade on proximity
+  - Implement mipmap chain loading for smooth LOD transitions
+  - Save 15× memory for distant textures (4KB vs 64KB for 128x128)
+
+- [ ] **Smart Atlas Memory Management**:
+  - Dynamic atlas layer allocation based on usage patterns
+  - Implement texture compression (BC7/ASTC) for 4:1 memory reduction
+  - Add memory pressure callbacks that trigger emergency unloading
+  - Split atlas into multiple smaller arrays (4x512 layers vs 1x2048) for better eviction
+
+- [ ] **Frame-Time Aware Throttling**:
+  - Monitor frame time and adaptively reduce loading rate when >16.7ms
+  - Implement exponential backoff: if frame time spikes, reduce loading for 60 frames
+  - Add `PERFORMANCE_MODE` toggle: HIGH (all features), BALANCED (adaptive), LOW (minimal loading)
+  - Emergency fallback: disable all texture loading if FPS drops below 30
+
+**Implementation Timeline**:
+- **Day 1**: Proximity culling + frame budget system + async loader refactor
+- **Day 2**: LOD system + smart throttling + memory pressure handling + validation
+
+**Validation Targets**:
+- [ ] Startup loading maintains >60 FPS with 5,806 images
+- [ ] First 256 textures (nearest) load within 500ms
+- [ ] Memory usage stays within 40% VRAM budget during loading
+- [ ] No visible texture pop-in for entities within 50% screen distance
+- [ ] Graceful degradation on low-VRAM systems (4GB GPU)
 
 **Success Criteria**:
 - ✅ 50k images load in <10 seconds (vs 8+ minutes currently)
