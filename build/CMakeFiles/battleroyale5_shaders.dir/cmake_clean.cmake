@@ -7,6 +7,7 @@ file(REMOVE_RECURSE
   "shaders/health_bar.frag.spv"
   "shaders/health_bar.vert.spv"
   "shaders/hiz_build.comp.spv"
+  "shaders/procedural_texture.comp.spv"
   "shaders/text.frag.spv"
   "shaders/text.vert.spv"
   "shaders/texture_stream.comp.spv"

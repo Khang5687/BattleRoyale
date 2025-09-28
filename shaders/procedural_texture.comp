@@ -1,0 +1,131 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : enable
+
+// Procedural texture generation compute shader (0.75d)
+// Generates 16 base patterns for fake player circles at startup
+
+layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D atlasTexture;
+
+// Push constants for pattern generation parameters
+layout(push_constant) uniform ProceduralParams {
+    uint patternType;     // 0=solid, 1=gradient, 2=geometric, 3=noise
+    uint colorPaletteIndex; // 0-15 for different base colors
+    float seed;           // Random seed for variation
+} params;
+
+// Predefined color palette for fake players (16 colors)
+const vec3 colorPalette[16] = vec3[](
+    vec3(0.8, 0.2, 0.2),   // Red
+    vec3(0.2, 0.8, 0.2),   // Green
+    vec3(0.2, 0.2, 0.8),   // Blue
+    vec3(0.8, 0.8, 0.2),   // Yellow
+    vec3(0.8, 0.2, 0.8),   // Magenta
+    vec3(0.2, 0.8, 0.8),   // Cyan
+    vec3(0.8, 0.5, 0.2),   // Orange
+    vec3(0.5, 0.8, 0.3),   // Lime
+    vec3(0.7, 0.3, 0.8),   // Purple
+    vec3(0.9, 0.6, 0.2),   // Gold
+    vec3(0.3, 0.6, 0.9),   // Sky Blue
+    vec3(0.8, 0.4, 0.6),   // Pink
+    vec3(0.5, 0.5, 0.5),   // Gray
+    vec3(0.9, 0.9, 0.9),   // Light Gray
+    vec3(0.3, 0.3, 0.3),   // Dark Gray
+    vec3(0.1, 0.1, 0.1)    // Black
+);
+
+// Simple hash function for pseudo-random numbers
+float hash(float n) {
+    return fract(sin(n) * 43758.5453);
+}
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);
+}
+
+// 2D noise function
+float noise(vec2 p) {
+    vec2 ip = floor(p);
+    vec2 fp = fract(p);
+    fp = fp * fp * (3.0 - 2.0 * fp);
+
+    float a = hash(ip);
+    float b = hash(ip + vec2(1.0, 0.0));
+    float c = hash(ip + vec2(0.0, 1.0));
+    float d = hash(ip + vec2(1.0, 1.0));
+
+    return mix(mix(a, b, fp.x), mix(c, d, fp.x), fp.y);
+}
+
+// Generate solid color pattern
+vec3 generateSolid(vec2 uv, vec3 baseColor) {
+    return baseColor;
+}
+
+// Generate radial gradient pattern
+vec3 generateGradient(vec2 uv, vec3 baseColor) {
+    vec2 center = vec2(0.5, 0.5);
+    float dist = length(uv - center);
+    float gradient = 1.0 - smoothstep(0.0, 0.7, dist);
+    return baseColor * gradient;
+}
+
+// Generate geometric pattern (stripes/concentric circles)
+vec3 generateGeometric(vec2 uv, vec3 baseColor, float seed) {
+    vec2 center = vec2(0.5, 0.5);
+    float dist = length(uv - center);
+
+    // Concentric circles with varying thickness
+    float circles = sin(dist * 20.0 + seed * 10.0) * 0.5 + 0.5;
+    circles = smoothstep(0.3, 0.7, circles);
+
+    // Add some angular variation
+    float angle = atan(uv.y - 0.5, uv.x - 0.5);
+    float stripes = sin(angle * 8.0 + seed * 5.0) * 0.5 + 0.5;
+
+    return baseColor * mix(circles, stripes, 0.3);
+}
+
+// Generate noise-based pattern
+vec3 generateNoise(vec2 uv, vec3 baseColor, float seed) {
+    float n1 = noise(uv * 8.0 + seed);
+    float n2 = noise(uv * 16.0 + seed * 2.0);
+    float n3 = noise(uv * 4.0 + seed * 3.0);
+
+    float combined = (n1 * 0.5 + n2 * 0.3 + n3 * 0.2);
+    return baseColor * (0.5 + combined * 0.5);
+}
+
+void main() {
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 uv = vec2(texelCoord) / 256.0; // Assuming 256x256 textures
+
+    // Get base color from palette
+    vec3 baseColor = colorPalette[params.colorPaletteIndex % 16];
+
+    vec3 color;
+    switch (params.patternType) {
+        case 0: // Solid color
+            color = generateSolid(uv, baseColor);
+            break;
+        case 1: // Radial gradient
+            color = generateGradient(uv, baseColor);
+            break;
+        case 2: // Geometric pattern
+            color = generateGeometric(uv, baseColor, params.seed);
+            break;
+        case 3: // Noise-based
+            color = generateNoise(uv, baseColor, params.seed);
+            break;
+        default:
+            color = baseColor;
+            break;
+    }
+
+    // Ensure color is in valid range
+    color = clamp(color, vec3(0.0), vec3(1.0));
+
+    // Write to atlas texture
+    imageStore(atlasTexture, texelCoord, vec4(color, 1.0));
+}

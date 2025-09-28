@@ -76,6 +76,7 @@ CMakeFiles/battleroyale5_shaders: shaders/circle_cull.comp.spv
 CMakeFiles/battleroyale5_shaders: shaders/frustum_cull.comp.spv
 CMakeFiles/battleroyale5_shaders: shaders/hiz_build.comp.spv
 CMakeFiles/battleroyale5_shaders: shaders/texture_stream.comp.spv
+CMakeFiles/battleroyale5_shaders: shaders/procedural_texture.comp.spv
 
 shaders/circle.frag.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/circle.frag
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Generating shaders/circle.frag.spv"
@@ -112,18 +113,23 @@ shaders/hiz_build.comp.spv: /Users/khangnguyen/working/projects/battleroyale/bat
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=comp /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/hiz_build.comp -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/hiz_build.comp.spv
 
+shaders/procedural_texture.comp.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/procedural_texture.comp
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Generating shaders/procedural_texture.comp.spv"
+	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
+	/usr/local/bin/glslc -fshader-stage=comp /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/procedural_texture.comp -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/procedural_texture.comp.spv
+
 shaders/text.frag.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.frag
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Generating shaders/text.frag.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Generating shaders/text.frag.spv"
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=frag /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.frag -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/text.frag.spv
 
 shaders/text.vert.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.vert
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Generating shaders/text.vert.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Generating shaders/text.vert.spv"
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=vert /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/text.vert -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/text.vert.spv
 
 shaders/texture_stream.comp.spv: /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/texture_stream.comp
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Generating shaders/texture_stream.comp.spv"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Generating shaders/texture_stream.comp.spv"
 	/opt/homebrew/bin/cmake -E make_directory /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders
 	/usr/local/bin/glslc -fshader-stage=comp /Users/khangnguyen/working/projects/battleroyale/battleroyale5/shaders/texture_stream.comp -o /Users/khangnguyen/working/projects/battleroyale/battleroyale5/build/shaders/texture_stream.comp.spv
 
@@ -138,6 +144,7 @@ battleroyale5_shaders: shaders/frustum_cull.comp.spv
 battleroyale5_shaders: shaders/health_bar.frag.spv
 battleroyale5_shaders: shaders/health_bar.vert.spv
 battleroyale5_shaders: shaders/hiz_build.comp.spv
+battleroyale5_shaders: shaders/procedural_texture.comp.spv
 battleroyale5_shaders: shaders/text.frag.spv
 battleroyale5_shaders: shaders/text.vert.spv
 battleroyale5_shaders: shaders/texture_stream.comp.spv
