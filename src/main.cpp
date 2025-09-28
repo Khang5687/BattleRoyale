@@ -687,6 +687,7 @@ struct Simulation {
 	static constexpr float TEXTURE_LOAD_THRESHOLD = 5.0f;
 	static constexpr float DETAIL_THRESHOLD = 16.0f;
 	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 1.25f;
+	static constexpr uint32_t HEALTH_BAR_PLAYER_COUNT_THRESHOLD = 500; // Health bars only appear when <= 500 players remain
 	static constexpr float HEALTH_BAR_WIDTH_MULTIPLIER = 0.65f; // Reduced from 1.6f
 	static constexpr float HEALTH_BAR_HEIGHT_MULTIPLIER = 0.1f; // Reduced from 0.2f
 	static constexpr float HEALTH_BAR_MIN_HEIGHT = 1.0f;
@@ -1100,6 +1101,12 @@ struct Simulation {
 	void buildHealthBarInstances(std::vector<HealthBarInstance>& out, float zoomFactor) const {
 		out.clear();
 		out.reserve(alive.size());
+
+		// Only show health bars when player count is low enough
+		uint32_t currentAliveCount = aliveCount();
+		if (currentAliveCount > HEALTH_BAR_PLAYER_COUNT_THRESHOLD) {
+			return; // Skip all health bars when too many players remain
+		}
 
 		for (size_t i = 0; i < posX.size(); ++i) {
 			if (!alive[i]) continue;
