@@ -6895,6 +6895,12 @@ int main(int argc, char** argv) {
 	sim.initializeFromAssets("assets/players", sim.maxPlayers);
 	std::cout << "Simulation initialized!" << std::endl; std::cout.flush();
 
+	startPreloading(imageManager, sim);
+	if (imageManager.preloadingActive.load()) {
+		std::cout << "Startup texture preload running (press SPACE to start battle early)." << std::endl;
+		std::cout.flush();
+	}
+
 	// Initialize adaptive simulation architecture
 	std::cout << "Initializing adaptive simulation architecture..." << std::endl; std::cout.flush();
 	AdaptiveCircleSimulation adaptiveSim{};
@@ -6931,7 +6937,7 @@ int main(int argc, char** argv) {
 	hudVertices.reserve(1024);
 
 	uint32_t currentFrame = 0;
-	bool isPaused = false; // Start unpaused - lazy loading handles images on-demand
+	bool isPaused = true; // Start paused to let the startup preload fill critical textures
 
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
@@ -6952,17 +6958,21 @@ int main(int argc, char** argv) {
 
 		// Handle spacebar for pause/unpause toggle
 		static bool spaceKeyPressed = false;
-	if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-		if (!spaceKeyPressed) {
-			isPaused = !isPaused;
-			spaceKeyPressed = true;
-			requestPriorityRefresh(imageManager);
+		if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+			if (!spaceKeyPressed) {
+				isPaused = !isPaused;
+				spaceKeyPressed = true;
+				requestPriorityRefresh(imageManager);
+			}
+		} else {
+			spaceKeyPressed = false;
 		}
-	} else {
-		spaceKeyPressed = false;
-	}
 
-	vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
+		if (imageManager.preloadingActive.load()) {
+			updatePreloading(imageManager, sim);
+		}
+
+		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
 	uint32_t previousVisibleCount = 0;
 	if (cullingBuffers.counterReadbackHost) {
 		previousVisibleCount = *cullingBuffers.counterReadbackHost;
@@ -7079,9 +7089,8 @@ int main(int argc, char** argv) {
 		updateImageManager(imageManager); // Process pending texture uploads
 		finalizeImageManagerUpdate(imageManager);
 
-		// Lazy loading system - images loaded on-demand during rendering
-		// Note: Aggressive preloading has been disabled in favor of proximity-based lazy loading
-		// Images are now loaded automatically via getAtlasLayerForImage() when needed for rendering
+		// Texture streaming pipeline combines startup preload with on-demand lazy loading
+		// Startup preloading queues critical textures while paused; lazy loading handles the rest at runtime
 
 		// Always update zoom factor to prevent teleportation on unpause
 		// TODO: New camera system update will go here

@@ -1357,10 +1357,10 @@ static constexpr float MAX_SPATIAL_FACTOR = 2.0f;    // Max spatial zoom adjustm
 **Target State**: Multi-threaded batch loader → ~5000-8000 images/second (50-80x faster)
 
 **Implementation Phases** (see "Advanced Asset Management" section above for details):
-- [ ] **Phase 1: Parallel Decoding** (8 worker threads, lock-free queue, SIMD-enabled STB) → 8-10x speedup
-- [ ] **Phase 2: Batched GPU Upload** (128 images/batch, persistent staging buffer) → 5-8x additional speedup
-- [ ] **Phase 3: Startup Preloading** (leverage simulation pause, tiered loading strategy) → eliminate user-visible loading
-- [ ] **Phase 4: Priority & Memory Management** (distance-based priority, VRAM budget enforcement) → intelligent resource allocation
+- [x] **Phase 1: Parallel Decoding** (8 worker threads, lock-free queue, SIMD-enabled STB) – implemented with the decoder thread pool and shared work queue (`src/main.cpp:5252-5330`)
+- [x] **Phase 2: Batched GPU Upload** (128 images/batch, persistent staging buffer) – live batched transfer path with persistent staging buffer and transfer queue support (`src/main.cpp:5236-5953`)
+- [x] **Phase 3: Startup Preloading** (leverage simulation pause, tiered loading strategy) – startup loop now pauses the battle, kicks off preloading, and refreshes progress each frame (`src/main.cpp:6895-6971`, `src/main.cpp:5689-5807`)
+- [x] **Phase 4: Priority & Memory Management** (distance-based priority, VRAM budget enforcement) – active lazy-loading heuristics, VRAM budgeting, and request aging in production (`src/main.cpp:400-455`, `src/main.cpp:4762-4779`)
 
 **Success Criteria**: 50k images loaded in <10 seconds (vs 8+ minutes), no texture pop-in, O(1) user experience
 
