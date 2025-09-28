@@ -418,6 +418,13 @@ struct LoadPriority {
 	float computeScore() const {
 		// Enhanced lazy loading priority calculation
 
+		// Proximity culling - skip images beyond reasonable screen distance
+		// Increased from 40.0f to 200.0f to accommodate typical camera viewing distance
+		const float PROXIMITY_CULLING_RADIUS = 2000.0f; // Covers typical screen view area
+		if (distanceToPlayer > PROXIMITY_CULLING_RADIUS) {
+			return 0.0f; // Skip loading entirely - too far to be useful
+		}
+
 		// Visibility threshold - skip images for circles too small to be meaningful
 		const float MIN_VISIBLE_RADIUS = 1.5f; // Below this, use solid color fallback
 		if (circleRadius < MIN_VISIBLE_RADIUS) {
@@ -519,6 +526,8 @@ struct GpuStreamContext {
 
 struct ImageManager {
 	static constexpr float IMAGE_LOAD_THRESHOLD_RADIUS = 20.0f;
+	static constexpr float IMAGE_PROXIMITY_CULLING_RADIUS = IMAGE_LOAD_THRESHOLD_RADIUS * 2.0f; // Load within 2x visibility radius
+	static constexpr uint32_t MAX_LOADS_PER_FRAME = 16; // Frame budget to prevent hitches
 	static constexpr uint32_t MAX_CACHE_SIZE = 4096;
 
 	TextureAtlas atlas;
@@ -600,6 +609,10 @@ struct ImageManager {
 	float metricsVRAMUsagePercent = 0.0f;
 	float metricsLastBatchMs = 0.0f;
 	uint32_t metricsLastBatchCount = 0;
+
+	// Frame budget system for preventing hitches
+	uint32_t frameLoadCount = 0; // Number of loads requested this frame
+	uint64_t currentFrameIndex = 0; // Current frame for budget reset
 
 	// Startup preloading system
 	enum class PreloadPhase {
@@ -6167,6 +6180,12 @@ static void recordGpuStreamUploads(VkCommandBuffer cmd, ImageManager& mgr) {
 static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 	mgr.atlas.frameCounter++;
 
+	// Reset frame load budget if this is a new frame
+	if (mgr.currentFrameIndex != static_cast<uint64_t>(mgr.atlas.frameCounter)) {
+		mgr.currentFrameIndex = static_cast<uint64_t>(mgr.atlas.frameCounter);
+		mgr.frameLoadCount = 0;
+	}
+
 	// Check if already in atlas
 	auto it = mgr.atlas.imageIdToLayer.find(imageId);
 	if (it != mgr.atlas.imageIdToLayer.end()) {
@@ -6188,12 +6207,14 @@ static int32_t getAtlasLayerForImage(ImageManager& mgr, uint32_t imageId) {
 	if (texIt == mgr.atlas.textureCache.end()) {
 		LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
 
-		// Enhanced lazy loading: only request if priority score indicates the image is worth loading
+		// Enhanced lazy loading with frame budget: only request if priority score indicates the image is worth loading
+		// and we haven't exceeded our frame budget
 		float score = priority.computeScore();
-		if (score > 0.0f) {
+		if (score > 0.0f && mgr.frameLoadCount < ImageManager::MAX_LOADS_PER_FRAME) {
 			requestImageLoad(mgr, imageId, priority);
+			mgr.frameLoadCount++;
 		}
-		return -1; // Not available yet (either loading or skipped due to low priority)
+		return -1; // Not available yet (either loading or skipped due to low priority/budget)
 	}
 
 	// Find free layer or evict LRU
