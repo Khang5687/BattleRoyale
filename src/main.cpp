@@ -46,6 +46,7 @@
 #include "damage_curve.hpp"
 #include "font_loader.hpp"
 #include "bindless_textures.hpp"
+#include "virtual_texturing.hpp"
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -550,6 +551,7 @@ struct ImageManager {
 
 	TextureAtlas atlas;
 	BindlessTextureSystem bindless;
+	VirtualTextureSystem virtualTextures;
 	GpuStreamContext gpuStream;
 	VRAMBudget vramBudget;
 
@@ -5552,6 +5554,13 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 		std::cout << "[BINDLESS] Bindless textures not supported, falling back to texture atlas" << std::endl;
 	} else {
 		std::cout << "[BINDLESS] Bindless texture system initialized successfully" << std::endl;
+	}
+
+	// Initialize virtual texture system for memory-efficient texture streaming
+	if (initVirtualTextures(mgr.virtualTextures, physicalDevice, device, commandPool, graphicsQueue)) {
+		std::cout << "[VIRTUAL_TEX] Virtual texture system initialized successfully" << std::endl;
+	} else {
+		std::cout << "[VIRTUAL_TEX] Virtual texture system initialization failed" << std::endl;
 	}
 
 	// Initialize LRU structures

@@ -1,4 +1,4 @@
-// Optimized fragment shader with aggressive LOD and early-out
+// Optimized fragment shader with aggressive LOD, early-out, and virtual texture support
 #version 450
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_EXT_descriptor_indexing : enable
@@ -16,11 +16,46 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform sampler2D uTextures[];
 layout(set = 0, binding = 1) uniform sampler uTextureSampler;
 
+// Virtual texture system
+layout(set = 0, binding = 2) uniform sampler2D uIndirectionTexture;
+layout(set = 0, binding = 3) uniform sampler2DArray uPhysicalTextureArray;
+layout(set = 0, binding = 4) restrict buffer FeedbackBuffer {
+    uint feedbackBuffer[];
+};
+
+// Virtual texture constants (must match C++ constants)
+#define VIRTUAL_TEXTURE_SIZE 4096
+#define INDIRECTION_SIZE 4096
+
 // LOD levels
 const uint LOD_PIXEL_DUST = 0;
 const uint LOD_SIMPLE_SHAPE = 1;
 const uint LOD_BASIC_TEXTURE = 2;
 const uint LOD_FULL_DETAIL = 3;
+
+// Virtual texture sampling function
+vec4 sampleVirtualTexture(vec2 uv, uint textureId) {
+    // Calculate mip level based on derivatives
+    vec2 dx = dFdx(uv);
+    vec2 dy = dFdy(uv);
+    float maxDerivative = max(length(dx), length(dy));
+    float mipLevel = log2(maxDerivative * float(VIRTUAL_TEXTURE_SIZE));
+
+    // Sample indirection texture
+    vec4 indirection = texture(uIndirectionTexture, uv);
+
+    // Decode physical page coordinates
+    vec2 physicalUV = fract(uv * float(INDIRECTION_SIZE)) * indirection.zw + indirection.xy;
+
+    // Write to feedback buffer for page requests
+    if (indirection.a < 0.5) {
+        // Page not loaded, request it
+        atomicAdd(feedbackBuffer[textureId], 1);
+    }
+
+    // Sample from physical texture cache
+    return texture(uPhysicalTextureArray, vec3(physicalUV, indirection.a));
+}
 
 void main() {
     float d = length(vPos);
@@ -48,13 +83,19 @@ void main() {
     if (vLodLevel <= LOD_SIMPLE_SHAPE || vTextureIndex == 0xFFFFFFFF) {
         finalColor = vColor;
     } else {
-        // Texture sampling with LOD bias for performance
-        float lodBias = (vLodLevel == LOD_BASIC_TEXTURE) ? 2.0 : 0.0;
-        
-        // Use bindless texture indexing
-        vec4 texColor = textureLod(sampler2D(uTextures[nonuniformEXT(vTextureIndex)], uTextureSampler), 
-                                   vTexCoord, lodBias);
-        
+        vec4 texColor;
+
+        // Choose sampling method - virtual texture for high LOD, bindless for others
+        if (vLodLevel >= LOD_FULL_DETAIL && vTextureIndex < 8192) {
+            // Use virtual texture sampling for high detail
+            texColor = sampleVirtualTexture(vTexCoord, vTextureIndex);
+        } else {
+            // Use bindless texture indexing for basic sampling
+            float lodBias = (vLodLevel == LOD_BASIC_TEXTURE) ? 2.0 : 0.0;
+            texColor = textureLod(sampler2D(uTextures[nonuniformEXT(vTextureIndex)], uTextureSampler),
+                                  vTexCoord, lodBias);
+        }
+
         // Simplified health blend
         finalColor = mix(texColor, vColor, 0.3);
     }

@@ -3063,6 +3063,7 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/damage_curve.hpp \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/font_loader.hpp \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h \
+  /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/virtual_texturing.hpp \
   /opt/homebrew/include/GLFW/glfw3.h \
   /usr/local/include/vk_video/vulkan_video_codec_av1std.h \
   /usr/local/include/vk_video/vulkan_video_codec_av1std_decode.h \
@@ -3096,6 +3097,8 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
 /usr/local/include/vk_video/vulkan_video_codec_av1std.h:
 
 /opt/homebrew/include/GLFW/glfw3.h:
+
+/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/virtual_texturing.hpp:
 
 /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h:
 

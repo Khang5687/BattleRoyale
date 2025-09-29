@@ -3,6 +3,22 @@
 #include <vector>
 #include <unordered_map>
 #include <atomic>
+#include <queue>
+#include <mutex>
+
+// Helper function for memory type finding
+inline uint32_t findVirtualTextureMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+	VkPhysicalDeviceMemoryProperties memProperties;
+	vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+		if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+			return i;
+		}
+	}
+
+	return UINT32_MAX;
+}
 
 // Virtual texturing system for massive texture datasets
 // Only loads visible texture pages, reducing memory from GB to MB
@@ -98,7 +114,7 @@ inline bool initVirtualTextures(VirtualTextureSystem& vt, VkPhysicalDevice physi
 	VkImageCreateInfo indirectionInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
 	indirectionInfo.imageType = VK_IMAGE_TYPE_2D;
 	indirectionInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-	indirectionInfo.extent = {INDIRECTION_SIZE, INDIRECTION_SIZE, 1};
+	indirectionInfo.extent = {VirtualTextureSystem::INDIRECTION_SIZE, VirtualTextureSystem::INDIRECTION_SIZE, 1};
 	indirectionInfo.mipLevels = 1;
 	indirectionInfo.arrayLayers = 1;
 	indirectionInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -117,7 +133,7 @@ inline bool initVirtualTextures(VirtualTextureSystem& vt, VkPhysicalDevice physi
 	
 	VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
 	allocInfo.allocationSize = memReqs.size;
-	allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	allocInfo.memoryTypeIndex = findVirtualTextureMemoryType(physicalDevice, memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	
 	if (vkAllocateMemory(device, &allocInfo, nullptr, &vt.indirectionMemory) != VK_SUCCESS) {
 		return false;
@@ -141,15 +157,15 @@ inline bool initVirtualTextures(VirtualTextureSystem& vt, VkPhysicalDevice physi
 	}
 	
 	// Initialize physical page cache
-	vt.physicalPages.resize(CACHE_SIZE);
-	for (uint32_t i = 0; i < CACHE_SIZE; ++i) {
+	vt.physicalPages.resize(VirtualTextureSystem::CACHE_SIZE);
+	for (uint32_t i = 0; i < VirtualTextureSystem::CACHE_SIZE; ++i) {
 		vt.freePages.push(i);
 		
 		// Create page texture
 		VkImageCreateInfo pageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
 		pageInfo.imageType = VK_IMAGE_TYPE_2D;
 		pageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-		pageInfo.extent = {PAGE_SIZE, PAGE_SIZE, 1};
+		pageInfo.extent = {VirtualTextureSystem::PAGE_SIZE, VirtualTextureSystem::PAGE_SIZE, 1};
 		pageInfo.mipLevels = 1;
 		pageInfo.arrayLayers = 1;
 		pageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -166,7 +182,7 @@ inline bool initVirtualTextures(VirtualTextureSystem& vt, VkPhysicalDevice physi
 		
 		VkMemoryAllocateInfo pageAllocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
 		pageAllocInfo.allocationSize = pageMemReqs.size;
-		pageAllocInfo.memoryTypeIndex = findMemoryType(physicalDevice, pageMemReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		pageAllocInfo.memoryTypeIndex = findVirtualTextureMemoryType(physicalDevice, pageMemReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 		
 		vkAllocateMemory(device, &pageAllocInfo, nullptr, &vt.physicalPages[i].memory);
 		vkBindImageMemory(device, vt.physicalPages[i].image, vt.physicalPages[i].memory, 0);
@@ -195,7 +211,7 @@ inline bool initVirtualTextures(VirtualTextureSystem& vt, VkPhysicalDevice physi
 	
 	VkMemoryAllocateInfo feedbackAllocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
 	feedbackAllocInfo.allocationSize = feedbackMemReqs.size;
-	feedbackAllocInfo.memoryTypeIndex = findMemoryType(physicalDevice, feedbackMemReqs.memoryTypeBits, 
+	feedbackAllocInfo.memoryTypeIndex = findVirtualTextureMemoryType(physicalDevice, feedbackMemReqs.memoryTypeBits,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	
 	vkAllocateMemory(device, &feedbackAllocInfo, nullptr, &vt.feedbackMemory);
@@ -203,18 +219,4 @@ inline bool initVirtualTextures(VirtualTextureSystem& vt, VkPhysicalDevice physi
 	vkMapMemory(device, vt.feedbackMemory, 0, feedbackInfo.size, 0, &vt.mappedFeedback);
 	
 	return true;
-}
-
-// Helper function to find memory type
-inline uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-	VkPhysicalDeviceMemoryProperties memProperties;
-	vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-	
-	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-		if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-			return i;
-		}
-	}
-	
-	return UINT32_MAX;
 }
