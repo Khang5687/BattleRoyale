@@ -45,6 +45,7 @@
 
 #include "damage_curve.hpp"
 #include "font_loader.hpp"
+#include "bindless_textures.hpp"
 
 #ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
@@ -271,8 +272,8 @@ struct InstanceLayoutCPU {
 	float radius;
 	float lodTier;
 	float color[4];
-	float imageLayer; // Atlas layer index, -1 for flat color
-	float pad2[3];    // Alignment padding
+	uint32_t textureIndex; // Bindless texture index, INVALID_TEXTURE_INDEX for flat color
+	float pad2[3];         // Alignment padding
 };
 
 struct HealthBarInstance {
@@ -548,6 +549,7 @@ struct ImageManager {
 	static constexpr uint32_t MAX_CACHE_SIZE = 4096;
 
 	TextureAtlas atlas;
+	BindlessTextureSystem bindless;
 	GpuStreamContext gpuStream;
 	VRAMBudget vramBudget;
 
@@ -1545,37 +1547,48 @@ struct Simulation {
 			inst.lodTier = static_cast<float>(static_cast<uint32_t>(classifyRenderTier(radius[i])));
 			float h = std::clamp(health[i], 0.0f, 1.0f);
 
-			// Set image layer based on tier
+			// Set texture index based on tier (bindless or atlas fallback)
 				if (imageTier[i] == 0 || imageId[i] == UINT32_MAX) {
 					// Flat color
-					inst.imageLayer = -1.0f;
+					inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 					// Green to red gradient by health
 					inst.color[0] = 1.0f - h;
 					inst.color[1] = h;
 					inst.color[2] = 0.2f;
 					inst.color[3] = 1.0f;
 				} else if (imageTier[i] >= 1 && imageManager) {
-					// Try to get texture layer from image manager (triggers lazy load)
-					int32_t layer = getAtlasLayerForImage(*imageManager, imageId[i]);
-					if (layer >= 0) {
-						inst.imageLayer = static_cast<float>(layer);
+					// Try bindless first, then fallback to atlas
+					uint32_t bindlessIndex = getBindlessIndex(imageManager->bindless, imageId[i]);
+					if (bindlessIndex != BindlessTextureSystem::INVALID_TEXTURE_INDEX) {
+						inst.textureIndex = bindlessIndex;
 						// Subtle health tint for texture
 						inst.color[0] = 1.0f - h * 0.5f;
 						inst.color[1] = 1.0f - h * 0.5f;
 						inst.color[2] = 1.0f - h * 0.5f;
 						inst.color[3] = 1.0f;
 					} else {
-						// Neutral placeholder tint while loading completes
-						inst.imageLayer = -1.0f;
-						const float placeholderTint = 0.7f;
-						inst.color[0] = placeholderTint;
-						inst.color[1] = placeholderTint;
-						inst.color[2] = placeholderTint;
-						inst.color[3] = 1.0f;
+						// Fallback to atlas layer (for compatibility)
+						int32_t layer = getAtlasLayerForImage(*imageManager, imageId[i]);
+						if (layer >= 0) {
+							inst.textureIndex = static_cast<uint32_t>(layer) | 0x80000000; // High bit indicates atlas
+							// Subtle health tint for texture
+							inst.color[0] = 1.0f - h * 0.5f;
+							inst.color[1] = 1.0f - h * 0.5f;
+							inst.color[2] = 1.0f - h * 0.5f;
+							inst.color[3] = 1.0f;
+						} else {
+							// Neutral placeholder tint while loading completes
+							inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
+							const float placeholderTint = 0.7f;
+							inst.color[0] = placeholderTint;
+							inst.color[1] = placeholderTint;
+							inst.color[2] = placeholderTint;
+							inst.color[3] = 1.0f;
+						}
 					}
 				} else {
 					// Placeholder or other tiers
-					inst.imageLayer = -1.0f;
+					inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 					inst.color[0] = 1.0f - h;
 				inst.color[1] = h;
 				inst.color[2] = 0.2f;
@@ -2543,7 +2556,7 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.center[0] = pixelCluster.position.x;
 		inst.center[1] = pixelCluster.position.y;
 		inst.radius = std::max(1.0f, static_cast<float>(pixelCluster.entityCount) * 0.5f); // Scale with entity count
-		inst.imageLayer = -1.0f;
+		inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 		inst.lodTier = static_cast<float>(static_cast<uint32_t>(CircleRenderTier::PIXEL_DUST));
 
 		// Use aggregated color with intensity
@@ -2579,29 +2592,39 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.lodTier = static_cast<float>(static_cast<uint32_t>(tier));
 
 			if (imageTier[idx] == 0 || imageId[idx] == UINT32_MAX) {
-				inst.imageLayer = -1.0f;
+				inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 				inst.color[0] = 1.0f - h;
 				inst.color[1] = h;
 				inst.color[2] = 0.2f;
 				inst.color[3] = 1.0f;
 			} else if (imageTier[idx] >= 1 && imageManager) {
-				int32_t layer = getAtlasLayerForImage(*imageManager, imageId[idx]);
-				if (layer >= 0) {
-					inst.imageLayer = static_cast<float>(layer);
+				// Try bindless first, then fallback to atlas
+				uint32_t bindlessIndex = getBindlessIndex(imageManager->bindless, imageId[idx]);
+				if (bindlessIndex != BindlessTextureSystem::INVALID_TEXTURE_INDEX) {
+					inst.textureIndex = bindlessIndex;
 					inst.color[0] = 1.0f - h * 0.5f;
 					inst.color[1] = 1.0f - h * 0.5f;
 					inst.color[2] = 1.0f - h * 0.5f;
 					inst.color[3] = 1.0f;
 				} else {
-					inst.imageLayer = -1.0f;
-					const float placeholderTint = 0.7f;
-					inst.color[0] = placeholderTint;
-					inst.color[1] = placeholderTint;
-					inst.color[2] = placeholderTint;
-					inst.color[3] = 1.0f;
+					int32_t layer = getAtlasLayerForImage(*imageManager, imageId[idx]);
+					if (layer >= 0) {
+						inst.textureIndex = static_cast<uint32_t>(layer) | 0x80000000; // High bit indicates atlas
+						inst.color[0] = 1.0f - h * 0.5f;
+						inst.color[1] = 1.0f - h * 0.5f;
+						inst.color[2] = 1.0f - h * 0.5f;
+						inst.color[3] = 1.0f;
+					} else {
+						inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
+						const float placeholderTint = 0.7f;
+						inst.color[0] = placeholderTint;
+						inst.color[1] = placeholderTint;
+						inst.color[2] = placeholderTint;
+						inst.color[3] = 1.0f;
+					}
 				}
 			} else {
-				inst.imageLayer = -1.0f;
+				inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 				inst.color[0] = 1.0f - h;
 				inst.color[1] = h;
 				inst.color[2] = 0.2f;
@@ -2624,7 +2647,7 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.center[0] = cluster.centerOfMass.x;
 		inst.center[1] = cluster.centerOfMass.y;
 		inst.radius = cluster.effectiveRadius;
-		inst.imageLayer = -1.0f;
+		inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 		inst.lodTier = static_cast<float>(static_cast<uint32_t>(CircleRenderTier::PIXEL_DUST));
 
 		// Cluster color based on dominant color and alive count
@@ -3310,7 +3333,7 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	attrs[1].location = 1; attrs[1].binding = 1; attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = offsetof(InstanceLayoutCPU, center); // inCenter
 	attrs[2].location = 2; attrs[2].binding = 1; attrs[2].format = VK_FORMAT_R32_SFLOAT; attrs[2].offset = offsetof(InstanceLayoutCPU, radius); // inRadius
 	attrs[3].location = 3; attrs[3].binding = 1; attrs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; attrs[3].offset = offsetof(InstanceLayoutCPU, color); // inColor
-	attrs[4].location = 4; attrs[4].binding = 1; attrs[4].format = VK_FORMAT_R32_SFLOAT; attrs[4].offset = offsetof(InstanceLayoutCPU, imageLayer); // inImageLayer
+	attrs[4].location = 4; attrs[4].binding = 1; attrs[4].format = VK_FORMAT_R32_UINT; attrs[4].offset = offsetof(InstanceLayoutCPU, textureIndex); // inTextureIndex
 
 	VkPipelineVertexInputStateCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vi.vertexBindingDescriptionCount = 2; vi.pVertexBindingDescriptions = vertexBindings;
@@ -3336,8 +3359,8 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	// Push constants: vec2 viewport in vertex stage
 	VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; pcr.offset = 0; pcr.size = sizeof(float) * 2;
 
-	// Create descriptor set layout for texture atlas
-	VkDescriptorSetLayoutBinding descriptorBindings[2]{};
+	// Create descriptor set layout for bindless textures or texture atlas
+	VkDescriptorSetLayoutBinding descriptorBindings[3]{};
 	descriptorBindings[0].binding = 0;
 	descriptorBindings[0].descriptorCount = 1;
 	descriptorBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -3348,10 +3371,30 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	descriptorBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	descriptorBindings[1].pImmutableSamplers = nullptr;
 	descriptorBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+	// Add bindless texture array binding
+	descriptorBindings[2].binding = 2;
+	descriptorBindings[2].descriptorCount = 16384; // Max bindless textures
+	descriptorBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	descriptorBindings[2].pImmutableSamplers = nullptr;
+	descriptorBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	// Set binding flags for bindless array
+	VkDescriptorBindingFlags bindingFlags[3] = {0, 0,
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+		VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+	};
+
+	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCreateInfo{};
+	bindingFlagsCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+	bindingFlagsCreateInfo.bindingCount = 3;
+	bindingFlagsCreateInfo.pBindingFlags = bindingFlags;
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.bindingCount = 2;
+	layoutInfo.pNext = &bindingFlagsCreateInfo;
+	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+	layoutInfo.bindingCount = 3;
 	layoutInfo.pBindings = descriptorBindings;
 
 	PipelineObjects po{};
@@ -5504,6 +5547,13 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 	mgr.atlas.atlasArray.view = createImageView2DArray(device, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, TextureAtlas::MAX_LAYERS);
 	mgr.atlas.sampler = createTextureSampler(device);
 
+	// Initialize bindless texture system with fallback to atlas if not supported
+	if (!initBindlessTextures(mgr.bindless, physicalDevice, device, descriptorPool)) {
+		std::cout << "[BINDLESS] Bindless textures not supported, falling back to texture atlas" << std::endl;
+	} else {
+		std::cout << "[BINDLESS] Bindless texture system initialized successfully" << std::endl;
+	}
+
 	// Initialize LRU structures
 	mgr.atlas.layerToImageId.resize(TextureAtlas::MAX_LAYERS, UINT32_MAX);
 	mgr.atlas.layerLayouts.resize(TextureAtlas::MAX_LAYERS, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -7036,15 +7086,25 @@ int main(int argc, char** argv) {
 
 	std::vector<const char*> deviceExts = {
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-		VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+		VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+		VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME  // For bindless textures
 	};
 
-	VkPhysicalDeviceFeatures features{};
+	// Enable descriptor indexing features for bindless textures
+	VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+	indexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
+	indexingFeatures.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+	indexingFeatures.runtimeDescriptorArray = VK_TRUE;
+
+	VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+	features2.pNext = &indexingFeatures;
+
 	VkDeviceCreateInfo dci{};
 	dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	dci.pNext = &features2;
 	dci.queueCreateInfoCount = static_cast<uint32_t>(qcis.size());
 	dci.pQueueCreateInfos = qcis.data();
-	dci.pEnabledFeatures = &features;
+	dci.pEnabledFeatures = nullptr; // Using features2 instead
 	dci.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
 	dci.ppEnabledExtensionNames = deviceExts.data();
 
@@ -7256,20 +7316,23 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	// Create descriptor pool for texture atlases and GPU streaming
-	VkDescriptorPoolSize poolSizes[3]{};
+	// Create descriptor pool for texture atlases, bindless textures, and GPU streaming
+	VkDescriptorPoolSize poolSizes[4]{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	poolSizes[0].descriptorCount = 4;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	poolSizes[1].descriptorCount = 8;
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	poolSizes[2].descriptorCount = 4;
+	poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	poolSizes[3].descriptorCount = 16384; // For bindless textures
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.poolSizeCount = 3;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT; // Required for bindless
+	poolInfo.poolSizeCount = 4;
 	poolInfo.pPoolSizes = poolSizes;
-	poolInfo.maxSets = 8;
+	poolInfo.maxSets = 16; // Increased to accommodate bindless sets
 
 	VkDescriptorPool descriptorPool;
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {

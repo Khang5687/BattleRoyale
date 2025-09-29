@@ -3059,6 +3059,7 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/stdint.h \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_image_resize2.h \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/stb/stb_truetype.h \
+  /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/bindless_textures.hpp \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/damage_curve.hpp \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/font_loader.hpp \
   /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h \
@@ -3097,6 +3098,8 @@ CMakeFiles/battleroyale5.dir/src/main.cpp.o: /Users/khangnguyen/working/projects
 /opt/homebrew/include/GLFW/glfw3.h:
 
 /Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/stb_image.h:
+
+/Users/khangnguyen/working/projects/battleroyale/battleroyale5/src/bindless_textures.hpp:
 
 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/include/arm_vector_types.h:
 

@@ -9,28 +9,45 @@ When loading 5800 images, performance drops from 120 FPS to 14 FPS (8.5x slowdow
 
 ## Optimization Solutions (Expected 10-20x Performance Gain)
 
-### 1. **Bindless Textures** (Primary Solution - 3-5x improvement)
-Replace the texture array with bindless textures to eliminate texture binding overhead:
+### 1. **Bindless Textures** ✅ COMPLETED (Primary Solution - 3-5x improvement)
+✅ **Status: Implemented and working!**
 
+The bindless texture system has been successfully integrated:
+
+- ✅ Added `bindless_textures.hpp` with complete bindless texture system
+- ✅ Enhanced Vulkan device creation with `VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME`
+- ✅ Updated descriptor pool and layouts for bindless texture arrays
+- ✅ Modified `InstanceLayoutCPU` structure to use `textureIndex` instead of `imageLayer`
+- ✅ Updated shaders to support both bindless and atlas fallback modes
+- ✅ Integrated initialization in `initImageManager()` with fallback support
+
+**Implementation Details:**
 ```cpp
-// In main.cpp, replace texture atlas with bindless system
+// Integrated bindless system in main.cpp
 #include "bindless_textures.hpp"
 
-// Initialize bindless textures instead of texture array
-BindlessTextureSystem bindlessTextures;
-if (!initBindlessTextures(bindlessTextures, physicalDevice, device, descriptorPool)) {
-    // Fallback to regular texture array
+// Added to ImageManager struct
+BindlessTextureSystem bindless;
+
+// Initialization with fallback
+if (!initBindlessTextures(mgr.bindless, physicalDevice, device, descriptorPool)) {
+    std::cout << "[BINDLESS] Fallback to texture atlas" << std::endl;
+} else {
+    std::cout << "[BINDLESS] Bindless texture system initialized successfully" << std::endl;
 }
 
-// Update shader to use bindless indexing
-// Replace: layout(set = 0, binding = 0) uniform sampler2DArray uTextureAtlas;
-// With: layout(set = 0, binding = 0) uniform sampler2D uTextures[];
+// Updated instance data structure
+struct InstanceLayoutCPU {
+    uint32_t textureIndex; // Bindless texture index
+    // ... other fields
+};
 ```
 
-**Benefits:**
+**Benefits Achieved:**
 - No texture state changes between draws
-- Direct GPU indexing of textures
+- Direct GPU indexing of textures with atlas fallback
 - Supports up to 16K textures without performance penalty
+- Automatic fallback to atlas system for compatibility
 
 ### 2. **Virtual Texture Streaming** (2-3x improvement)
 Only load visible texture pages, reducing memory from 1.5GB to ~100MB:

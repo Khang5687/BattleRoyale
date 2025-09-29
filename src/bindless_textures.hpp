@@ -70,7 +70,7 @@ inline bool initBindlessTextures(BindlessTextureSystem& system, VkPhysicalDevice
 	VkDescriptorSetLayoutBinding binding{};
 	binding.binding = 0;
 	binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	binding.descriptorCount = MAX_BINDLESS_TEXTURES;
+	binding.descriptorCount = BindlessTextureSystem::MAX_BINDLESS_TEXTURES;
 	binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 	
 	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
@@ -103,10 +103,10 @@ inline bool initBindlessTextures(BindlessTextureSystem& system, VkPhysicalDevice
 	}
 	
 	// Initialize texture slots
-	system.textures.resize(MAX_BINDLESS_TEXTURES);
-	system.freeIndices.reserve(MAX_BINDLESS_TEXTURES);
-	for (uint32_t i = 0; i < MAX_BINDLESS_TEXTURES; ++i) {
-		system.freeIndices.push_back(MAX_BINDLESS_TEXTURES - 1 - i);
+	system.textures.resize(BindlessTextureSystem::MAX_BINDLESS_TEXTURES);
+	system.freeIndices.reserve(BindlessTextureSystem::MAX_BINDLESS_TEXTURES);
+	for (uint32_t i = 0; i < BindlessTextureSystem::MAX_BINDLESS_TEXTURES; ++i) {
+		system.freeIndices.push_back(BindlessTextureSystem::MAX_BINDLESS_TEXTURES - 1 - i);
 	}
 	
 	return true;

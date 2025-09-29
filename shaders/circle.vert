@@ -1,20 +1,20 @@
-// Vertex shader for instanced SDF circles
+// Vertex shader for instanced SDF circles with bindless texture support
 #version 450
 
-layout(location = 0) in vec2 inPos;       // quad corners in [-1, 1]
-layout(location = 1) in vec2 inCenter;    // pixel space center
-layout(location = 2) in float inRadius;   // pixel radius
-layout(location = 3) in vec4 inColor;     // RGBA
-layout(location = 4) in float inImageLayer; // Atlas layer index, -1 for flat color
+layout(location = 0) in vec2 inPos;         // quad corners in [-1, 1]
+layout(location = 1) in vec2 inCenter;      // pixel space center
+layout(location = 2) in float inRadius;     // pixel radius
+layout(location = 3) in vec4 inColor;       // RGBA
+layout(location = 4) in uint inTextureIndex; // Bindless texture index
 
 layout(push_constant) uniform Push {
     vec2 viewport; // effective viewport size (framebuffer size / zoom factor)
 } pc;
 
-layout(location = 0) out vec2 vPos;   // pass the local quad pos for SDF
-layout(location = 1) out vec4 vColor; // pass color
-layout(location = 2) out float vImageLayer; // pass image layer
-layout(location = 3) out vec2 vTexCoord; // texture coordinates
+layout(location = 0) out vec2 vPos;         // pass the local quad pos for SDF
+layout(location = 1) out vec4 vColor;       // pass color
+layout(location = 2) out flat uint vTextureIndex; // pass texture index
+layout(location = 3) out vec2 vTexCoord;    // texture coordinates
 
 const float CIRCLE_DEPTH_RADIUS_SCALE = 600.0;
 const float CIRCLE_DEPTH_RANGE = 0.9;
@@ -27,7 +27,7 @@ void main() {
     gl_Position = vec4(ndc, depth, 1.0);
     vPos = inPos;
     vColor = inColor;
-    vImageLayer = inImageLayer;
+    vTextureIndex = inTextureIndex;
     // Convert from [-1,1] to [0,1] for texture sampling
     vTexCoord = inPos * 0.5 + 0.5;
 }
