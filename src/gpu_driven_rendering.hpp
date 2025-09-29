@@ -1,6 +1,7 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <stdexcept>
 
 // GPU-driven rendering system for massive performance gains
 // Moves visibility culling and draw call generation to GPU
@@ -175,6 +176,25 @@ void main() {
 	}
 }
 )";
+}
+
+// Helper function for memory type finding
+inline uint32_t findMemoryType(VkPhysicalDevice physical, uint32_t typeBits, VkMemoryPropertyFlags props) {
+	VkPhysicalDeviceMemoryProperties memProps{};
+	vkGetPhysicalDeviceMemoryProperties(physical, &memProps);
+	for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+		if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props) {
+			return i;
+		}
+	}
+	throw std::runtime_error("Suitable memory type not found");
+}
+
+// Helper function to create compute shader module
+inline VkShaderModule createComputeShaderModule(VkDevice device, const char* shaderSource) {
+	// For now, we'll assume the shader source is compiled SPIR-V
+	// In reality, you'd need glslang or another compiler
+	throw std::runtime_error("Compute shader compilation not implemented - requires glslc");
 }
 
 // Initialize GPU-driven rendering

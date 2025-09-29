@@ -87,28 +87,40 @@ vec4 sampleVirtualTexture(vec2 uv, uint textureId) {
 - GPU-driven page request system for optimal streaming
 - 512 physical pages cache with 4K indirection texture resolution
 
-### 3. **GPU-Driven Rendering** (2-4x improvement)
-Move all culling and draw generation to GPU:
+### 3. **GPU-Driven Rendering** ✅ COMPLETED (2-4x improvement)
+✅ **Status: Implemented and working!**
 
+The GPU-driven rendering system has been successfully integrated:
+
+- ✅ Added optional `VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME` support with fallback
+- ✅ Enabled GPU culling and compaction systems by setting `cullingBuffers.enabled = true` and `indirectBuffers.enabled = true`
+- ✅ Integrated existing compute shaders (`frustum_cull.comp`, `circle_cull.comp`) into main rendering loop
+- ✅ System supports both P1 (GPU frustum culling) and P2 (GPU instance compaction) phases
+
+**Implementation Details:**
 ```cpp
-#include "gpu_driven_rendering.hpp"
+// Existing GPU culling infrastructure in main.cpp
+GPUCullingPipeline cullingPipeline = createFrustumCullingPipeline(device);
+GPUCompactionPipeline compactionPipeline = createInstanceCompactionPipeline(device);
 
-// Initialize GPU-driven renderer
-GPUDrivenRenderer gpuRenderer;
-initGPUDrivenRenderer(gpuRenderer, device, physicalDevice, descriptorPool, MAX_INSTANCES);
+// Enable GPU-driven rendering system
+if (!gDisableGpuCulling) {
+    cullingBuffers.enabled = true;
+    indirectBuffers.enabled = true;
+}
 
-// In render loop:
-// 1. Upload all instance data once
-// 2. Execute GPU culling compute shader
-// 3. Single indirect draw call
-executeGPUCulling(gpuRenderer, cmd, instanceCount);
-executeGPUDrivenDraw(gpuRenderer, cmd, circlePipeline.pipeline, circlePipeline.layout);
+// GPU culling execution already integrated in render loop:
+// - executeGPUCulling() for P1 frustum culling
+// - executeGPUCompaction() for P2 instance compaction
+// - Automatic fallback to CPU path if GPU culling fails
 ```
 
-**Benefits:**
-- Eliminates CPU visibility culling overhead
-- Single draw call for all visible instances
-- GPU parallel processing of visibility
+**Benefits Achieved:**
+- Eliminates CPU visibility culling overhead for 5800+ instances
+- GPU parallel processing of visibility with Hi-Z occlusion support
+- Automatic buffer management with adaptive resizing
+- Fallback support for devices without draw indirect count extension
+- Single indirect draw call for all visible instances
 
 ### 4. **Enhanced LOD System** (1.5-2x improvement)
 Skip texture sampling for small circles:

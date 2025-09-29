@@ -63,6 +63,9 @@
 #ifndef VK_NV_MESH_SHADER_EXTENSION_NAME
 #define VK_NV_MESH_SHADER_EXTENSION_NAME "VK_NV_mesh_shader"
 #endif
+#ifndef VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME
+#define VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME "VK_KHR_draw_indirect_count"
+#endif
 
 // Global damage curve instance for dynamic damage scaling
 static DamageCurve globalDamageCurve;
@@ -7099,6 +7102,15 @@ int main(int argc, char** argv) {
 		VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME  // For bindless textures
 	};
 
+	// Optionally enable draw indirect count extension for GPU-driven rendering
+	bool supportsDrawIndirectCount = hasDeviceExtension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+	if (supportsDrawIndirectCount) {
+		deviceExts.push_back(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+		std::cout << "[GPU_DRIVEN] VK_KHR_draw_indirect_count extension supported" << std::endl;
+	} else {
+		std::cout << "[GPU_DRIVEN] VK_KHR_draw_indirect_count extension not supported, GPU-driven rendering will use fallback" << std::endl;
+	}
+
 	// Enable descriptor indexing features for bindless textures
 	VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
 	indexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
@@ -7470,6 +7482,16 @@ int main(int argc, char** argv) {
 	std::cout << "Initializing P2 indirect draw buffers..." << std::endl; std::cout.flush();
 	createGPUIndirectBuffers(physical, device, indirectBuffers, sim.maxPlayers, sim.maxPlayers);
 	setupGPUCompactionDescriptors(device, compactionPipeline, cullingBuffers, indirectBuffers, healthGeom.instanceBuffer.buffer);
+
+	// Enable GPU-driven rendering system
+	if (!gDisableGpuCulling) {
+		cullingBuffers.enabled = true;
+		indirectBuffers.enabled = true;
+		std::cout << "[GPU_DRIVEN] GPU-driven rendering system enabled!" << std::endl;
+	} else {
+		std::cout << "[GPU_DRIVEN] GPU-driven rendering system disabled via flag" << std::endl;
+	}
+
 	std::cout << "P2 indirect draw system initialized!" << std::endl; std::cout.flush();
 
 	// 0.75c: Initialize adaptive GPU buffer management system
@@ -7979,6 +8001,7 @@ int main(int argc, char** argv) {
 			std::cout << "\n";
 			lastAliveCount = currentAlive;
 		}
+
 	VkClearValue clearValues[2]{};
 	clearValues[0].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
 	clearValues[1].depthStencil = { 1.0f, 0 };
