@@ -6,6 +6,7 @@ layout(location = 1) in vec2 inCenter;      // pixel space center
 layout(location = 2) in float inRadius;     // pixel radius
 layout(location = 3) in vec4 inColor;       // RGBA
 layout(location = 4) in uint inTextureIndex; // Bindless texture index
+layout(location = 5) in float inLodTier;    // LOD tier (0=pixel dust, 1=simple, 2=basic texture, 3=full detail)
 
 layout(push_constant) uniform Push {
     vec2 viewport; // effective viewport size (framebuffer size / zoom factor)
@@ -15,6 +16,7 @@ layout(location = 0) out vec2 vPos;         // pass the local quad pos for SDF
 layout(location = 1) out vec4 vColor;       // pass color
 layout(location = 2) out flat uint vTextureIndex; // pass texture index
 layout(location = 3) out vec2 vTexCoord;    // texture coordinates
+layout(location = 4) out flat uint vLodLevel; // pass LOD level
 
 const float CIRCLE_DEPTH_RADIUS_SCALE = 600.0;
 const float CIRCLE_DEPTH_RANGE = 0.9;
@@ -28,6 +30,7 @@ void main() {
     vPos = inPos;
     vColor = inColor;
     vTextureIndex = inTextureIndex;
+    vLodLevel = uint(inLodTier);
     // Convert from [-1,1] to [0,1] for texture sampling
     vTexCoord = inPos * 0.5 + 0.5;
 }

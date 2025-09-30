@@ -3,6 +3,7 @@ file(REMOVE_RECURSE
   "shaders/circle.frag.spv"
   "shaders/circle.vert.spv"
   "shaders/circle_cull.comp.spv"
+  "shaders/circle_optimized.frag.spv"
   "shaders/frustum_cull.comp.spv"
   "shaders/health_bar.frag.spv"
   "shaders/health_bar.vert.spv"

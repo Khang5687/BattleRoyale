@@ -3,6 +3,7 @@ a0486e84ac54d50f072d3323bc98ee55 CMakeFiles/battleroyale5_shaders
 a9931217c33bf4acf03fdbd68784529d shaders/circle.frag.spv
 56c9eca363ab531b7742d254c36fa67c shaders/circle.vert.spv
 c18dce26d99a42f2e51e6c7b2ccd7362 shaders/circle_cull.comp.spv
+c3e542900bcc3b645b0eb2edd4a0f6b4 shaders/circle_optimized.frag.spv
 235fd07d0cff0835f046674a97cb7f4b shaders/cull.comp.spv
 cf054d9b87f29eb356a7cc5e00ab3ef6 shaders/frustum_cull.comp.spv
 ce7f6f69f3d19798ce1134fce83fa379 shaders/health_bar.frag.spv
