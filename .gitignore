@@ -44,3 +44,7 @@
 
 # Backup config files
 backup/
+
+vcpkg_installed/
+build/
+*.zip

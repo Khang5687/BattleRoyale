@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(ldd:*)",
+      "Bash(cmake:*)",
+      "Bash(./RelWithDebInfo/battleroyale5.exe)"
+    ],
+    "deny": []
+  }
+}

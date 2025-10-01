@@ -1,1 +1,0 @@
-/usr/bin/c++ -O2 -g -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names "CMakeFiles/battleroyale5-config.dir/src/config_main.cpp.o" "CMakeFiles/battleroyale5-config.dir/src/damage_curve.cpp.o" "CMakeFiles/battleroyale5-config.dir/src/font_loader.cpp.o" -o battleroyale5-config  -framework OpenGL /opt/homebrew/Cellar/glfw/3.4/lib/libglfw.dylib

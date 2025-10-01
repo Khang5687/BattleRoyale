@@ -5169,9 +5169,11 @@ static std::vector<const char*> getRequiredInstanceExtensions() {
 	uint32_t count = 0;
 	const char** glfwExt = glfwGetRequiredInstanceExtensions(&count);
 	std::vector<const char*> exts(glfwExt, glfwExt + count);
+#ifdef __APPLE__
+	// MoltenVK requires portability enumeration extensions
 	exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-	// Some MoltenVK/Loader combos require this when using portability
 	exts.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+#endif
 	return exts;
 }
 
@@ -5756,7 +5758,8 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 		int32_t transferFamily = -1;
 		for (uint32_t i = 0; i < queueFamilyCount; i++) {
 			if ((queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT) &&
-				!(queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+				!(queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) &&
+				queueFamilies[i].queueCount > 0) {
 				transferFamily = static_cast<int32_t>(i);
 				break;
 			}
@@ -5771,8 +5774,15 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 
 			if (vkCreateCommandPool(device, &poolInfo, nullptr, &mgr.transferCommandPool) == VK_SUCCESS) {
 				vkGetDeviceQueue(device, static_cast<uint32_t>(transferFamily), 0, &mgr.transferQueue);
-				mgr.useTransferQueue = true;
-				std::cout << "Using dedicated transfer queue for batched uploads" << std::endl;
+				// Validate the queue is actually valid before using it
+				if (mgr.transferQueue != VK_NULL_HANDLE) {
+					mgr.useTransferQueue = true;
+					std::cout << "Using dedicated transfer queue for batched uploads" << std::endl;
+				} else {
+					std::cout << "[TRANSFER] Queue invalid (not requested during device creation), using graphics queue" << std::endl;
+					vkDestroyCommandPool(device, mgr.transferCommandPool, nullptr);
+					mgr.transferCommandPool = VK_NULL_HANDLE;
+				}
 			}
 		}
 
@@ -6992,7 +7002,12 @@ int main(int argc, char** argv) {
 
 	VkInstanceCreateInfo ici{};
 	ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+#ifdef __APPLE__
+	// MoltenVK requires portability enumeration flag
 	ici.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#else
+	ici.flags = 0;
+#endif
 	ici.pApplicationInfo = &app;
 	ici.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
 	ici.ppEnabledExtensionNames = extensions.data();
@@ -7062,6 +7077,25 @@ int main(int argc, char** argv) {
 		return 5;
 	}
 
+	// Find dedicated transfer queue family if available
+	uint32_t transferQueueFamily = UINT32_MAX;
+	{
+		uint32_t qfCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(physical, &qfCount, nullptr);
+		std::vector<VkQueueFamilyProperties> qprops(qfCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(physical, &qfCount, qprops.data());
+		for (uint32_t i = 0; i < qfCount; ++i) {
+			// Look for dedicated transfer queue (supports transfer but not graphics)
+			if ((qprops[i].queueFlags & VK_QUEUE_TRANSFER_BIT) &&
+				!(qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) &&
+				qprops[i].queueCount > 0) {
+				transferQueueFamily = i;
+				std::cout << "[TRANSFER] Found dedicated transfer queue family: " << i << std::endl;
+				break;
+			}
+		}
+	}
+
 	float priority = 1.0f;
 	std::vector<VkDeviceQueueCreateInfo> qcis;
 	{
@@ -7071,6 +7105,16 @@ int main(int argc, char** argv) {
 		qci.queueCount = 1;
 		qci.pQueuePriorities = &priority;
 		qcis.push_back(qci);
+	}
+	// Request transfer queue if available
+	if (transferQueueFamily != UINT32_MAX && transferQueueFamily != graphicsQueueFamily) {
+		VkDeviceQueueCreateInfo qci{};
+		qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+		qci.queueFamilyIndex = transferQueueFamily;
+		qci.queueCount = 1;
+		qci.pQueuePriorities = &priority;
+		qcis.push_back(qci);
+		std::cout << "[TRANSFER] Requesting queue from transfer family during device creation" << std::endl;
 	}
 
 	uint32_t deviceExtCount = 0;
@@ -7094,14 +7138,17 @@ int main(int argc, char** argv) {
 	if (supportsExtMeshShader || supportsNvMeshShader) {
 		std::cout << "[P4] Mesh shader extensions reported by driver; MoltenVK backend currently lacks Metal mesh shading support, so extension remains disabled.\n";
 	} else {
-		std::cout << "[P4] Mesh shader extensions unavailable on this device (MoltenVK)." << std::endl;
+		std::cout << "[P4] Mesh shader extensions unavailable on this device." << std::endl;
 	}
 
 	std::vector<const char*> deviceExts = {
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-		VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
 		VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME  // For bindless textures
 	};
+#ifdef __APPLE__
+	// MoltenVK requires portability subset extension
+	deviceExts.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+#endif
 
 	// Optionally enable draw indirect count extension for GPU-driven rendering
 	bool supportsDrawIndirectCount = hasDeviceExtension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
@@ -7112,11 +7159,35 @@ int main(int argc, char** argv) {
 		std::cout << "[GPU_DRIVEN] VK_KHR_draw_indirect_count extension not supported, GPU-driven rendering will use fallback" << std::endl;
 	}
 
-	// Enable descriptor indexing features for bindless textures
+	// Query descriptor indexing features and properties
+	VkPhysicalDeviceDescriptorIndexingFeatures availableIndexingFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+	VkPhysicalDeviceFeatures2 availableFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+	availableFeatures2.pNext = &availableIndexingFeatures;
+	vkGetPhysicalDeviceFeatures2(physical, &availableFeatures2);
+
+	VkPhysicalDeviceDescriptorIndexingProperties indexingProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES};
+	VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+	props2.pNext = &indexingProps;
+	vkGetPhysicalDeviceProperties2(physical, &props2);
+
+	// Check if descriptor indexing features are available
+	bool hasDescriptorIndexing = availableIndexingFeatures.descriptorBindingPartiallyBound &&
+	                              availableIndexingFeatures.descriptorBindingUpdateUnusedWhilePending &&
+	                              availableIndexingFeatures.runtimeDescriptorArray;
+
+	if (hasDescriptorIndexing) {
+		std::cout << "[BINDLESS] Descriptor indexing features supported" << std::endl;
+		std::cout << "[BINDLESS] Max descriptor set sampled images: " << indexingProps.maxDescriptorSetUpdateAfterBindSampledImages << std::endl;
+		std::cout << "[BINDLESS] Max per-stage descriptor sampled images: " << indexingProps.maxPerStageDescriptorUpdateAfterBindSampledImages << std::endl;
+	} else {
+		std::cout << "[BINDLESS] Descriptor indexing features not fully supported, bindless textures may be limited" << std::endl;
+	}
+
+	// Enable descriptor indexing features for bindless textures if supported
 	VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
-	indexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
-	indexingFeatures.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
-	indexingFeatures.runtimeDescriptorArray = VK_TRUE;
+	indexingFeatures.descriptorBindingPartiallyBound = hasDescriptorIndexing ? VK_TRUE : VK_FALSE;
+	indexingFeatures.descriptorBindingUpdateUnusedWhilePending = hasDescriptorIndexing ? VK_TRUE : VK_FALSE;
+	indexingFeatures.runtimeDescriptorArray = hasDescriptorIndexing ? VK_TRUE : VK_FALSE;
 
 	VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 	features2.pNext = &indexingFeatures;
@@ -7339,30 +7410,41 @@ int main(int argc, char** argv) {
 	}
 
 	// Create descriptor pool for texture atlases, bindless textures, and GPU streaming
+	// Note: UPDATE_AFTER_BIND pools may require larger allocations than standard pools
 	VkDescriptorPoolSize poolSizes[4]{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[0].descriptorCount = 4;
+	poolSizes[0].descriptorCount = 64; // Increased for multiple descriptor sets
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[1].descriptorCount = 8;
+	poolSizes[1].descriptorCount = 64; // Increased for GPU-driven buffers
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	poolSizes[2].descriptorCount = 4;
+	poolSizes[2].descriptorCount = 64; // Increased for compute shader storage images
 	poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	poolSizes[3].descriptorCount = 16384; // For bindless textures
+	poolSizes[3].descriptorCount = 40000; // Need 16384 for bindless system + 16384 for atlas + overhead
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT; // Required for bindless
 	poolInfo.poolSizeCount = 4;
 	poolInfo.pPoolSizes = poolSizes;
-	poolInfo.maxSets = 16; // Increased to accommodate bindless sets
+	poolInfo.maxSets = 32; // Increased to accommodate all descriptor sets
 
 	VkDescriptorPool descriptorPool;
-	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
-		std::fprintf(stderr, "Failed to create descriptor pool\n");
+	VkResult poolResult = vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
+	if (poolResult != VK_SUCCESS) {
+		std::fprintf(stderr, "Failed to create descriptor pool (VkResult: %d)\n", poolResult);
 		return 10;
 	}
+	std::cout << "[DESCRIPTOR] Descriptor pool created successfully with " << poolSizes[3].descriptorCount << " sampled images" << std::endl;
 
-	std::cout << "Vulkan initialized and swapchain created (MoltenVK)" << std::endl;
+	const char* platform =
+#ifdef __APPLE__
+		"MoltenVK";
+#elif defined(_WIN32)
+		"Windows";
+#else
+		"Linux";
+#endif
+	std::cout << "Vulkan initialized and swapchain created (" << platform << ")" << std::endl;
 	std::cout.flush();
 
 	// Initialize image manager
@@ -7377,8 +7459,13 @@ int main(int argc, char** argv) {
 	allocInfo.descriptorSetCount = 1;
 	allocInfo.pSetLayouts = &circlePipeline.descriptorSetLayout;
 
-	if (vkAllocateDescriptorSets(device, &allocInfo, &imageManager.atlas.descriptorSet) != VK_SUCCESS) {
-		std::fprintf(stderr, "Failed to allocate descriptor sets\n");
+	VkResult allocResult = vkAllocateDescriptorSets(device, &allocInfo, &imageManager.atlas.descriptorSet);
+	if (allocResult != VK_SUCCESS) {
+		std::fprintf(stderr, "Failed to allocate descriptor sets for texture atlas (VkResult: %d)\n", allocResult);
+		std::fprintf(stderr, "This may indicate:\n");
+		std::fprintf(stderr, "  - Descriptor pool exhausted\n");
+		std::fprintf(stderr, "  - Descriptor indexing features not properly supported\n");
+		std::fprintf(stderr, "  - Requested descriptor count (16384 sampled images) exceeds driver limits\n");
 		return 11;
 	}
 

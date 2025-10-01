@@ -4,13 +4,18 @@ project(BattleRoyale5 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(PkgConfig REQUIRED)
-
-# Vulkan loader (MoltenVK via loader on macOS)
+# Vulkan loader
 find_package(Vulkan REQUIRED)
 
-# GLFW via pkg-config to be robust with Homebrew
-pkg_check_modules(GLFW3 REQUIRED IMPORTED_TARGET glfw3)
+# GLFW: use vcpkg on Windows, pkg-config on Unix
+if(WIN32)
+	find_package(glfw3 CONFIG REQUIRED)
+	set(GLFW_LIBRARIES glfw)
+else()
+	find_package(PkgConfig REQUIRED)
+	pkg_check_modules(GLFW3 REQUIRED IMPORTED_TARGET glfw3)
+	set(GLFW_LIBRARIES PkgConfig::GLFW3)
+endif()
 
 # Main simulation executable
 add_executable(battleroyale5
@@ -19,7 +24,7 @@ add_executable(battleroyale5
   src/font_loader.cpp
 )
 
-target_link_libraries(battleroyale5 PRIVATE Vulkan::Vulkan PkgConfig::GLFW3)
+target_link_libraries(battleroyale5 PRIVATE Vulkan::Vulkan ${GLFW_LIBRARIES})
 
 # Config tool executable
 add_executable(battleroyale5-config
@@ -28,7 +33,7 @@ add_executable(battleroyale5-config
   src/font_loader.cpp
 )
 
-target_link_libraries(battleroyale5-config PRIVATE PkgConfig::GLFW3)
+target_link_libraries(battleroyale5-config PRIVATE ${GLFW_LIBRARIES})
 
 # OpenGL for config tool
 find_package(OpenGL REQUIRED)
