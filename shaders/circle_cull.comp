@@ -3,7 +3,15 @@
 // P2: Instance compaction compute shader
 // Reads visibility results from P1 and generates compacted instances + draw commands
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+// Workgroup size - configurable via specialization constants for vendor optimization
+// NVIDIA: 32 threads (warp size), AMD: 64 threads (wavefront size)
+layout(constant_id = 0) const uint WORKGROUP_SIZE_X = 64;
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+// NVIDIA FIX: Dummy shared memory to workaround NVIDIA barrier() bug
+// Without any shared memory access, barrier() fails to synchronize on NVIDIA GPUs
+// Reference: https://forums.developer.nvidia.com/t/barrier-failing-if-there-isnt-any-shared-memory-used/252614
+shared uint nvidia_barrier_workaround;
 
 // Push constants
 layout(push_constant) uniform CompactionConstants {
@@ -48,7 +56,8 @@ layout(std430, binding = 1) readonly buffer VisibilityIndexBuffer {
     uint visibilityIndices[];
 };
 
-layout(std430, binding = 2) readonly buffer VisibilityCounterBuffer {
+// NVIDIA FIX: coherent qualifier ensures atomic visibility across workgroups
+layout(std430, binding = 2) coherent readonly buffer VisibilityCounterBuffer {
     uint visibleCount;
 };
 
@@ -85,6 +94,11 @@ layout(std430, binding = 9) coherent buffer HealthBarCounterBuffer {
 void main() {
     uint index = gl_GlobalInvocationID.x;
     
+    // NVIDIA barrier workaround: Touch shared memory to enable proper synchronization
+    if (gl_LocalInvocationID.x == 0) {
+        nvidia_barrier_workaround = 0;
+    }
+    
     // Initialize draw commands on first thread
     if (index == 0) {
         // Circle draw command
@@ -116,20 +130,20 @@ void main() {
     // Process health bars if enabled
     if (pc.enableHealthBars != 0) {
         barrier();
+        memoryBarrierBuffer(); // Ensure all previous writes are visible
         
         // For each visible circle, check if it has a corresponding health bar
         if (index < visibleCount) {
             uint circleIndex = visibilityIndices[index];
             
             // Simple approach: assume health bar index matches circle index
-            // In a more sophisticated system, this could use a lookup table
             if (circleIndex < pc.maxHealthBars) {
                 HealthBarData healthBar = inputHealthBars[circleIndex];
                 
                 // Check if this health bar should be visible
-                // (simplified check - in practice might need more sophisticated culling)
                 if (healthBar.fillRatio > 0.0) {
                     uint healthBarOutputIndex = atomicAdd(healthBarCount, 1);
+                    memoryBarrierBuffer(); // CRITICAL: Ensure atomic result is visible to all threads
                     
                     if (healthBarOutputIndex < pc.maxHealthBars) {
                         compactedHealthBars[healthBarOutputIndex] = healthBar;
@@ -140,6 +154,7 @@ void main() {
         }
         
         barrier();
+        memoryBarrierBuffer(); // Ensure all buffer writes complete before final update
         
         // Update health bar draw command with final count
         if (index == 0) {

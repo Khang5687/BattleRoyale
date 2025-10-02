@@ -109,6 +109,41 @@ struct HealthBarBuffers {
 	uint32_t instanceCount = 0;
 };
 
+// GPU Vendor Detection and Adaptive Configuration
+struct GPUVendorInfo {
+	bool isNVIDIA = false;
+	bool isAMD = false;
+	bool isIntel = false;
+	bool isMoltenVK = false;
+	uint32_t vendorID = 0;
+	uint32_t deviceID = 0;
+	std::string vendorName = "Unknown";
+	uint32_t optimalWorkgroupSize = 64; // Default, will be set based on vendor
+};
+
+// Performance monitoring for vendor comparison
+struct VendorPerformanceMetrics {
+	float avgComputeTimeMs = 0.0f;
+	float avgCompactionTimeMs = 0.0f;
+	uint32_t frameCount = 0;
+	uint32_t fallbackCount = 0;
+	
+	void update(float computeMs, float compactionMs, bool fellback) {
+		frameCount++;
+		avgComputeTimeMs = (avgComputeTimeMs * (frameCount - 1) + computeMs) / frameCount;
+		avgCompactionTimeMs = (avgCompactionTimeMs * (frameCount - 1) + compactionMs) / frameCount;
+		if (fellback) fallbackCount++;
+	}
+	
+	void printSummary(const std::string& vendorName) {
+		if (frameCount > 0) {
+			std::cout << "[PERF_" << vendorName << "] Avg Compute: " << avgComputeTimeMs 
+					  << "ms | Avg Compaction: " << avgCompactionTimeMs 
+					  << "ms | Fallbacks: " << fallbackCount << "/" << frameCount << std::endl;
+		}
+	}
+};
+
 // GPU-driven culling structures for P1 implementation
 struct GPUCullingBuffers {
 	BufferWithMemory inputInstanceBuffer;      // Raw instance data for GPU
@@ -3745,7 +3780,7 @@ static PipelineObjects createTextPipeline(VkDevice device, VkFormat colorFormat,
 }
 
 // GPU-Driven Culling: Create compute pipeline for frustum culling
-static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device) {
+static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device, const GPUVendorInfo& gpuVendor) {
 	std::string baseDir = std::string(BR5_SHADER_DIR);
 	std::string compPath = baseDir + "/frustum_cull.comp.spv";
 	auto compCode = readBinaryFile(compPath);
@@ -3813,6 +3848,20 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device) {
 		throw std::runtime_error("Failed to create frustum culling pipeline layout");
 	}
 
+	// Add specialization constant for vendor-specific workgroup size
+	VkSpecializationMapEntry specMapEntry{};
+	specMapEntry.constantID = 0;
+	specMapEntry.offset = 0;
+	specMapEntry.size = sizeof(uint32_t);
+	
+	uint32_t workgroupSize = gpuVendor.optimalWorkgroupSize;
+	
+	VkSpecializationInfo specInfo{};
+	specInfo.mapEntryCount = 1;
+	specInfo.pMapEntries = &specMapEntry;
+	specInfo.dataSize = sizeof(uint32_t);
+	specInfo.pData = &workgroupSize;
+	
 	// Create compute pipeline
 	VkComputePipelineCreateInfo cpci{};
 	cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -3820,6 +3869,7 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device) {
 	cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 	cpci.stage.module = comp;
 	cpci.stage.pName = "main";
+	cpci.stage.pSpecializationInfo = &specInfo;  // Add specialization info
 	cpci.layout = pipeline.computeLayout;
 	cpci.basePipelineHandle = VK_NULL_HANDLE;
 	cpci.basePipelineIndex = -1;
@@ -3836,7 +3886,7 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device) {
 }
 
 // P2: Create compute pipeline for instance compaction and draw command generation
-static GPUCompactionPipeline createInstanceCompactionPipeline(VkDevice device) {
+static GPUCompactionPipeline createInstanceCompactionPipeline(VkDevice device, const GPUVendorInfo& gpuVendor) {
 	std::string baseDir = std::string(BR5_SHADER_DIR);
 	std::string compPath = baseDir + "/circle_cull.comp.spv";
 	auto compCode = readBinaryFile(compPath);
@@ -3935,12 +3985,27 @@ static GPUCompactionPipeline createInstanceCompactionPipeline(VkDevice device) {
 		throw std::runtime_error("Failed to create compaction pipeline layout");
 	}
 
+	// Add specialization constant for vendor-specific workgroup size
+	VkSpecializationMapEntry specMapEntry{};
+	specMapEntry.constantID = 0;
+	specMapEntry.offset = 0;
+	specMapEntry.size = sizeof(uint32_t);
+	
+	uint32_t workgroupSize = gpuVendor.optimalWorkgroupSize;
+	
+	VkSpecializationInfo specInfo{};
+	specInfo.mapEntryCount = 1;
+	specInfo.pMapEntries = &specMapEntry;
+	specInfo.dataSize = sizeof(uint32_t);
+	specInfo.pData = &workgroupSize;
+	
 	VkComputePipelineCreateInfo cpci{};
 	cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 	cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 	cpci.stage.module = comp;
 	cpci.stage.pName = "main";
+	cpci.stage.pSpecializationInfo = &specInfo;  // Add specialization info
 	cpci.layout = pipeline.computeLayout;
 
 	if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &pipeline.computePipeline) != VK_SUCCESS) {
@@ -4653,7 +4718,8 @@ static void setupGPUCompactionDescriptors(VkDevice device,
 static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCullingPipeline& pipeline,
 	const GPUCullingBuffers& buffers, GPUCullingMetrics& metrics,
 	const HiZResources& hiz,
-	const std::vector<InstanceLayoutCPU>& inputInstances, uint32_t framebufferWidth, uint32_t framebufferHeight) {
+	const std::vector<InstanceLayoutCPU>& inputInstances, uint32_t framebufferWidth, uint32_t framebufferHeight,
+	const GPUVendorInfo& gpuVendor) {
 	
 	metrics.computeStartTime = std::chrono::high_resolution_clock::now();
 	metrics.totalInstances = static_cast<uint32_t>(inputInstances.size());
@@ -4706,8 +4772,17 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 
 	vkCmdPushConstants(cmd, pipeline.computeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-	// Dispatch compute shader (64 instances per workgroup as defined in shader)
-	uint32_t workgroups = (metrics.totalInstances + 63) / 64;
+	// Dispatch compute shader with vendor-optimized workgroup size
+	uint32_t workgroupSize = 64; // Default
+	if (gpuVendor.isNVIDIA) {
+		workgroupSize = 32; // NVIDIA prefers smaller workgroups for better occupancy
+	} else if (gpuVendor.isAMD) {
+		workgroupSize = 64; // AMD prefers larger workgroups
+	} else if (gpuVendor.isMoltenVK) {
+		workgroupSize = 32; // Conservative for MoltenVK
+	}
+	
+	uint32_t workgroups = (metrics.totalInstances + workgroupSize - 1) / workgroupSize;
 	vkCmdDispatch(cmd, workgroups, 1, 1);
 
 	// Prepare visibility counter for transfer readback
@@ -4793,7 +4868,8 @@ static void executeGPUCompaction(VkDevice device, VkCommandBuffer cmd,
 	const GPUCompactionPipeline& pipeline, 
 	const GPUIndirectBuffers& indirectBuffers,
 	GPUCullingMetrics& metrics,
-	uint32_t maxInstances, uint32_t maxHealthBars, bool enableHealthBars) {
+	uint32_t maxInstances, uint32_t maxHealthBars, bool enableHealthBars,
+	const GPUVendorInfo& gpuVendor) {
 	
 	metrics.compactionStartTime = std::chrono::high_resolution_clock::now();
 	
@@ -4844,9 +4920,17 @@ static void executeGPUCompaction(VkDevice device, VkCommandBuffer cmd,
 			0, 0, nullptr, 1, &counterBarrier, 0, nullptr);
 	}
 	
-	// Dispatch compaction compute shader
-	// Use the same workgroup size as frustum culling (64 threads per group)
-	uint32_t numWorkGroups = (maxInstances + 63) / 64;
+	// Dispatch compaction compute shader with vendor-optimized workgroup size
+	uint32_t workgroupSize = 64; // Default
+	if (gpuVendor.isNVIDIA) {
+		workgroupSize = 32; // NVIDIA prefers smaller workgroups for better occupancy
+	} else if (gpuVendor.isAMD) {
+		workgroupSize = 64; // AMD prefers larger workgroups
+	} else if (gpuVendor.isMoltenVK) {
+		workgroupSize = 32; // Conservative for MoltenVK
+	}
+	
+	uint32_t numWorkGroups = (maxInstances + workgroupSize - 1) / workgroupSize;
 	vkCmdDispatch(cmd, numWorkGroups, 1, 1);
 	
 	// Memory barrier: compute write -> vertex read for indirect draw
@@ -4898,13 +4982,85 @@ static void executeGPUCompaction(VkDevice device, VkCommandBuffer cmd,
 		barrierCount = 4;
 	}
 	
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
-		VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-		0, 0, nullptr, barrierCount, barriers, 0, nullptr);
+	// NVIDIA: Add availability operations to ensure memory is made available
+	// This is critical for NVIDIA's memory coherency model
+	if (gpuVendor.isNVIDIA) {
+		// Additional memory barrier for NVIDIA's stricter coherency requirements
+		VkMemoryBarrier nvidiaMemBarrier{};
+		nvidiaMemBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		nvidiaMemBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		nvidiaMemBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+		
+		vkCmdPipelineBarrier(cmd, 
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0, 
+			1, &nvidiaMemBarrier,
+			0, nullptr,
+			0, nullptr);
+	}
+	
+	// Enhanced pipeline barriers for cross-vendor compatibility
+	VkMemoryBarrier memBarrier{};
+	memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+
+	vkCmdPipelineBarrier(cmd, 
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+		VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+		0, 
+		1, &memBarrier,           // Add memory barrier for NVIDIA compatibility
+		barrierCount, barriers,   // Keep existing buffer barriers
+		0, nullptr);
 	
 	metrics.compactionEndTime = std::chrono::high_resolution_clock::now();
 	metrics.compactionTimeMs = std::chrono::duration<float, std::milli>(metrics.compactionEndTime - metrics.compactionStartTime).count();
 	metrics.indirectDrawEnabled = true;
+}
+
+// Enhanced debugging system for GPU compaction validation
+static void validateGPUCompactionResults(VkDevice device, const GPUCullingBuffers& cullingBuffers, 
+                                 const GPUIndirectBuffers& indirectBuffers, 
+                                 const GPUVendorInfo& gpuVendor,
+                                 GPUCullingMetrics& metrics) {
+    
+    // Read from persistently mapped readback buffer (safe - already synchronized)
+    if (cullingBuffers.counterReadbackHost != nullptr) {
+        uint32_t visibleCount = *cullingBuffers.counterReadbackHost;
+        
+        std::cout << "[GPU_DEBUG] Vendor: " << gpuVendor.vendorName 
+                  << " | Visible: " << visibleCount 
+                  << " | Total: " << metrics.totalInstances << std::endl;
+        
+        if (visibleCount == 0 && metrics.totalInstances > 0) {
+            std::cout << "[GPU_DEBUG] WARNING: Zero visibility result detected!" << std::endl;
+            std::cout << "[GPU_DEBUG] GPU Vendor ID: 0x" << std::hex << gpuVendor.vendorID << std::dec << std::endl;
+            std::cout << "[GPU_DEBUG] GPU Device ID: 0x" << std::hex << gpuVendor.deviceID << std::dec << std::endl;
+            std::cout << "[GPU_DEBUG] This may indicate a vendor-specific synchronization issue" << std::endl;
+            
+            // NVIDIA-specific debugging
+            if (gpuVendor.isNVIDIA) {
+                std::cout << "[NVIDIA_DEBUG] Workgroup size: " << gpuVendor.optimalWorkgroupSize << std::endl;
+                std::cout << "[NVIDIA_DEBUG] Check if compute shader has shared memory access" << std::endl;
+                std::cout << "[NVIDIA_DEBUG] Check if SSBO has 'coherent' qualifier" << std::endl;
+                std::cout << "[NVIDIA_DEBUG] Verify pipeline barriers include memory barriers" << std::endl;
+            }
+            
+            // Additional debugging: Check if input data is valid
+            if (cullingBuffers.inputInstanceCount > 0) {
+                std::cout << "[GPU_DEBUG] Input instance count: " << cullingBuffers.inputInstanceCount << std::endl;
+                std::cout << "[GPU_DEBUG] Input buffer capacity: " << cullingBuffers.inputCapacity << std::endl;
+                std::cout << "[GPU_DEBUG] Visibility buffer capacity: " << cullingBuffers.visibilityCapacity << std::endl;
+            }
+        }
+        
+        // Update metrics
+        metrics.compactedCircles = visibleCount;
+        metrics.culledInstances = metrics.totalInstances - visibleCount;
+    } else {
+        std::cout << "[GPU_DEBUG] ERROR: Readback buffer not mapped!" << std::endl;
+    }
 }
 
 // GPU-Driven Culling: Validate GPU culling results against CPU reference
@@ -7076,6 +7232,95 @@ int main(int argc, char** argv) {
 		return 5;
 	}
 
+	// GPU Vendor Detection and Adaptive Configuration
+
+	auto detectGPUVendor = [](VkPhysicalDevice physical) -> GPUVendorInfo {
+		GPUVendorInfo info;
+		VkPhysicalDeviceProperties deviceProps;
+		vkGetPhysicalDeviceProperties(physical, &deviceProps);
+		
+		info.vendorID = deviceProps.vendorID;
+		info.deviceID = deviceProps.deviceID;
+		
+		switch (deviceProps.vendorID) {
+			case 0x10DE:
+				info.isNVIDIA = true;
+				info.vendorName = "NVIDIA";
+				info.optimalWorkgroupSize = 32; // NVIDIA warp size
+				break;
+			case 0x1002:
+				info.isAMD = true;
+				info.vendorName = "AMD";
+				info.optimalWorkgroupSize = 64; // AMD wavefront size
+				break;
+			case 0x8086:
+				info.isIntel = true;
+				info.vendorName = "Intel";
+				info.optimalWorkgroupSize = 32; // Conservative for Intel
+				break;
+			case 0x106B: // Apple
+				info.isMoltenVK = true;
+				info.vendorName = "Apple (MoltenVK)";
+				info.optimalWorkgroupSize = 32; // Conservative for MoltenVK
+				break;
+			default:
+				info.vendorName = "Unknown (0x" + std::to_string(deviceProps.vendorID) + ")";
+				info.optimalWorkgroupSize = 64; // Default
+		}
+		
+		std::cout << "[GPU_VENDOR] Detected: " << info.vendorName 
+				  << " (VendorID: 0x" << std::hex << info.vendorID << std::dec 
+				  << ", Workgroup: " << info.optimalWorkgroupSize << ")" << std::endl;
+		
+		return info;
+	};
+
+	// Detect GPU vendor for adaptive optimizations
+	GPUVendorInfo gpuVendor = detectGPUVendor(physical);
+
+	// Query and validate compute shader limits for vendor-specific optimizations
+	VkPhysicalDeviceProperties deviceProps;
+	vkGetPhysicalDeviceProperties(physical, &deviceProps);
+	
+	std::cout << "[GPU_LIMITS] Max Compute Work Group Invocations: " 
+	          << deviceProps.limits.maxComputeWorkGroupInvocations << std::endl;
+	std::cout << "[GPU_LIMITS] Max Compute Work Group Size: [" 
+	          << deviceProps.limits.maxComputeWorkGroupSize[0] << ", "
+	          << deviceProps.limits.maxComputeWorkGroupSize[1] << ", "
+	          << deviceProps.limits.maxComputeWorkGroupSize[2] << "]" << std::endl;
+	
+	// Validate that our workgroup sizes are within device limits
+	uint32_t targetWorkgroupSize = gpuVendor.optimalWorkgroupSize;
+	if (targetWorkgroupSize > deviceProps.limits.maxComputeWorkGroupInvocations) {
+		std::cout << "[GPU_LIMITS] WARNING: Target workgroup size " << targetWorkgroupSize 
+		          << " exceeds device limit " << deviceProps.limits.maxComputeWorkGroupInvocations 
+		          << ". Using device limit instead." << std::endl;
+		targetWorkgroupSize = deviceProps.limits.maxComputeWorkGroupInvocations;
+		// Update the vendor info with validated workgroup size
+		gpuVendor.optimalWorkgroupSize = targetWorkgroupSize;
+	}
+	
+	std::cout << "[GPU_VENDOR] Using workgroup size: " << gpuVendor.optimalWorkgroupSize << std::endl;
+
+	// Initialize performance monitoring
+	VendorPerformanceMetrics vendorPerfMetrics;
+
+	// Vendor-specific optimization functions
+	auto getOptimalWorkgroupSize = [](const GPUVendorInfo& vendor, uint32_t instanceCount) -> uint32_t {
+		uint32_t baseSize = 64; // Default
+		
+		if (vendor.isNVIDIA) {
+			baseSize = 32; // NVIDIA prefers smaller workgroups for better occupancy
+		} else if (vendor.isAMD) {
+			baseSize = 64; // AMD prefers larger workgroups
+		} else if (vendor.isMoltenVK) {
+			baseSize = 32; // Conservative for MoltenVK
+		}
+		
+		// Ensure we don't exceed instance count
+		return std::min(baseSize, instanceCount);
+	};
+
 	// Find dedicated transfer queue family if available
 	uint32_t transferQueueFamily = UINT32_MAX;
 	{
@@ -7300,13 +7545,13 @@ int main(int argc, char** argv) {
 	PipelineObjects textPipeline = createTextPipeline(device, sc.colorFormat, renderPass);
 
 	// GPU-Driven Culling: Create compute pipeline (buffers will be created after sim is initialized)
-	GPUCullingPipeline cullingPipeline = createFrustumCullingPipeline(device);
+	GPUCullingPipeline cullingPipeline = createFrustumCullingPipeline(device, gpuVendor);
 	GPUHiZPipeline hizPipeline = createHiZBuildPipeline(device);
 	GPUCullingBuffers cullingBuffers{};
 	GPUCullingMetrics cullingMetrics{};
 	
 	// P2: Create instance compaction pipeline for indirect draw generation
-	GPUCompactionPipeline compactionPipeline = createInstanceCompactionPipeline(device);
+	GPUCompactionPipeline compactionPipeline = createInstanceCompactionPipeline(device, gpuVendor);
 	GPUIndirectBuffers indirectBuffers{};
 
 	// Create geometry buffers (quad vertices) and instance buffer
@@ -7652,6 +7897,12 @@ int main(int argc, char** argv) {
 		}
 
 		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_C(1'000'000'000));
+	
+	// PHASE 4 FIX: Validate GPU compaction results AFTER fence wait (safe synchronization)
+	if (cullingBuffers.enabled && indirectBuffers.enabled && cullingMetrics.totalInstances > 0) {
+		validateGPUCompactionResults(device, cullingBuffers, indirectBuffers, gpuVendor, cullingMetrics);
+	}
+	
 	uint32_t previousVisibleCount = 0;
 	if (cullingBuffers.counterReadbackHost) {
 		previousVisibleCount = *cullingBuffers.counterReadbackHost;
@@ -7843,13 +8094,19 @@ int main(int argc, char** argv) {
 					// Execute GPU culling pass
 					executeGPUCulling(device, cmd, cullingPipeline, cullingBuffers, cullingMetrics,
 						hizResources,
-						cpuInstances, sc.extent.width, sc.extent.height);
+						cpuInstances, sc.extent.width, sc.extent.height, gpuVendor);
 					
 					// P2: Execute instance compaction pass if indirect draw is enabled
 					if (indirectBuffers.enabled) {
 						executeGPUCompaction(device, cmd, compactionPipeline, indirectBuffers, cullingMetrics,
-							static_cast<uint32_t>(cpuInstances.size()), static_cast<uint32_t>(healthBarInstances.size()), !healthBarInstances.empty());
+							static_cast<uint32_t>(cpuInstances.size()), static_cast<uint32_t>(healthBarInstances.size()), !healthBarInstances.empty(), gpuVendor);
+						
+						// Note: GPU compaction validation moved to after fence wait for proper synchronization
 					}
+					
+					// Update performance metrics
+					bool fellback = !cullingBuffers.enabled || !indirectBuffers.enabled;
+					vendorPerfMetrics.update(cullingMetrics.computeTimeMs, cullingMetrics.compactionTimeMs, fellback);
 					
 					// Skip validation for now to avoid complexity - mark as passed
 					cullingMetrics.validationPassed = true;
@@ -8087,6 +8344,11 @@ int main(int argc, char** argv) {
 					  << " success, " << imageManager.loadFailCount.load() << " failed";
 			std::cout << "\n";
 			lastAliveCount = currentAlive;
+		}
+
+		// Print performance summary every 1000 frames
+		if (frameCount % 1000 == 0 && frameCount > 0) {
+			vendorPerfMetrics.printSummary(gpuVendor.vendorName);
 		}
 
 	VkClearValue clearValues[2]{};

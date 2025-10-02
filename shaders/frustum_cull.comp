@@ -1,8 +1,15 @@
 // Compute shader for GPU-driven frustum culling of circle instances
 #version 450
 
-// Workgroup size - process 64 instances per workgroup for good occupancy
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+// Workgroup size - configurable via specialization constants for vendor optimization
+// NVIDIA: 32 threads (warp size), AMD: 64 threads (wavefront size)
+layout(constant_id = 0) const uint WORKGROUP_SIZE_X = 64;
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+// NVIDIA FIX: Dummy shared memory to workaround NVIDIA barrier() bug
+// Without any shared memory access, barrier() fails to synchronize on NVIDIA GPUs
+// Reference: https://forums.developer.nvidia.com/t/barrier-failing-if-there-isnt-any-shared-memory-used/252614
+shared uint nvidia_barrier_workaround;
 
 // Structure definition (matches InstanceLayoutCPU from C++)
 struct InstanceData {
@@ -25,7 +32,8 @@ layout(set = 0, binding = 1, std430) restrict writeonly buffer VisibilityBuffer 
 };
 
 // Output: atomic counter for number of visible instances
-layout(set = 0, binding = 2, std430) restrict buffer VisibilityCounter {
+// NVIDIA FIX: coherent qualifier ensures atomic visibility across workgroups
+layout(set = 0, binding = 2, std430) coherent restrict buffer VisibilityCounter {
     uint visibleCount;
 };
 
@@ -105,6 +113,11 @@ bool isCircleVisible(vec2 center, float radius, vec2 viewport, vec2 cameraOffset
 void main() {
     uint instanceIndex = gl_GlobalInvocationID.x;
     
+    // NVIDIA barrier workaround: Touch shared memory to enable proper synchronization
+    if (gl_LocalInvocationID.x == 0) {
+        nvidia_barrier_workaround = 0;
+    }
+    
     // Bounds check
     if (instanceIndex >= pc.maxInstances) {
         return;
@@ -131,11 +144,18 @@ void main() {
 
     // If visible, add to output buffer
     if (visible) {
+        // NVIDIA: Use explicit memory scope for atomic operations
+        // memoryBarrierBuffer() ensures visibility across all workgroups
         uint outputIndex = atomicAdd(visibleCount, 1);
+        memoryBarrierBuffer(); // CRITICAL: Ensure atomic result is visible
+        
+        // Additional barrier for NVIDIA driver stability
+        barrier();
         
         // Ensure we don't overflow the visibility buffer
         if (outputIndex < visibleInstanceIndices.length()) {
             visibleInstanceIndices[outputIndex] = instanceIndex;
+            memoryBarrierBuffer(); // Ensure write is visible
         }
     }
 }
