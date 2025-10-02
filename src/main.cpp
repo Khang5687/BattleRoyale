@@ -3318,7 +3318,7 @@ static void unmapMemory(VkDevice device, VkDeviceMemory memory) {
 static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorFormat, VkRenderPass renderPass) {
 	std::string baseDir = std::string(BR5_SHADER_DIR);
 	std::string vertPath = baseDir + "/circle.vert.spv";
-	std::string fragPath = baseDir + "/circle_optimized.frag.spv";
+	std::string fragPath = baseDir + "/circle.frag.spv";
 	auto vertCode = readBinaryFile(vertPath);
 	auto fragCode = readBinaryFile(fragPath);
 	VkShaderModule vert = createShaderModule(device, vertCode);
@@ -3333,17 +3333,16 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	vertexBindings[0].binding = 0; vertexBindings[0].stride = sizeof(float) * 2; vertexBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 	vertexBindings[1].binding = 1; vertexBindings[1].stride = sizeof(InstanceLayoutCPU); vertexBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-	VkVertexInputAttributeDescription attrs[6]{};
+	VkVertexInputAttributeDescription attrs[5]{};
 	attrs[0].location = 0; attrs[0].binding = 0; attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0; // inPos
 	attrs[1].location = 1; attrs[1].binding = 1; attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = offsetof(InstanceLayoutCPU, center); // inCenter
 	attrs[2].location = 2; attrs[2].binding = 1; attrs[2].format = VK_FORMAT_R32_SFLOAT; attrs[2].offset = offsetof(InstanceLayoutCPU, radius); // inRadius
 	attrs[3].location = 3; attrs[3].binding = 1; attrs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; attrs[3].offset = offsetof(InstanceLayoutCPU, color); // inColor
 	attrs[4].location = 4; attrs[4].binding = 1; attrs[4].format = VK_FORMAT_R32_UINT; attrs[4].offset = offsetof(InstanceLayoutCPU, textureIndex); // inTextureIndex
-	attrs[5].location = 5; attrs[5].binding = 1; attrs[5].format = VK_FORMAT_R32_SFLOAT; attrs[5].offset = offsetof(InstanceLayoutCPU, lodTier); // inLodTier
 
 	VkPipelineVertexInputStateCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vi.vertexBindingDescriptionCount = 2; vi.pVertexBindingDescriptions = vertexBindings;
-	vi.vertexAttributeDescriptionCount = 6; vi.pVertexAttributeDescriptions = attrs;
+	vi.vertexAttributeDescriptionCount = 5; vi.pVertexAttributeDescriptions = attrs;
 
 	VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
