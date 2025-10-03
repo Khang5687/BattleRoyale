@@ -8,7 +8,9 @@
       "mcp__tavily-remote__tavily_search",
       "mcp__tavily-remote__tavily_extract",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:www.vkguide.dev)"
+      "WebFetch(domain:www.vkguide.dev)",
+      "Bash(timeout:*)",
+      "Bash(pkill:*)"
     ],
     "deny": []
   }

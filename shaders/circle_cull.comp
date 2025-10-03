@@ -106,13 +106,15 @@ void main() {
         circleDrawCommand.instanceCount = visibleCount;
         circleDrawCommand.firstVertex = 0;
         circleDrawCommand.firstInstance = 0;
-        
+        memoryBarrierBuffer(); // CRITICAL: Ensure draw command visible to graphics pipeline
+
         // Health bar draw command (will be updated later)
         healthBarDrawCommand.vertexCount = 6;
         healthBarDrawCommand.instanceCount = 0;    // Will be set after health bar processing
         healthBarDrawCommand.firstVertex = 0;
         healthBarDrawCommand.firstInstance = 0;
-        
+        memoryBarrierBuffer(); // Ensure health bar draw command visible
+
         // Reset health bar counter
         healthBarCount = 0;
     }
@@ -159,6 +161,7 @@ void main() {
         // Update health bar draw command with final count
         if (index == 0) {
             healthBarDrawCommand.instanceCount = healthBarCount;
+            memoryBarrierBuffer(); // Ensure updated draw command visible to graphics pipeline
         }
     }
 }

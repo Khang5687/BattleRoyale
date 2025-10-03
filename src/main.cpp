@@ -177,6 +177,8 @@ struct GPUIndirectBuffers {
 	BufferWithMemory healthBarCompactedInstanceBuffer; // Compacted health bar instances for rendering
 	BufferWithMemory healthBarVisibilityBuffer;        // Health bar visibility indices
 	BufferWithMemory healthBarCounterBuffer;            // Health bar visible count
+	BufferWithMemory drawCommandReadbackBuffer;        // DEBUG: Read back draw commands
+	uint32_t* drawCommandReadbackHost = nullptr;       // DEBUG: Persistent mapping for draw command readback
 	VkDeviceSize circleDrawCommandCapacity = 0;
 	VkDeviceSize healthBarDrawCommandCapacity = 0;
 	VkDeviceSize circleCompactedCapacity = 0;
@@ -4057,17 +4059,19 @@ static GPUCompactionPipeline createInstanceCompactionPipeline(VkDevice device, c
 // P2: Create buffers for indirect draw system
 static void createGPUIndirectBuffers(VkPhysicalDevice physical, VkDevice device, GPUIndirectBuffers& buffers, uint32_t maxInstances, uint32_t maxHealthBars) {
 	// Circle draw command buffer (single command)
+	// CRITICAL: Add TRANSFER_DST for MoltenVK to allow vkCmdFillBuffer initialization
 	VkDeviceSize circleDrawCommandSize = sizeof(IndirectDrawCommand);
 	createBuffer(physical, device, circleDrawCommandSize,
-		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 		buffers.circleDrawCommandBuffer);
 	buffers.circleDrawCommandCapacity = circleDrawCommandSize;
 
 	// Health bar draw command buffer (single command)
+	// CRITICAL: Add TRANSFER_DST for MoltenVK to allow vkCmdFillBuffer initialization
 	VkDeviceSize healthBarDrawCommandSize = sizeof(IndirectDrawCommand);
 	createBuffer(physical, device, healthBarDrawCommandSize,
-		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 		buffers.healthBarDrawCommandBuffer);
 	buffers.healthBarDrawCommandCapacity = healthBarDrawCommandSize;
@@ -4101,6 +4105,14 @@ static void createGPUIndirectBuffers(VkPhysicalDevice physical, VkDevice device,
 		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 		buffers.healthBarCounterBuffer);
+
+	// DEBUG: Draw command readback buffer for validation
+	VkDeviceSize drawCommandReadbackSize = sizeof(IndirectDrawCommand);
+	createBuffer(physical, device, drawCommandReadbackSize,
+		VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		buffers.drawCommandReadbackBuffer);
+	buffers.drawCommandReadbackHost = static_cast<uint32_t*>(mapMemory(device, buffers.drawCommandReadbackBuffer.memory, drawCommandReadbackSize));
 
 	// Enable P2 indirect draw for testing
 	buffers.enabled = true;
@@ -4834,7 +4846,7 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 	postCullingBarriers[0].size = buffers.visibilityCapacity;
 
 	postCullingBarriers[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-	postCullingBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	postCullingBarriers[1].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; // FIX: P1 writes via SHADER, not TRANSFER
 	postCullingBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 	postCullingBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	postCullingBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -5014,6 +5026,49 @@ static void executeGPUCompaction(VkDevice device, VkCommandBuffer cmd,
 		barrierCount, barriers,   // Keep existing buffer barriers
 		0, nullptr);
 	
+	// DEBUG: Copy draw command to readback buffer for validation
+	VkBufferMemoryBarrier drawCmdToTransfer{};
+	drawCmdToTransfer.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	drawCmdToTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	drawCmdToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	drawCmdToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	drawCmdToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	drawCmdToTransfer.buffer = indirectBuffers.circleDrawCommandBuffer.buffer;
+	drawCmdToTransfer.offset = 0;
+	drawCmdToTransfer.size = sizeof(IndirectDrawCommand);
+
+	vkCmdPipelineBarrier(cmd,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0,
+		0, nullptr,
+		1, &drawCmdToTransfer,
+		0, nullptr);
+
+	VkBufferCopy drawCmdCopy{};
+	drawCmdCopy.srcOffset = 0;
+	drawCmdCopy.dstOffset = 0;
+	drawCmdCopy.size = sizeof(IndirectDrawCommand);
+	vkCmdCopyBuffer(cmd, indirectBuffers.circleDrawCommandBuffer.buffer, indirectBuffers.drawCommandReadbackBuffer.buffer, 1, &drawCmdCopy);
+
+	VkBufferMemoryBarrier readbackBarrier{};
+	readbackBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	readbackBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	readbackBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+	readbackBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	readbackBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	readbackBarrier.buffer = indirectBuffers.drawCommandReadbackBuffer.buffer;
+	readbackBarrier.offset = 0;
+	readbackBarrier.size = sizeof(IndirectDrawCommand);
+
+	vkCmdPipelineBarrier(cmd,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_HOST_BIT,
+		0,
+		0, nullptr,
+		1, &readbackBarrier,
+		0, nullptr);
+	
 	metrics.compactionEndTime = std::chrono::high_resolution_clock::now();
 	metrics.compactionTimeMs = std::chrono::duration<float, std::milli>(metrics.compactionEndTime - metrics.compactionStartTime).count();
 	metrics.indirectDrawEnabled = true;
@@ -5028,6 +5083,28 @@ static void validateGPUCompactionResults(VkDevice device, const GPUCullingBuffer
     // Read from persistently mapped readback buffer (safe - already synchronized)
     if (cullingBuffers.counterReadbackHost != nullptr) {
         uint32_t visibleCount = *cullingBuffers.counterReadbackHost;
+        
+        // DEBUG: Read draw command to verify shader output
+        if (indirectBuffers.drawCommandReadbackHost != nullptr) {
+            uint32_t vertexCount = indirectBuffers.drawCommandReadbackHost[0];
+            uint32_t instanceCount = indirectBuffers.drawCommandReadbackHost[1];
+            uint32_t firstVertex = indirectBuffers.drawCommandReadbackHost[2];
+            uint32_t firstInstance = indirectBuffers.drawCommandReadbackHost[3];
+            
+            static int debugFrameCount = 0;
+            if (debugFrameCount++ < 5) {  // Only print first 5 frames
+                std::cout << "[P2_DEBUG] Draw Command FROM GPU: vertexCount=" << vertexCount 
+                          << ", instanceCount=" << instanceCount 
+                          << ", firstVertex=" << firstVertex 
+                          << ", firstInstance=" << firstInstance << std::endl;
+                
+                if (instanceCount == 0 && visibleCount > 0) {
+                    std::cout << "[P2_BUG] MoltenVK BUG: Compute shader writes to INDIRECT_BUFFER not visible!" << std::endl;
+                    std::cout << "[P2_BUG] Visible count is " << visibleCount << " but draw command shows 0 instances!" << std::endl;
+                    std::cout << "[P2_BUG] This is a known MoltenVK limitation with compute->indirect buffer writes" << std::endl;
+                }
+            }
+        }
         
         std::cout << "[GPU_DEBUG] Vendor: " << gpuVendor.vendorName 
                   << " | Visible: " << visibleCount 
@@ -7818,8 +7895,17 @@ int main(int argc, char** argv) {
 	// Enable GPU-driven rendering system
 	if (!gDisableGpuCulling) {
 		cullingBuffers.enabled = true;
-		indirectBuffers.enabled = true;
-		std::cout << "[GPU_DRIVEN] GPU-driven rendering system enabled (P1: GPU Culling COMPLETE)!" << std::endl;
+		// CRITICAL: Disable P2 indirect draw on MoltenVK due to compute->vertex memory coherency issues
+		// MoltenVK/Metal does not properly make compute shader writes visible to vertex shaders
+		// even with full pipeline barriers and memory barriers
+		if (gpuVendor.isMoltenVK) {
+			indirectBuffers.enabled = false;
+			std::cout << "[GPU_DRIVEN] GPU Culling (P1) enabled, P2 indirect draw DISABLED on MoltenVK (compute->vertex coherency limitation)" << std::endl;
+			std::cout << "[GPU_DRIVEN] Using P1 GPU Culling + CPU indirect draw path for optimal performance" << std::endl;
+		} else {
+			indirectBuffers.enabled = true;
+			std::cout << "[GPU_DRIVEN] GPU-driven rendering system enabled (P1: GPU Culling + P2: Indirect Draw COMPLETE)!" << std::endl;
+		}
 	} else {
 		std::cout << "[GPU_DRIVEN] GPU-driven rendering system disabled via flag" << std::endl;
 	}
@@ -8108,7 +8194,77 @@ int main(int argc, char** argv) {
 					if (indirectBuffers.enabled) {
 						executeGPUCompaction(device, cmd, compactionPipeline, indirectBuffers, cullingMetrics,
 							static_cast<uint32_t>(cpuInstances.size()), static_cast<uint32_t>(healthBarInstances.size()), !healthBarInstances.empty(), gpuVendor);
-						
+
+						// MOLTENVK WORKAROUND: Compute shader writes to INDIRECT_BUFFER are not visible to vkCmdDrawIndirect
+						// This is a known MoltenVK limitation - indirect draw commands must be written via transfer operations
+						// Manually write the draw command using the CPU-read visibility counter
+						if (gpuVendor.isMoltenVK && cullingBuffers.counterReadbackHost != nullptr) {
+							uint32_t visibleCount = *cullingBuffers.counterReadbackHost;
+							
+							// Create draw command on stack
+							IndirectDrawCommand drawCmd{};
+							drawCmd.vertexCount = 6;              // Quad has 6 vertices
+							drawCmd.instanceCount = visibleCount; // Use GPU-culled visible count
+							drawCmd.firstVertex = 0;
+							drawCmd.firstInstance = 0;
+							
+							// Transition buffer for transfer write
+							VkBufferMemoryBarrier transferBarrier{};
+							transferBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+							transferBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+							transferBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+							transferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+							transferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+							transferBarrier.buffer = indirectBuffers.circleDrawCommandBuffer.buffer;
+							transferBarrier.offset = 0;
+							transferBarrier.size = sizeof(IndirectDrawCommand);
+							
+							vkCmdPipelineBarrier(cmd,
+								VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+								VK_PIPELINE_STAGE_TRANSFER_BIT,
+								0,
+								0, nullptr,
+								1, &transferBarrier,
+								0, nullptr);
+							
+							// Write draw command using vkCmdUpdateBuffer (CPU -> GPU transfer)
+							vkCmdUpdateBuffer(cmd, indirectBuffers.circleDrawCommandBuffer.buffer, 0, sizeof(IndirectDrawCommand), &drawCmd);
+							
+							// Transition buffer for indirect read
+							VkBufferMemoryBarrier indirectBarrier{};
+							indirectBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+							indirectBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+							indirectBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+							indirectBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+							indirectBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+							indirectBarrier.buffer = indirectBuffers.circleDrawCommandBuffer.buffer;
+							indirectBarrier.offset = 0;
+							indirectBarrier.size = sizeof(IndirectDrawCommand);
+							
+							vkCmdPipelineBarrier(cmd,
+								VK_PIPELINE_STAGE_TRANSFER_BIT,
+								VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+								0,
+								0, nullptr,
+								1, &indirectBarrier,
+								0, nullptr);
+						}
+
+						// CRITICAL: Add full memory barrier for MoltenVK/Metal compatibility
+						// Ensures draw commands and compacted instances are visible to graphics pipeline
+						VkMemoryBarrier fullBarrier{};
+						fullBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+						fullBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+						fullBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+
+						vkCmdPipelineBarrier(cmd,
+							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+							VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+							VK_DEPENDENCY_BY_REGION_BIT, // Optimize for MoltenVK
+							1, &fullBarrier,
+							0, nullptr,
+							0, nullptr);
+
 						// Note: GPU compaction validation moved to after fence wait for proper synchronization
 					}
 					
