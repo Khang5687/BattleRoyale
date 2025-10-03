@@ -4,7 +4,11 @@
       "Bash(ls:*)",
       "Bash(ldd:*)",
       "Bash(cmake:*)",
-      "Bash(./RelWithDebInfo/battleroyale5.exe)"
+      "Bash(./RelWithDebInfo/battleroyale5.exe)",
+      "mcp__tavily-remote__tavily_search",
+      "mcp__tavily-remote__tavily_extract",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.vkguide.dev)"
     ],
     "deny": []
   }
