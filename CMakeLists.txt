@@ -48,6 +48,10 @@ find_program(GLSLANG_VALIDATOR_EXECUTABLE NAMES glslangValidator HINTS ENV VULKA
 set(SHADER_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle.vert
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle.frag
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle_tier0.vert
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle_tier0.frag
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle_tier1.vert
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/circle_tier1.frag
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/health_bar.vert
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/health_bar.frag
   ${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert

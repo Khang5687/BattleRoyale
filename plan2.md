@@ -516,13 +516,51 @@ Root cause: Metal's memory model requires explicit flush/invalidate that Vulkan 
 
 **Status:** Week 2 **COMPLETE and PRODUCTION-READY** ✅
 
-### Week 3: MoltenVK Optimizations
+### Week 3: GPU-Based LOD Classification ✅ COMPLETE
+- [x] Implement 4-tier LOD classification in compute shader
+- [x] Create tier-specific visibility buffers (8 additional GPU buffers)
+- [x] Extend descriptor set layout (4 → 12 bindings)
+- [x] Add tier distribution metrics to HUD
+- [x] Enable GPU LOD system
+
+**Success Criteria:** ✅ GPU-based LOD classification working, tier metrics displayed
+**Status:** Week 3 **COMPLETE** - See `WEEK3_IMPLEMENTATION_SUMMARY.md`
+
+### Week 4: Multi-Tier Rendering Infrastructure ✅ COMPLETE
+- [x] Create Tier 0 (PIXEL_DUST) pipeline with point sprite rendering
+- [x] Create Tier 1 (SIMPLE_SHAPE) pipeline with procedural circles
+- [x] Tier 2/3 use existing textured pipeline
+- [x] Compile new tier-specific shaders
+- [x] Enable LOD system (`lodEnabled = true`)
+- [x] Add LOD tier metrics to HUD diagnostics
+- [x] Update CMakeLists.txt for new shaders
+- [x] Clean compilation and runtime verification
+
+**Success Criteria:** ✅ All pipelines created, LOD system activated, ready for multi-tier rendering
+**Status:** Week 4 **COMPLETE** - See `WEEK4_IMPLEMENTATION_SUMMARY.md`
+
+**Performance Projections:**
+- Tier 0: 6x vertex throughput (point sprites vs quads)
+- Tier 1: 100% texture bandwidth savings (procedural rendering)
+- Tier 2: 16x bandwidth reduction (automatic mipmapping)
+- Overall: 70-80% texture bandwidth reduction expected
+
+### Week 5: Multi-Tier Rendering Activation
+- [ ] Implement CPU-side tier-based instance sorting
+- [ ] Activate separate rendering passes per tier
+- [ ] Measure performance gains via Metal frame capture
+- [ ] Optimize tier thresholds based on performance data
+- [ ] Test with 10K+ circles
+
+**Success Criteria:** 300-400% FPS improvement at current scale, 60 FPS @ 50K circles
+
+### Week 6: MoltenVK Optimizations
 - [ ] Enable unified memory optimizations
 - [ ] Optimize descriptor set layout for Metal
 - [ ] Profile with Metal frame capture
 - [ ] Benchmark vs baseline
 
-**Success Criteria:** 30% perf improvement on Apple Silicon
+**Success Criteria:** Additional 30% perf improvement on Apple Silicon
 
 ### Week 4: Clustering
 - [ ] Implement density grid clustering
@@ -726,16 +764,24 @@ This plan provides a systematic approach to scale from 5.8K circles @ 119 FPS to
 5. **Clustering for extreme scale** (density fields for sub-pixel objects - Week 4+)
 6. **Compression** (ASTC 8x8 for 87% memory savings - Week 5+)
 
-**Revised Timeline:** 
-- Week 1: ✅ **COMPLETE** (GPU culling active)
-- Week 2: ⚠️ **IN PROGRESS** (reimplementing mipmaps with correct approach)
-- Weeks 3-6: On track once Week 2 completes
+**Current Timeline:** 
+- Week 1: ✅ **COMPLETE** (GPU culling active @ 119 FPS)
+- Week 2: ✅ **COMPLETE** (offline mipmap generation implemented)
+- Week 3: ✅ **COMPLETE** (GPU LOD classification active)
+- Week 4: ✅ **COMPLETE** (multi-tier rendering pipelines created)
+- Week 5: ⏳ **NEXT** (activate multi-tier rendering, performance testing)
+- Weeks 6-7: Optimization and polish
 
-**Risk Level:** Medium → **Low** (major risks discovered and mitigated)
+**Risk Level:** Low → **Very Low** (all major technical challenges resolved)
 - MoltenVK P2 limitation: ✅ Solved (disable P2, use hybrid approach)
-- Mipmap performance: ✅ Solution identified (offline generation)
-- Rollback strategy: ✅ Validated (git hard reset preserved Week 1)
+- Mipmap performance: ✅ Solved (offline generation with stb_image_resize2)
+- GPU LOD classification: ✅ Working (Week 3 complete)
+- Multi-tier pipelines: ✅ Created (Week 4 complete)
 
-**Performance Target:** 1M circles @ 60 FPS ✓ (achievable with current trajectory)
+**Performance Target:** 
+- **Short-term (Week 5):** 300-400 FPS @ 5,806 circles (4x improvement)
+- **Medium-term (Week 6):** 60 FPS @ 50K circles
+- **Long-term (Week 7+):** 60 FPS @ 100K+ circles
+- **Stretch goal:** 1M circles @ 60 FPS with clustering (Week 8+)
 
 The existing infrastructure (`gpu_driven_rendering.hpp`, `bindless_textures.hpp`, `virtual_texturing.hpp`) provides a strong foundation - main work is activation and integration. **Week 1 success proves the approach is sound; Week 2 reset teaches valuable lessons about optimization trade-offs on MoltenVK.**
