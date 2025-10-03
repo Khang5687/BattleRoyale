@@ -160,6 +160,20 @@ struct GPUCullingBuffers {
 	uint32_t inputInstanceCount = 0;
 	uint32_t visibleInstanceCount = 0;
 	bool enabled = false;                      // GPU culling can be disabled for debugging
+	
+	// Week 3: LOD tier-specific buffers for multi-tier rendering
+	BufferWithMemory tier0VisibilityBuffer;    // PIXEL_DUST indices
+	BufferWithMemory tier0CounterBuffer;       // PIXEL_DUST counter
+	BufferWithMemory tier1VisibilityBuffer;    // SIMPLE_SHAPE indices
+	BufferWithMemory tier1CounterBuffer;       // SIMPLE_SHAPE counter
+	BufferWithMemory tier2VisibilityBuffer;    // BASIC_TEXTURE indices
+	BufferWithMemory tier2CounterBuffer;       // BASIC_TEXTURE counter
+	BufferWithMemory tier3VisibilityBuffer;    // FULL_DETAIL indices
+	BufferWithMemory tier3CounterBuffer;       // FULL_DETAIL counter
+	BufferWithMemory tierCounterReadbackBuffer; // Host-visible readback of all tier counts
+	uint32_t* tierCounterReadbackHost = nullptr; // Persistent mapping [tier0, tier1, tier2, tier3]
+	uint32_t tierCounts[4] = {0, 0, 0, 0};     // CPU-side tier counts
+	bool lodEnabled = false;                    // GPU LOD classification enabled (Week 3)
 };
 
 // P2: Indirect draw command structures for GPU-driven rendering
@@ -258,6 +272,8 @@ struct FrustumCullPushConstants {
 	uint32_t maxInstances;  // maximum number of input instances
 	uint32_t hizEnabled;    // 1 when Hi-Z occlusion data is valid
 	uint32_t hizMipCount;   // available mip levels in Hi-Z pyramid
+	uint32_t lodEnabled;    // Week 3: 1 when GPU LOD classification should run
+	float zoomFactor;       // Week 3: Camera zoom factor for LOD calculations
 	uint32_t pad0;          // alignment padding
 };
 
@@ -294,6 +310,16 @@ struct GPUCullingMetrics {
 	uint32_t compactedCircles = 0;
 	uint32_t compactedHealthBars = 0;
 	bool indirectDrawEnabled = false;
+	
+	// Week 3: LOD tier distribution metrics
+	uint32_t tier0Count = 0; // PIXEL_DUST count
+	uint32_t tier1Count = 0; // SIMPLE_SHAPE count
+	uint32_t tier2Count = 0; // BASIC_TEXTURE count
+	uint32_t tier3Count = 0; // FULL_DETAIL count
+	float tier0Percentage = 0.0f;
+	float tier1Percentage = 0.0f;
+	float tier2Percentage = 0.0f;
+	float tier3Percentage = 0.0f;
 };
 
 struct HudGeometry {
@@ -3869,7 +3895,8 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device, const GP
 	VkShaderModule comp = createShaderModule(device, compCode);
 
 	// Create descriptor set layout for compute buffers
-	VkDescriptorSetLayoutBinding bindings[4]{};
+	// Week 3: Extended from 4 to 12 bindings (3 original + 8 tier buffers + 1 Hi-Z = 12)
+	VkDescriptorSetLayoutBinding bindings[12]{};
 
 	// Binding 0: Input instance data (readonly)
 	bindings[0].binding = 0;
@@ -3898,10 +3925,67 @@ static GPUCullingPipeline createFrustumCullingPipeline(VkDevice device, const GP
 	bindings[3].descriptorCount = 1;
 	bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	bindings[3].pImmutableSamplers = nullptr;
+	
+	// Week 3: LOD tier buffers (bindings 4-11)
+	// Binding 4: Tier 0 visibility buffer (PIXEL_DUST)
+	bindings[4].binding = 4;
+	bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[4].descriptorCount = 1;
+	bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[4].pImmutableSamplers = nullptr;
+	
+	// Binding 5: Tier 0 counter buffer
+	bindings[5].binding = 5;
+	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[5].descriptorCount = 1;
+	bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[5].pImmutableSamplers = nullptr;
+	
+	// Binding 6: Tier 1 visibility buffer (SIMPLE_SHAPE)
+	bindings[6].binding = 6;
+	bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[6].descriptorCount = 1;
+	bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[6].pImmutableSamplers = nullptr;
+	
+	// Binding 7: Tier 1 counter buffer
+	bindings[7].binding = 7;
+	bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[7].descriptorCount = 1;
+	bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[7].pImmutableSamplers = nullptr;
+	
+	// Binding 8: Tier 2 visibility buffer (BASIC_TEXTURE)
+	bindings[8].binding = 8;
+	bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[8].descriptorCount = 1;
+	bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[8].pImmutableSamplers = nullptr;
+	
+	// Binding 9: Tier 2 counter buffer
+	bindings[9].binding = 9;
+	bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[9].descriptorCount = 1;
+	bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[9].pImmutableSamplers = nullptr;
+	
+	// Binding 10: Tier 3 visibility buffer (FULL_DETAIL)
+	bindings[10].binding = 10;
+	bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[10].descriptorCount = 1;
+	bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[10].pImmutableSamplers = nullptr;
+	
+	// Binding 11: Tier 3 counter buffer
+	bindings[11].binding = 11;
+	bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[11].descriptorCount = 1;
+	bindings[11].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[11].pImmutableSamplers = nullptr;
 
 	VkDescriptorSetLayoutCreateInfo dslci{};
 	dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	dslci.bindingCount = 4;
+	dslci.bindingCount = 12; // Week 3: Updated from 4 to 12
 	dslci.pBindings = bindings;
 
 	GPUCullingPipeline pipeline{};
@@ -4248,8 +4332,66 @@ static void createGPUCullingBuffers(VkPhysicalDevice physical, VkDevice device, 
 		*buffers.counterReadbackHost = 0;
 	}
 
+	// Week 3: LOD tier-specific buffers for multi-tier rendering
+	// Each tier needs: visibility buffer (indices) + counter buffer (atomic count)
+	
+	// Tier 0: PIXEL_DUST visibility buffer and counter
+	createBuffer(physical, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier0VisibilityBuffer);
+	createBuffer(physical, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier0CounterBuffer);
+	
+	// Tier 1: SIMPLE_SHAPE visibility buffer and counter
+	createBuffer(physical, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier1VisibilityBuffer);
+	createBuffer(physical, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier1CounterBuffer);
+	
+	// Tier 2: BASIC_TEXTURE visibility buffer and counter
+	createBuffer(physical, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier2VisibilityBuffer);
+	createBuffer(physical, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier2CounterBuffer);
+	
+	// Tier 3: FULL_DETAIL visibility buffer and counter
+	createBuffer(physical, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier3VisibilityBuffer);
+	createBuffer(physical, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier3CounterBuffer);
+	
+	// Host-visible readback buffer for all 4 tier counters
+	VkDeviceSize tierCountersSize = sizeof(uint32_t) * 4;
+	createBuffer(physical, device, tierCountersSize,
+		VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		buffers.tierCounterReadbackBuffer);
+	buffers.tierCounterReadbackHost = static_cast<uint32_t*>(mapMemory(device, buffers.tierCounterReadbackBuffer.memory, tierCountersSize));
+	if (buffers.tierCounterReadbackHost) {
+		buffers.tierCounterReadbackHost[0] = 0;
+		buffers.tierCounterReadbackHost[1] = 0;
+		buffers.tierCounterReadbackHost[2] = 0;
+		buffers.tierCounterReadbackHost[3] = 0;
+	}
+
 	// Disable GPU culling by default for P1 stability testing
 	buffers.enabled = false;
+	buffers.lodEnabled = false; // Week 3: LOD disabled by default
 }
 
 // Adaptive GPU Buffer Management: Resize culling buffers dynamically (0.75c)
@@ -4283,6 +4425,48 @@ static void resizeCullingBuffers(VkDevice device, VkPhysicalDevice physicalDevic
 		vkDestroyBuffer(device, buffers.counterReadbackBuffer.buffer, nullptr);
 		vkFreeMemory(device, buffers.counterReadbackBuffer.memory, nullptr);
 	}
+	
+	// Week 3: Destroy LOD tier buffers
+	if (buffers.tier0VisibilityBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier0VisibilityBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier0VisibilityBuffer.memory, nullptr);
+	}
+	if (buffers.tier0CounterBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier0CounterBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier0CounterBuffer.memory, nullptr);
+	}
+	if (buffers.tier1VisibilityBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier1VisibilityBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier1VisibilityBuffer.memory, nullptr);
+	}
+	if (buffers.tier1CounterBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier1CounterBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier1CounterBuffer.memory, nullptr);
+	}
+	if (buffers.tier2VisibilityBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier2VisibilityBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier2VisibilityBuffer.memory, nullptr);
+	}
+	if (buffers.tier2CounterBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier2CounterBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier2CounterBuffer.memory, nullptr);
+	}
+	if (buffers.tier3VisibilityBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier3VisibilityBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier3VisibilityBuffer.memory, nullptr);
+	}
+	if (buffers.tier3CounterBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buffers.tier3CounterBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tier3CounterBuffer.memory, nullptr);
+	}
+	if (buffers.tierCounterReadbackBuffer.buffer != VK_NULL_HANDLE) {
+		if (buffers.tierCounterReadbackHost) {
+			vkUnmapMemory(device, buffers.tierCounterReadbackBuffer.memory);
+			buffers.tierCounterReadbackHost = nullptr;
+		}
+		vkDestroyBuffer(device, buffers.tierCounterReadbackBuffer.buffer, nullptr);
+		vkFreeMemory(device, buffers.tierCounterReadbackBuffer.memory, nullptr);
+	}
 
 	// Reset buffer handles
 	buffers.inputInstanceBuffer = {};
@@ -4291,6 +4475,15 @@ static void resizeCullingBuffers(VkDevice device, VkPhysicalDevice physicalDevic
 	buffers.culledInstanceBuffer = {};
 	buffers.stagingBuffer = {};
 	buffers.counterReadbackBuffer = {};
+	buffers.tier0VisibilityBuffer = {};
+	buffers.tier0CounterBuffer = {};
+	buffers.tier1VisibilityBuffer = {};
+	buffers.tier1CounterBuffer = {};
+	buffers.tier2VisibilityBuffer = {};
+	buffers.tier2CounterBuffer = {};
+	buffers.tier3VisibilityBuffer = {};
+	buffers.tier3CounterBuffer = {};
+	buffers.tierCounterReadbackBuffer = {};
 
 	// Recreate buffers with new capacity
 	VkDeviceSize inputSize = sizeof(InstanceLayoutCPU) * newCapacity;
@@ -4334,6 +4527,61 @@ static void resizeCullingBuffers(VkDevice device, VkPhysicalDevice physicalDevic
 	buffers.counterReadbackHost = static_cast<uint32_t*>(mapMemory(device, buffers.counterReadbackBuffer.memory, sizeof(uint32_t)));
 	if (buffers.counterReadbackHost) {
 		*buffers.counterReadbackHost = 0;
+	}
+	
+	// Week 3: Recreate LOD tier buffers with new capacity
+	// Tier 0: PIXEL_DUST
+	createBuffer(physicalDevice, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier0VisibilityBuffer);
+	createBuffer(physicalDevice, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier0CounterBuffer);
+	
+	// Tier 1: SIMPLE_SHAPE
+	createBuffer(physicalDevice, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier1VisibilityBuffer);
+	createBuffer(physicalDevice, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier1CounterBuffer);
+	
+	// Tier 2: BASIC_TEXTURE
+	createBuffer(physicalDevice, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier2VisibilityBuffer);
+	createBuffer(physicalDevice, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier2CounterBuffer);
+	
+	// Tier 3: FULL_DETAIL
+	createBuffer(physicalDevice, device, visibilitySize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier3VisibilityBuffer);
+	createBuffer(physicalDevice, device, counterSize,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		buffers.tier3CounterBuffer);
+	
+	// Tier counter readback buffer
+	VkDeviceSize tierCountersSize = sizeof(uint32_t) * 4;
+	createBuffer(physicalDevice, device, tierCountersSize,
+		VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		buffers.tierCounterReadbackBuffer);
+	buffers.tierCounterReadbackHost = static_cast<uint32_t*>(mapMemory(device, buffers.tierCounterReadbackBuffer.memory, tierCountersSize));
+	if (buffers.tierCounterReadbackHost) {
+		buffers.tierCounterReadbackHost[0] = 0;
+		buffers.tierCounterReadbackHost[1] = 0;
+		buffers.tierCounterReadbackHost[2] = 0;
+		buffers.tierCounterReadbackHost[3] = 0;
 	}
 }
 
@@ -4641,7 +4889,7 @@ static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipe
 	// Create descriptor pool
 	VkDescriptorPoolSize poolSizes[2]{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[0].descriptorCount = 3; // input, visibility, counter
+	poolSizes[0].descriptorCount = 11; // Week 3: 3 original + 8 tier buffers (4 visibility + 4 counters)
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	poolSizes[1].descriptorCount = 1; // Hi-Z texture
 
@@ -4667,29 +4915,71 @@ static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipe
 	}
 
 	// Update descriptor set with buffer bindings
-	VkDescriptorBufferInfo bufferInfos[3]{};
+	VkDescriptorBufferInfo bufferInfos[11]{}; // Week 3: 3 original + 8 tier buffers
 
-	// Input instance buffer
+	// Input instance buffer (binding 0)
 	bufferInfos[0].buffer = buffers.inputInstanceBuffer.buffer;
 	bufferInfos[0].offset = 0;
 	bufferInfos[0].range = buffers.inputCapacity;
 
-	// Visibility buffer
+	// Visibility buffer (binding 1)
 	bufferInfos[1].buffer = buffers.visibilityBuffer.buffer;
 	bufferInfos[1].offset = 0;
 	bufferInfos[1].range = buffers.visibilityCapacity;
 
-	// Counter buffer
+	// Counter buffer (binding 2)
 	bufferInfos[2].buffer = buffers.visibilityCounterBuffer.buffer;
 	bufferInfos[2].offset = 0;
 	bufferInfos[2].range = sizeof(uint32_t);
+	
+	// Week 3: LOD tier buffers
+	// Tier 0 visibility buffer (binding 4)
+	bufferInfos[3].buffer = buffers.tier0VisibilityBuffer.buffer;
+	bufferInfos[3].offset = 0;
+	bufferInfos[3].range = buffers.visibilityCapacity;
+	
+	// Tier 0 counter buffer (binding 5)
+	bufferInfos[4].buffer = buffers.tier0CounterBuffer.buffer;
+	bufferInfos[4].offset = 0;
+	bufferInfos[4].range = sizeof(uint32_t);
+	
+	// Tier 1 visibility buffer (binding 6)
+	bufferInfos[5].buffer = buffers.tier1VisibilityBuffer.buffer;
+	bufferInfos[5].offset = 0;
+	bufferInfos[5].range = buffers.visibilityCapacity;
+	
+	// Tier 1 counter buffer (binding 7)
+	bufferInfos[6].buffer = buffers.tier1CounterBuffer.buffer;
+	bufferInfos[6].offset = 0;
+	bufferInfos[6].range = sizeof(uint32_t);
+	
+	// Tier 2 visibility buffer (binding 8)
+	bufferInfos[7].buffer = buffers.tier2VisibilityBuffer.buffer;
+	bufferInfos[7].offset = 0;
+	bufferInfos[7].range = buffers.visibilityCapacity;
+	
+	// Tier 2 counter buffer (binding 9)
+	bufferInfos[8].buffer = buffers.tier2CounterBuffer.buffer;
+	bufferInfos[8].offset = 0;
+	bufferInfos[8].range = sizeof(uint32_t);
+	
+	// Tier 3 visibility buffer (binding 10)
+	bufferInfos[9].buffer = buffers.tier3VisibilityBuffer.buffer;
+	bufferInfos[9].offset = 0;
+	bufferInfos[9].range = buffers.visibilityCapacity;
+	
+	// Tier 3 counter buffer (binding 11)
+	bufferInfos[10].buffer = buffers.tier3CounterBuffer.buffer;
+	bufferInfos[10].offset = 0;
+	bufferInfos[10].range = sizeof(uint32_t);
 
 	VkDescriptorImageInfo hizInfo{};
 	hizInfo.imageView = hiz.hiZSampleView;
 	hizInfo.imageLayout = hiz.ready ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
 	hizInfo.sampler = hiz.sampler;
 
-	VkWriteDescriptorSet writes[4]{};
+	VkWriteDescriptorSet writes[12]{}; // Week 3: 11 buffers + 1 image = 12 total
+	// First 3 original buffers
 	for (int i = 0; i < 3; ++i) {
 		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[i].dstSet = pipeline.descriptorSet;
@@ -4699,16 +4989,28 @@ static void setupGPUCullingDescriptors(VkDevice device, GPUCullingPipeline& pipe
 		writes[i].descriptorCount = 1;
 		writes[i].pBufferInfo = &bufferInfos[i];
 	}
+	
+	// Week 3: LOD tier buffers (bindings 4-11, skip binding 3 which is Hi-Z)
+	for (int i = 0; i < 8; ++i) {
+		writes[3 + i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[3 + i].dstSet = pipeline.descriptorSet;
+		writes[3 + i].dstBinding = 4 + i; // bindings 4-11
+		writes[3 + i].dstArrayElement = 0;
+		writes[3 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[3 + i].descriptorCount = 1;
+		writes[3 + i].pBufferInfo = &bufferInfos[3 + i];
+	}
 
-	writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[3].dstSet = pipeline.descriptorSet;
-	writes[3].dstBinding = 3;
-	writes[3].dstArrayElement = 0;
-	writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	writes[3].descriptorCount = 1;
-	writes[3].pImageInfo = &hizInfo;
+	// Hi-Z texture (binding 3)
+	writes[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[11].dstSet = pipeline.descriptorSet;
+	writes[11].dstBinding = 3;
+	writes[11].dstArrayElement = 0;
+	writes[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	writes[11].descriptorCount = 1;
+	writes[11].pImageInfo = &hizInfo;
 
-	vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+	vkUpdateDescriptorSets(device, 12, writes, 0, nullptr);
 }
 
 static void updateGPUCullingHiZDescriptor(VkDevice device, GPUCullingPipeline& pipeline, const HiZResources& hiz) {
@@ -4832,6 +5134,14 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 		0, 0, nullptr, 1, &resetBarrier, 0, nullptr);
 
 	vkCmdFillBuffer(cmd, buffers.visibilityCounterBuffer.buffer, 0, sizeof(uint32_t), 0);
+	
+	// Week 3: Reset LOD tier counters to 0
+	if (buffers.lodEnabled) {
+		vkCmdFillBuffer(cmd, buffers.tier0CounterBuffer.buffer, 0, sizeof(uint32_t), 0);
+		vkCmdFillBuffer(cmd, buffers.tier1CounterBuffer.buffer, 0, sizeof(uint32_t), 0);
+		vkCmdFillBuffer(cmd, buffers.tier2CounterBuffer.buffer, 0, sizeof(uint32_t), 0);
+		vkCmdFillBuffer(cmd, buffers.tier3CounterBuffer.buffer, 0, sizeof(uint32_t), 0);
+	}
 
 	// Barrier to ensure counter reset completes before compute shader reads
 	VkBufferMemoryBarrier counterBarrier{};
@@ -4860,6 +5170,8 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 	pushConstants.maxInstances = metrics.totalInstances;
 	pushConstants.hizEnabled = (hiz.ready && hiz.hiZSampleView != VK_NULL_HANDLE && hiz.sampler != VK_NULL_HANDLE) ? 1u : 0u;
 	pushConstants.hizMipCount = hiz.mipLevels;
+	pushConstants.lodEnabled = buffers.lodEnabled ? 1u : 0u; // Week 3: GPU LOD classification
+	pushConstants.zoomFactor = 1.0f; // Week 3: TODO - get actual zoom factor from camera system
 	pushConstants.pad0 = 0;
 
 	vkCmdPushConstants(cmd, pipeline.computeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
@@ -4902,6 +5214,34 @@ static void executeGPUCulling(VkDevice device, VkCommandBuffer cmd, const GPUCul
 	counterCopy.dstOffset = 0;
 	counterCopy.size = sizeof(uint32_t);
 	vkCmdCopyBuffer(cmd, buffers.visibilityCounterBuffer.buffer, buffers.counterReadbackBuffer.buffer, 1, &counterCopy);
+	
+	// Week 3: Copy tier counters to host-visible buffer
+	if (buffers.lodEnabled) {
+		VkBufferCopy tierCopies[4]{};
+		// Tier 0 counter
+		tierCopies[0].srcOffset = 0;
+		tierCopies[0].dstOffset = 0;
+		tierCopies[0].size = sizeof(uint32_t);
+		vkCmdCopyBuffer(cmd, buffers.tier0CounterBuffer.buffer, buffers.tierCounterReadbackBuffer.buffer, 1, &tierCopies[0]);
+		
+		// Tier 1 counter
+		tierCopies[1].srcOffset = 0;
+		tierCopies[1].dstOffset = sizeof(uint32_t);
+		tierCopies[1].size = sizeof(uint32_t);
+		vkCmdCopyBuffer(cmd, buffers.tier1CounterBuffer.buffer, buffers.tierCounterReadbackBuffer.buffer, 1, &tierCopies[1]);
+		
+		// Tier 2 counter
+		tierCopies[2].srcOffset = 0;
+		tierCopies[2].dstOffset = sizeof(uint32_t) * 2;
+		tierCopies[2].size = sizeof(uint32_t);
+		vkCmdCopyBuffer(cmd, buffers.tier2CounterBuffer.buffer, buffers.tierCounterReadbackBuffer.buffer, 1, &tierCopies[2]);
+		
+		// Tier 3 counter
+		tierCopies[3].srcOffset = 0;
+		tierCopies[3].dstOffset = sizeof(uint32_t) * 3;
+		tierCopies[3].size = sizeof(uint32_t);
+		vkCmdCopyBuffer(cmd, buffers.tier3CounterBuffer.buffer, buffers.tierCounterReadbackBuffer.buffer, 1, &tierCopies[3]);
+	}
 
 	// Ensure transfer writes visible to host reads
 	VkBufferMemoryBarrier readbackVisibility{};

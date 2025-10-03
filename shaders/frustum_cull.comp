@@ -37,6 +37,36 @@ layout(set = 0, binding = 2, std430) coherent restrict buffer VisibilityCounter 
     uint visibleCount;
 };
 
+// Week 3: LOD tier-specific output buffers
+// Each tier gets its own visibility buffer and counter for efficient multi-tier rendering
+layout(set = 0, binding = 4, std430) restrict writeonly buffer Tier0VisibilityBuffer {
+    uint tier0VisibleIndices[];
+};
+layout(set = 0, binding = 5, std430) coherent restrict buffer Tier0Counter {
+    uint tier0Count;
+};
+
+layout(set = 0, binding = 6, std430) restrict writeonly buffer Tier1VisibilityBuffer {
+    uint tier1VisibleIndices[];
+};
+layout(set = 0, binding = 7, std430) coherent restrict buffer Tier1Counter {
+    uint tier1Count;
+};
+
+layout(set = 0, binding = 8, std430) restrict writeonly buffer Tier2VisibilityBuffer {
+    uint tier2VisibleIndices[];
+};
+layout(set = 0, binding = 9, std430) coherent restrict buffer Tier2Counter {
+    uint tier2Count;
+};
+
+layout(set = 0, binding = 10, std430) restrict writeonly buffer Tier3VisibilityBuffer {
+    uint tier3VisibleIndices[];
+};
+layout(set = 0, binding = 11, std430) coherent restrict buffer Tier3Counter {
+    uint tier3Count;
+};
+
 // Push constants: frustum parameters and viewport info
 layout(push_constant) uniform FrustumCullPushConstants {
     vec2 viewport;          // viewport dimensions (width, height)
@@ -44,6 +74,8 @@ layout(push_constant) uniform FrustumCullPushConstants {
     uint maxInstances;      // maximum number of input instances
     uint hizEnabled;        // 1 when Hi-Z occlusion should run
     uint hizMipCount;       // number of mips available in the Hi-Z pyramid
+    uint lodEnabled;        // 1 when GPU LOD classification should run (Week 3)
+    float zoomFactor;       // Camera zoom factor for LOD calculations
     uint pad0;              // padding
 } pc;
 
@@ -56,9 +88,37 @@ const float HIZ_EPSILON_MAX = 0.0035;
 const float HIZ_EPSILON_SMALL_RADIUS = 2.0;
 const float HIZ_EPSILON_LARGE_RADIUS = 48.0;
 
+// Week 3: LOD tier thresholds (pixel radius)
+// Based on plan2.md Phase 2.1 GPU-Based LOD Classification
+const float LOD_TIER_0_MAX = 2.0;   // PIXEL_DUST: <2px
+const float LOD_TIER_1_MAX = 10.0;  // SIMPLE_SHAPE: 2-10px
+const float LOD_TIER_2_MAX = 50.0;  // BASIC_TEXTURE: 10-50px (64x64 mipmap)
+// FULL_DETAIL: >50px (256x256 full texture)
+
 float computeCircleDepth(float radius) {
     float t = clamp(radius / CIRCLE_DEPTH_RADIUS_SCALE, 0.0, 1.0);
     return 1.0 - t * CIRCLE_DEPTH_RANGE;
+}
+
+// Week 3: GPU-based LOD tier classification
+// Calculates screen-space pixel radius and classifies into LOD tiers
+// Returns: 0=PIXEL_DUST, 1=SIMPLE_SHAPE, 2=BASIC_TEXTURE, 3=FULL_DETAIL
+uint classifyLODTier(float worldRadius, float zoomFactor, vec2 viewport) {
+    // Calculate screen-space radius in pixels
+    // Formula: screenRadius = worldRadius * zoomFactor
+    float screenRadius = worldRadius * zoomFactor;
+    float pixelRadius = screenRadius;
+    
+    // Classify based on pixel radius thresholds
+    if (pixelRadius < LOD_TIER_0_MAX) {
+        return 0u; // PIXEL_DUST - single colored pixel, no texture
+    } else if (pixelRadius < LOD_TIER_1_MAX) {
+        return 1u; // SIMPLE_SHAPE - solid circle, no texture
+    } else if (pixelRadius < LOD_TIER_2_MAX) {
+        return 2u; // BASIC_TEXTURE - 64x64 mipmap (automatic via hardware)
+    } else {
+        return 3u; // FULL_DETAIL - 256x256 full texture
+    }
 }
 
 float computeHiZEpsilon(float radiusPixels) {
@@ -143,7 +203,7 @@ void main() {
         }
     }
 
-    // If visible, add to output buffer
+    // If visible, add to output buffer(s)
     if (visible) {
         // NVIDIA: Use explicit memory scope for atomic operations
         // memoryBarrierBuffer() ensures visibility across all workgroups
@@ -157,6 +217,42 @@ void main() {
         if (outputIndex < visibleInstanceIndices.length()) {
             visibleInstanceIndices[outputIndex] = instanceIndex;
             memoryBarrierBuffer(); // Ensure write is visible
+        }
+        
+        // Week 3: GPU LOD classification - write to tier-specific buffers
+        if (pc.lodEnabled == 1u) {
+            uint lodTier = classifyLODTier(instance.radius, pc.zoomFactor, pc.viewport);
+            
+            // Write to appropriate tier buffer based on LOD classification
+            if (lodTier == 0u) {
+                uint tier0Index = atomicAdd(tier0Count, 1);
+                memoryBarrierBuffer();
+                if (tier0Index < tier0VisibleIndices.length()) {
+                    tier0VisibleIndices[tier0Index] = instanceIndex;
+                    memoryBarrierBuffer();
+                }
+            } else if (lodTier == 1u) {
+                uint tier1Index = atomicAdd(tier1Count, 1);
+                memoryBarrierBuffer();
+                if (tier1Index < tier1VisibleIndices.length()) {
+                    tier1VisibleIndices[tier1Index] = instanceIndex;
+                    memoryBarrierBuffer();
+                }
+            } else if (lodTier == 2u) {
+                uint tier2Index = atomicAdd(tier2Count, 1);
+                memoryBarrierBuffer();
+                if (tier2Index < tier2VisibleIndices.length()) {
+                    tier2VisibleIndices[tier2Index] = instanceIndex;
+                    memoryBarrierBuffer();
+                }
+            } else { // lodTier == 3u
+                uint tier3Index = atomicAdd(tier3Count, 1);
+                memoryBarrierBuffer();
+                if (tier3Index < tier3VisibleIndices.length()) {
+                    tier3VisibleIndices[tier3Index] = instanceIndex;
+                    memoryBarrierBuffer();
+                }
+            }
         }
     }
 }
