@@ -404,15 +404,18 @@ struct ImageWithMemory {
 	VkDeviceMemory memory = VK_NULL_HANDLE;
 	uint32_t width = 0;
 	uint32_t height = 0;
-	uint32_t mipLevels = 1;
+	uint32_t mipLevels = 9; // 256->128->64->32->16->8->4->2->1 for atlas textures
 };
 
 struct LoadedTexture {
 	uint32_t width = 0;
 	uint32_t height = 0;
-	std::vector<uint8_t> data;
+	std::vector<uint8_t> data; // For mip 0, or all mips concatenated
 	uint32_t refCount = 0;
 	int64_t lastUsed = 0; // For LRU
+	uint32_t mipLevels = 1;
+	std::vector<VkDeviceSize> mipOffsets; // Byte offset of each mip level in data
+	std::vector<std::pair<uint32_t, uint32_t>> mipDimensions; // Width and height of each mip
 };
 
 struct TextureAtlas {
@@ -640,6 +643,9 @@ struct ImageManager {
 		VkDeviceSize bufferOffset;
 		uint32_t width;
 		uint32_t height;
+		uint32_t mipLevels = 1;
+		std::vector<VkDeviceSize> mipOffsets; // Offsets relative to bufferOffset
+		std::vector<std::pair<uint32_t, uint32_t>> mipDimensions;
 	};
 	std::vector<BatchedUpload> currentBatch;
 
@@ -2873,6 +2879,80 @@ static uint32_t calculateMipLevels(uint32_t width, uint32_t height) {
 		++levels;
 	}
 	return levels;
+}
+
+// Structure to hold texture with all mipmap levels pre-generated
+struct TextureWithMipmaps {
+	uint32_t width = 0;
+	uint32_t height = 0;
+	uint32_t mipLevels = 1;
+	std::vector<uint8_t> data; // Concatenated mipmap data: mip0 + mip1 + mip2 + ...
+	std::vector<VkDeviceSize> mipOffsets; // Byte offset of each mip level in data
+	std::vector<std::pair<uint32_t, uint32_t>> mipDimensions; // Width and height of each mip
+};
+
+// Generate mipmaps offline using stb_image_resize2 for a 256x256 RGBA texture
+static TextureWithMipmaps generateMipmaps(const uint8_t* sourceData, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t channels = 4) {
+	TextureWithMipmaps result;
+	result.width = sourceWidth;
+	result.height = sourceHeight;
+	result.mipLevels = calculateMipLevels(sourceWidth, sourceHeight);
+	
+	// Calculate total size needed for all mips
+	VkDeviceSize totalSize = 0;
+	result.mipOffsets.resize(result.mipLevels);
+	result.mipDimensions.resize(result.mipLevels);
+	
+	uint32_t mipWidth = sourceWidth;
+	uint32_t mipHeight = sourceHeight;
+	for (uint32_t i = 0; i < result.mipLevels; ++i) {
+		result.mipOffsets[i] = totalSize;
+		result.mipDimensions[i] = {mipWidth, mipHeight};
+		totalSize += static_cast<VkDeviceSize>(mipWidth) * mipHeight * channels;
+		mipWidth = std::max(1u, mipWidth / 2);
+		mipHeight = std::max(1u, mipHeight / 2);
+	}
+	
+	result.data.resize(totalSize);
+	
+	// Copy mip 0 (original image)
+	std::memcpy(result.data.data(), sourceData, sourceWidth * sourceHeight * channels);
+	
+	// Generate remaining mips using stb_image_resize2
+	const uint8_t* srcMipData = sourceData;
+	uint32_t srcWidth = sourceWidth;
+	uint32_t srcHeight = sourceHeight;
+	
+	for (uint32_t i = 1; i < result.mipLevels; ++i) {
+		uint32_t dstWidth = std::max(1u, srcWidth / 2);
+		uint32_t dstHeight = std::max(1u, srcHeight / 2);
+		uint8_t* dstMipData = result.data.data() + result.mipOffsets[i];
+		
+		// Use stb_image_resize2 with sRGB-aware resizing for better quality
+		if (channels == 4) {
+			stbir_resize_uint8_srgb(
+				srcMipData, srcWidth, srcHeight, 0,
+				dstMipData, dstWidth, dstHeight, 0,
+				STBIR_RGBA);
+		} else if (channels == 3) {
+			stbir_resize_uint8_srgb(
+				srcMipData, srcWidth, srcHeight, 0,
+				dstMipData, dstWidth, dstHeight, 0,
+				STBIR_RGB);
+		} else {
+			// Fallback for other channel counts
+			stbir_resize_uint8_linear(
+				srcMipData, srcWidth, srcHeight, 0,
+				dstMipData, dstWidth, dstHeight, 0,
+				(stbir_pixel_layout)channels);
+		}
+		
+		srcMipData = dstMipData;
+		srcWidth = dstWidth;
+		srcHeight = dstHeight;
+	}
+	
+	return result;
 }
 
 static void destroyHiZResources(VkDevice device, HiZResources& hiz) {
@@ -5425,14 +5505,14 @@ static bool checkValidationLayerSupport(const std::vector<const char*>& layers) 
 }
 
 // ImageManager implementation
-static void createImage(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, uint32_t arrayLayers, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, ImageWithMemory& image) {
+static void createImage(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, uint32_t arrayLayers, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, ImageWithMemory& image, uint32_t mipLevels = 1) {
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	imageInfo.imageType = VK_IMAGE_TYPE_2D;
 	imageInfo.extent.width = width;
 	imageInfo.extent.height = height;
 	imageInfo.extent.depth = 1;
-	imageInfo.mipLevels = 1;
+	imageInfo.mipLevels = mipLevels;
 	imageInfo.arrayLayers = arrayLayers;
 	imageInfo.format = format;
 	imageInfo.tiling = tiling;
@@ -5460,9 +5540,10 @@ static void createImage(VkPhysicalDevice physicalDevice, VkDevice device, uint32
 	vkBindImageMemory(device, image.image, image.memory, 0);
 	image.width = width;
 	image.height = height;
+	image.mipLevels = mipLevels;
 }
 
-static VkImageView createImageView2DArray(VkDevice device, VkImage image, VkFormat format, uint32_t layerCount) {
+static VkImageView createImageView2DArray(VkDevice device, VkImage image, VkFormat format, uint32_t layerCount, uint32_t mipLevels = 1) {
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	viewInfo.image = image;
@@ -5470,7 +5551,7 @@ static VkImageView createImageView2DArray(VkDevice device, VkImage image, VkForm
 	viewInfo.format = format;
 	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	viewInfo.subresourceRange.baseMipLevel = 0;
-	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.levelCount = mipLevels;
 	viewInfo.subresourceRange.baseArrayLayer = 0;
 	viewInfo.subresourceRange.layerCount = layerCount;
 
@@ -5499,7 +5580,7 @@ static VkSampler createTextureSampler(VkDevice device) {
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 	samplerInfo.mipLodBias = 0.0f;
 	samplerInfo.minLod = 0.0f;
-	samplerInfo.maxLod = 0.0f;
+	samplerInfo.maxLod = 9.0f; // Enable all 9 mip levels for atlas textures
 
 	VkSampler sampler;
 	if (vkCreateSampler(device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS) {
@@ -5777,14 +5858,14 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 	mgr.atlas.layerBudget = computedBudget;
 	mgr.metricsWindowStart = std::chrono::steady_clock::now();
 
-	// Create texture atlas array (still allocate max layers for simplicity; enforce budget logically)
+	// Create texture atlas array with 9 mip levels (256->128->64->32->16->8->4->2->1)
 	createImage(physicalDevice, device,
 		TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, TextureAtlas::MAX_LAYERS,
 		VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
 		VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mgr.atlas.atlasArray);
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mgr.atlas.atlasArray, 9);
 
-	mgr.atlas.atlasArray.view = createImageView2DArray(device, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, TextureAtlas::MAX_LAYERS);
+	mgr.atlas.atlasArray.view = createImageView2DArray(device, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, TextureAtlas::MAX_LAYERS, 9);
 	mgr.atlas.sampler = createTextureSampler(device);
 
 	// Initialize bindless texture system with fallback to atlas if not supported
@@ -6057,37 +6138,41 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 					continue;
 				}
 
-				std::string path = mgr.atlas.imageFiles[imageId].string();
-				int width = 0, height = 0, channels = 0;
-				unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
-				bool success = false;
-				if (data) {
-					LoadedTexture tex;
-					if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
-						unsigned char* result = stbir_resize_uint8_linear(
-							data, width, height, 0,
-							buffer.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
-							STBIR_RGBA);
-						if (result != nullptr) {
-							tex.data.resize(TextureAtlas::ATLAS_SIZE * TextureAtlas::ATLAS_SIZE * 4);
-							std::memcpy(tex.data.data(), buffer.data.data(), tex.data.size());
-							tex.width = TextureAtlas::ATLAS_SIZE;
-							tex.height = TextureAtlas::ATLAS_SIZE;
-							success = true;
-						}
-					} else {
-						tex.width = static_cast<uint32_t>(width);
-						tex.height = static_cast<uint32_t>(height);
-						tex.data.resize(static_cast<size_t>(width) * height * 4);
-						std::memcpy(tex.data.data(), data, tex.data.size());
+			std::string path = mgr.atlas.imageFiles[imageId].string();
+			int width = 0, height = 0, channels = 0;
+			unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
+			bool success = false;
+			if (data) {
+				LoadedTexture tex;
+				const uint8_t* resizedData = nullptr;
+				
+				// First, resize to ATLAS_SIZE if needed
+				if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
+					unsigned char* result = stbir_resize_uint8_linear(
+						data, width, height, 0,
+						buffer.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
+						STBIR_RGBA);
+					if (result != nullptr) {
+						resizedData = buffer.data.data();
 						success = true;
 					}
+				} else {
+					resizedData = data;
+					success = true;
+				}
 
-					if (success) {
-						tex.refCount = 1;
-						tex.lastUsed = mgr.atlas.frameCounter;
-
-						{
+				// Now generate mipmaps offline for the atlas-sized texture
+				if (success && resizedData != nullptr) {
+					TextureWithMipmaps mipmapped = generateMipmaps(resizedData, TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 4);
+					
+					tex.width = mipmapped.width;
+					tex.height = mipmapped.height;
+					tex.mipLevels = mipmapped.mipLevels;
+					tex.data = std::move(mipmapped.data);
+					tex.mipOffsets = std::move(mipmapped.mipOffsets);
+					tex.mipDimensions = std::move(mipmapped.mipDimensions);
+					tex.refCount = 1;
+					tex.lastUsed = mgr.atlas.frameCounter;						{
 							std::lock_guard<std::mutex> lock(mgr.uploadMutex);
 							mgr.pendingUploads.emplace(imageId, std::move(tex));
 						}
@@ -6194,7 +6279,7 @@ static void endSingleTimeCommands(VkDevice device, VkCommandPool commandPool, Vk
 	vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 }
 
-static void transitionImageLayout(VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t layerIndex) {
+static void transitionImageLayout(VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t layerIndex, uint32_t mipLevels = 1) {
 	VkCommandBuffer commandBuffer = beginSingleTimeCommands(device, commandPool);
 
 	VkImageMemoryBarrier barrier{};
@@ -6206,7 +6291,7 @@ static void transitionImageLayout(VkDevice device, VkCommandPool commandPool, Vk
 	barrier.image = image;
 	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.levelCount = mipLevels; // Support multiple mip levels
 	barrier.subresourceRange.baseArrayLayer = layerIndex;
 	barrier.subresourceRange.layerCount = 1;
 
@@ -6602,12 +6687,12 @@ static bool addTextureToBatch(ImageManager& mgr, uint32_t imageId, uint32_t laye
 
 	const VkDeviceSize imageSize = texture.data.size();
 
-	// Check if staging buffer has enough space
+	// Check if staging buffer has enough space (includes all mip levels)
 	if (mgr.stagingOffset + imageSize > ImageManager::STAGING_BUFFER_SIZE) {
 		return false; // Not enough space, batch needs to be flushed
 	}
 
-	// Copy texture data to staging buffer
+	// Copy texture data (all mip levels) to staging buffer
 	void* dstPtr = static_cast<char*>(mgr.mappedStagingMemory) + mgr.stagingOffset;
 	memcpy(dstPtr, texture.data.data(), imageSize);
 
@@ -6618,6 +6703,9 @@ static bool addTextureToBatch(ImageManager& mgr, uint32_t imageId, uint32_t laye
 	upload.bufferOffset = mgr.stagingOffset;
 	upload.width = texture.width;
 	upload.height = texture.height;
+	upload.mipLevels = texture.mipLevels;
+	upload.mipOffsets = texture.mipOffsets;
+	upload.mipDimensions = texture.mipDimensions;
 	mgr.currentBatch.push_back(upload);
 
 	mgr.stagingOffset += imageSize;
@@ -6646,9 +6734,9 @@ static void flushBatchedUploads(ImageManager& mgr) {
 	copyRegions.reserve(mgr.currentBatch.size());
 	postTransitions.reserve(mgr.currentBatch.size());
 
-	// Build batch operations
+	// Build batch operations (now with mipmap support)
 	for (const auto& upload : mgr.currentBatch) {
-		// Pre-transition: Undefined -> Transfer Dst
+		// Pre-transition: Undefined -> Transfer Dst (all mip levels)
 		if (mgr.atlas.layerLayouts[upload.layer] != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
 			VkImageMemoryBarrier barrier{};
 			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -6659,7 +6747,7 @@ static void flushBatchedUploads(ImageManager& mgr) {
 			barrier.image = mgr.atlas.atlasArray.image;
 			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 			barrier.subresourceRange.baseMipLevel = 0;
-			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.levelCount = upload.mipLevels; // Transition all mip levels
 			barrier.subresourceRange.baseArrayLayer = upload.layer;
 			barrier.subresourceRange.layerCount = 1;
 			barrier.srcAccessMask = 0;
@@ -6669,21 +6757,23 @@ static void flushBatchedUploads(ImageManager& mgr) {
 			mgr.atlas.layerLayouts[upload.layer] = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 		}
 
-		// Copy region
-		VkBufferImageCopy region{};
-		region.bufferOffset = upload.bufferOffset;
-		region.bufferRowLength = 0;
-		region.bufferImageHeight = 0;
-		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		region.imageSubresource.mipLevel = 0;
-		region.imageSubresource.baseArrayLayer = upload.layer;
-		region.imageSubresource.layerCount = 1;
-		region.imageOffset = {0, 0, 0};
-		region.imageExtent = {upload.width, upload.height, 1};
+		// Copy regions for all mip levels
+		for (uint32_t mipLevel = 0; mipLevel < upload.mipLevels; ++mipLevel) {
+			VkBufferImageCopy region{};
+			region.bufferOffset = upload.bufferOffset + upload.mipOffsets[mipLevel];
+			region.bufferRowLength = 0;
+			region.bufferImageHeight = 0;
+			region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			region.imageSubresource.mipLevel = mipLevel;
+			region.imageSubresource.baseArrayLayer = upload.layer;
+			region.imageSubresource.layerCount = 1;
+			region.imageOffset = {0, 0, 0};
+			region.imageExtent = {upload.mipDimensions[mipLevel].first, upload.mipDimensions[mipLevel].second, 1};
 
-		copyRegions.push_back(region);
+			copyRegions.push_back(region);
+		}
 
-		// Post-transition: Transfer Dst -> Shader Read Only
+		// Post-transition: Transfer Dst -> Shader Read Only (all mip levels)
 		VkImageMemoryBarrier barrier{};
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -6693,7 +6783,7 @@ static void flushBatchedUploads(ImageManager& mgr) {
 		barrier.image = mgr.atlas.atlasArray.image;
 		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		barrier.subresourceRange.baseMipLevel = 0;
-		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.levelCount = upload.mipLevels; // Transition all mip levels
 		barrier.subresourceRange.baseArrayLayer = upload.layer;
 		barrier.subresourceRange.layerCount = 1;
 		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -6765,35 +6855,39 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 		}
 	}
 
-	// Fallback to individual upload if batching completely failed
+	// Fallback to individual upload if batching completely failed (with mipmap support)
 	BufferWithMemory stagingBuffer;
-	VkDeviceSize imageSize = texture.data.size();
+	VkDeviceSize imageSize = texture.data.size(); // Includes all mip levels
 	createBuffer(mgr.physicalDevice, mgr.device, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer);
 
 	void* data = mapMemory(mgr.device, stagingBuffer.memory, imageSize);
 	memcpy(data, texture.data.data(), static_cast<size_t>(imageSize));
 	unmapMemory(mgr.device, stagingBuffer.memory);
 
-	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layer);
+	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layer, texture.mipLevels);
 	mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
 	VkCommandBuffer commandBuffer = beginSingleTimeCommands(mgr.device, mgr.commandPool);
 
-	VkBufferImageCopy region{};
-	region.bufferOffset = 0;
-	region.bufferRowLength = 0;
-	region.bufferImageHeight = 0;
-	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	region.imageSubresource.mipLevel = 0;
-	region.imageSubresource.baseArrayLayer = layer;
-	region.imageSubresource.layerCount = 1;
-	region.imageOffset = {0, 0, 0};
-	region.imageExtent = {texture.width, texture.height, 1};
+	// Copy all mip levels
+	std::vector<VkBufferImageCopy> regions(texture.mipLevels);
+	for (uint32_t mipLevel = 0; mipLevel < texture.mipLevels; ++mipLevel) {
+		VkBufferImageCopy& region = regions[mipLevel];
+		region.bufferOffset = texture.mipOffsets[mipLevel];
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = mipLevel;
+		region.imageSubresource.baseArrayLayer = layer;
+		region.imageSubresource.layerCount = 1;
+		region.imageOffset = {0, 0, 0};
+		region.imageExtent = {texture.mipDimensions[mipLevel].first, texture.mipDimensions[mipLevel].second, 1};
+	}
 
-	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, mgr.atlas.atlasArray.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, mgr.atlas.atlasArray.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
 	endSingleTimeCommands(mgr.device, mgr.commandPool, mgr.graphicsQueue, commandBuffer);
 
-	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer);
+	transitionImageLayout(mgr.device, mgr.commandPool, mgr.graphicsQueue, mgr.atlas.atlasArray.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, layer, texture.mipLevels);
 	mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	vkDestroyBuffer(mgr.device, stagingBuffer.buffer, nullptr);
