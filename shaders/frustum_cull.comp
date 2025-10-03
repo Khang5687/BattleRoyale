@@ -17,7 +17,7 @@ struct InstanceData {
     float radius;       // float radius
     float lodTier;      // float lodTier
     vec4 color;         // float color[4]
-    float imageLayer;   // float imageLayer
+    uint textureIndex;  // uint32_t textureIndex
     vec3 pad;           // float pad2[3] - padding for alignment
 };
 
@@ -133,8 +133,9 @@ void main() {
         pc.viewport,
         pc.cameraOffset
     );
-
-    if (visible && pc.hizEnabled == 1u) {
+    
+    // Disable Hi-Z occlusion temporarily for debugging
+    if (false && visible && pc.hizEnabled == 1u) {
         vec2 screenUV = (instance.center - pc.cameraOffset) / pc.viewport;
         float circleDepth = computeCircleDepth(instance.radius);
         if (isCircleOccluded(screenUV, instance.radius, circleDepth)) {

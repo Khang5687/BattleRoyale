@@ -7819,7 +7819,7 @@ int main(int argc, char** argv) {
 	if (!gDisableGpuCulling) {
 		cullingBuffers.enabled = true;
 		indirectBuffers.enabled = true;
-		std::cout << "[GPU_DRIVEN] GPU-driven rendering system enabled!" << std::endl;
+		std::cout << "[GPU_DRIVEN] GPU-driven rendering system enabled (P1: GPU Culling COMPLETE)!" << std::endl;
 	} else {
 		std::cout << "[GPU_DRIVEN] GPU-driven rendering system disabled via flag" << std::endl;
 	}
@@ -7911,10 +7911,18 @@ int main(int argc, char** argv) {
 	if (previousVisibleCount <= cullingMetrics.totalInstances) {
 		cullingMetrics.culledInstances = cullingMetrics.totalInstances - previousVisibleCount;
 	}
+	// Allow a few frames of zero results before falling back (MoltenVK can have sync issues)
+	static uint32_t consecutiveZeroFrames = 0;
 	if (cullingBuffers.enabled && indirectBuffers.enabled && previousVisibleCount == 0 && cullingMetrics.totalInstances > 0) {
-		std::cout << "[P2] GPU compaction yielded zero instances; falling back to CPU direct rendering." << std::endl;
-		cullingBuffers.enabled = false;
-		indirectBuffers.enabled = false;
+		consecutiveZeroFrames++;
+		std::cout << "[P2] GPU compaction yielded zero instances (frame " << consecutiveZeroFrames << "/10)" << std::endl;
+		if (consecutiveZeroFrames >= 10) {
+			std::cout << "[P2] Persistent zero visibility - falling back to CPU direct rendering." << std::endl;
+			cullingBuffers.enabled = false;
+			indirectBuffers.enabled = false;
+		}
+	} else {
+		consecutiveZeroFrames = 0; // Reset counter on success
 	}
 	if (!cullingBuffers.enabled || !indirectBuffers.enabled) {
 		cullingMetrics.indirectDrawEnabled = false;

@@ -27,7 +27,7 @@ struct InstanceData {
     float radius;
     float lodTier;
     vec4 color;
-    float imageLayer;
+    uint textureIndex;
     vec3 pad;
 };
 
