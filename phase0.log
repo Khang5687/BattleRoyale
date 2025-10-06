@@ -1,0 +1,863 @@
+[GPU_VENDOR] Detected: Apple (MoltenVK) (VendorID: 0x106b, Workgroup: 32)
+[GPU_LIMITS] Max Compute Work Group Invocations: 1024
+[GPU_LIMITS] Max Compute Work Group Size: [1024, 1024, 1024]
+[GPU_VENDOR] Using workgroup size: 32
+[P4] Mesh shader extensions unavailable on this device.
+[GPU_DRIVEN] VK_KHR_draw_indirect_count extension not supported, GPU-driven rendering will use fallback
+[BINDLESS] Descriptor indexing features supported
+[BINDLESS] Max descriptor set sampled images: 1000000
+[BINDLESS] Max per-stage descriptor sampled images: 1000000
+HUD font: attempting to load 'assets/fonts/hud.ttf'
+HUD font ready from 'assets/fonts/hud.ttf' (atlas 1024x1024, oversample 1, glyphs 2175)
+[DESCRIPTOR] Descriptor pool created successfully with 40000 sampled images
+Vulkan initialized and swapchain created (MoltenVK)
+Initializing image manager...
+[BINDLESS] Bindless texture system initialized successfully
+[VIRTUAL_TEX] Virtual texture system initialized successfully
+[P4] VRAM budget: device-local ~32768.0 MB, reserving 512.0 MB for texture atlas (2048 layers).
+[P4] GPU texture streaming enabled (16 slots)
+Batched GPU upload system initialized (256MB staging buffer, 128 images/batch)
+Creating simulation...
+[Phase0] Telemetry enabled via BR5_PHASE0_TELEMETRY
+Loading bias config...
+Loaded 6 bias entries
+Loading size factors config...
+Loaded 11 size factor entries
+Loading damage curve config...
+Loaded damage curve configuration with 3 control points
+Initializing from assets...
+Simulation initialized!
+Starting preload phase 1: loading first 512 images...
+Startup texture preload running (press SPACE to start battle early).
+Initializing adaptive simulation architecture...
+Adaptive simulation architecture initialized!
+Initializing GPU culling buffers...
+GPU culling system initialized (ENABLED)
+Initializing P2 indirect draw buffers...
+[GPU_DRIVEN] GPU Culling (P1) enabled, P2 indirect draw DISABLED on MoltenVK (compute->vertex coherency limitation)
+[GPU_DRIVEN] Using P1 GPU Culling + CPU indirect draw path for optimal performance
+P2 indirect draw system initialized!
+Initializing adaptive GPU buffer management (0.75c)...
+Adaptive GPU buffer management initialized!
+Initializing procedural texture generation (0.75d)...
+Procedural texture pipeline created!
+Pre-generating 16 procedural texture patterns...
+Procedural texture generation temporarily disabled to avoid descriptor set issues.
+Procedural texture pre-generation complete!
+Procedural texture generation initialized!
+Performance instrumentation initialized (Press F3 for diagnostics overlay)
+Alive count: 5806
+Starting battle royale with 5806 players!
+[P4] Texture upload batch took 7.003ms for 48 images
+[P4] Texture upload batch took 7.42ms for 9 images
+[P4] Texture upload batch took 6.768ms for 4 images
+[P4] Texture upload batch took 5.723ms for 8 images
+[P4] Texture upload batch took 5.404ms for 6 images
+[P4] Texture upload batch took 6.071ms for 5 images
+[P4] Texture upload batch took 6.372ms for 10 images
+[P4] Texture upload batch took 6.722ms for 4 images
+Starting preload phase 2: loading 1554 more images (total 2048)...
+[Phase0] frame 120 instances=5806 tiers(PD/SS/BT/FD)=0/0/5806/0 textures(flat/bindless/atlas)=5047/0/759 individual=5806 pixelCluster=0 statistical=0 avgScreenR=10.5181 maxScreenR=10.5181 avgRadius=10.5181 assembleMs=0.457
+Players left: 5806 | Files loaded: 1063 success, 0 failed
+Starting preload phase 3: loading remaining 3855 images...
+[Phase0] frame 240 instances=5806 tiers(PD/SS/BT/FD)=0/0/5806/0 textures(flat/bindless/atlas)=4246/0/1560 individual=5806 pixelCluster=0 statistical=0 avgScreenR=10.5181 maxScreenR=10.5181 avgRadius=10.5181 assembleMs=0.594
+Players left: 5806 | Files loaded: 2139 success, 0 failed
+Preloading complete! Loaded 5579 images in 4971ms
+Press SPACE to start the battle!
+[Phase0] frame 360 instances=5806 tiers(PD/SS/BT/FD)=0/0/5806/0 textures(flat/bindless/atlas)=0/0/5806 individual=5806 pixelCluster=0 statistical=0 avgScreenR=10.5181 maxScreenR=10.5181 avgRadius=10.5181 assembleMs=159.686
+Players left: 5806 | Files loaded: 6883 success, 0 failed
+[P4] Texture upload batch took 5.346ms for 128 images
+[P4] Texture upload batch took 6.887ms for 128 images
+[P4] Texture upload batch took 6.846ms for 128 images
+[P4] Texture upload batch took 7.322ms for 128 images
+[P4] Texture upload batch took 7.674ms for 128 images
+[P4] Texture upload batch took 7.377ms for 128 images
+[P4] Texture upload batch took 7.629ms for 128 images
+[P4] Texture upload batch took 7.007ms for 128 images
+[P4] Texture upload batch took 8.368ms for 128 images
+[P4] Texture upload batch took 5.503ms for 128 images
+[P4] Texture upload batch took 5.521ms for 128 images
+[P4] Texture upload batch took 5.114ms for 46 images
+[P4] Texture upload batch took 6.309ms for 128 images
+[P4] Texture upload batch took 7.067ms for 128 images
+[P4] Texture upload batch took 7.314ms for 128 images
+[P4] Texture upload batch took 6.401ms for 128 images
+[P4] Texture upload batch took 13.112ms for 128 images
+[P4] Texture upload batch took 6.232ms for 128 images
+[P4] Texture upload batch took 6.601ms for 128 images
+[P4] Texture upload batch took 5.345ms for 128 images
+[P4] Texture upload batch took 5.506ms for 128 images
+[P4] Texture upload batch took 9.77ms for 128 images
+[P4] Texture upload batch took 6.812ms for 128 images
+[P4] Texture upload batch took 10.515ms for 46 images
+[P4] Texture upload batch took 7.061ms for 128 images
+[P4] Texture upload batch took 7.23ms for 128 images
+[P4] Texture upload batch took 8.799ms for 128 images
+[P4] Texture upload batch took 9.658ms for 128 images
+[P4] Texture upload batch took 9.323ms for 128 images
+[P4] Texture upload batch took 10.63ms for 128 images
+[P4] Texture upload batch took 7.782ms for 128 images
+[P4] Texture upload batch took 11.033ms for 128 images
+[P4] Texture upload batch took 7.539ms for 128 images
+[P4] Texture upload batch took 5.797ms for 46 images
+[P4] Texture upload batch took 11.221ms for 128 images
+[P4] Texture upload batch took 11.166ms for 128 images
+[P4] Texture upload batch took 6.193ms for 128 images
+[P4] Texture upload batch took 5.767ms for 128 images
+[P4] Texture upload batch took 6.481ms for 128 images
+[P4] Texture upload batch took 6.1ms for 128 images
+[P4] Texture upload batch took 6.696ms for 128 images
+[P4] Texture upload batch took 6.856ms for 128 images
+[P4] Texture upload batch took 7.484ms for 128 images
+[P4] Texture upload batch took 6.157ms for 128 images
+[P4] Texture upload batch took 7.014ms for 128 images
+[P4] Texture upload batch took 6.805ms for 128 images
+[P4] Texture upload batch took 7.838ms for 128 images
+[P4] Texture upload batch took 11.32ms for 128 images
+[P4] Texture upload batch took 6.178ms for 128 images
+[P4] Texture upload batch took 6.029ms for 128 images
+[P4] Texture upload batch took 6.715ms for 128 images
+[P4] Texture upload batch took 5.42ms for 128 images
+[P4] Texture upload batch took 5.058ms for 128 images
+[P4] Texture upload batch took 8.382ms for 128 images
+[P4] Texture upload batch took 6.425ms for 128 images
+[P4] Texture upload batch took 5.486ms for 128 images
+[P4] Texture upload batch took 5.03ms for 128 images
+[P4] Texture upload batch took 5.555ms for 128 images
+[P4] Texture upload batch took 5.129ms for 128 images
+[P4] Texture upload batch took 5.078ms for 128 images
+[P4] Texture upload batch took 5.036ms for 128 images
+[P4] Texture upload batch took 5.22ms for 128 images
+[P4] Texture upload batch took 5.056ms for 128 images
+[P4] Texture upload batch took 5.685ms for 128 images
+[P4] Texture upload batch took 5.037ms for 128 images
+[P4] Texture upload batch took 5.042ms for 128 images
+[P4] Texture upload batch took 5.256ms for 128 images
+[P4] Texture upload batch took 5.035ms for 128 images
+[P4] Texture upload batch took 5.329ms for 128 images
+[P4] Texture upload batch took 5.674ms for 128 images
+[P4] Texture upload batch took 6.579ms for 128 images
+[P4] Texture upload batch took 6.42ms for 128 images
+[P4] Texture upload batch took 6.54ms for 128 images
+[P4] Texture upload batch took 5.023ms for 128 images
+[P4] Texture upload batch took 5.135ms for 128 images
+[P4] Texture upload batch took 5.453ms for 128 images
+[Phase0] frame 480 instances=5806 tiers(PD/SS/BT/FD)=0/0/5806/0 textures(flat/bindless/atlas)=0/0/5806 individual=5806 pixelCluster=0 statistical=0 avgScreenR=10.5181 maxScreenR=10.5181 avgRadius=10.5181 assembleMs=169.513
+Players left: 5806 | Files loaded: 6883 success, 0 failed
+[P4] Texture upload batch took 6.765ms for 128 images
+[P4] Texture upload batch took 9.574ms for 128 images
+[P4] Texture upload batch took 5.013ms for 128 images
+[P4] Texture upload batch took 5.1ms for 128 images
+[P4] Texture upload batch took 5.04ms for 128 images
+[P4] Texture upload batch took 5.169ms for 128 images
+[P4] Texture upload batch took 5.209ms for 128 images
+[P4] Texture upload batch took 5.192ms for 128 images
+[P4] Texture upload batch took 6.837ms for 128 images
+[P4] Texture upload batch took 5.206ms for 128 images
+[P4] Texture upload batch took 8.089ms for 128 images
+[P4] Texture upload batch took 5.388ms for 128 images
+[P4] Texture upload batch took 6.136ms for 128 images
+[P4] Texture upload batch took 5.564ms for 128 images
+[P4] Texture upload batch took 5.008ms for 128 images
+[P4] Texture upload batch took 5.785ms for 128 images
+[P4] Texture upload batch took 5.074ms for 128 images
+[P4] Texture upload batch took 5.792ms for 128 images
+[P4] Texture upload batch took 5.694ms for 128 images
+[P4] Texture upload batch took 5.954ms for 128 images
+[P4] Texture upload batch took 5.21ms for 128 images
+[P4] Texture upload batch took 5.174ms for 128 images
+[P4] Texture upload batch took 5.091ms for 128 images
+[P4] Texture upload batch took 5.312ms for 128 images
+[P4] Texture upload batch took 6.06ms for 128 images
+[P4] Texture upload batch took 6.672ms for 128 images
+[P4] Texture upload batch took 7.874ms for 128 images
+[P4] Texture upload batch took 7.441ms for 128 images
+[P4] Texture upload batch took 8.319ms for 128 images
+[P4] Texture upload batch took 6.735ms for 128 images
+[P4] Texture upload batch took 5.1ms for 128 images
+[P4] Texture upload batch took 5.454ms for 128 images
+[P4] Texture upload batch took 5.122ms for 128 images
+[P4] Texture upload batch took 5.036ms for 128 images
+[P4] Texture upload batch took 12.789ms for 128 images
+[P4] Texture upload batch took 5.499ms for 128 images
+[P4] Texture upload batch took 6.58ms for 128 images
+[P4] Texture upload batch took 5.987ms for 128 images
+[P4] Texture upload batch took 6.498ms for 128 images
+[P4] Texture upload batch took 6.552ms for 128 images
+[P4] Texture upload batch took 6.682ms for 128 images
+[P4] Texture upload batch took 5.515ms for 128 images
+[P4] Texture upload batch took 5.556ms for 128 images
+[P4] Texture upload batch took 7.241ms for 128 images
+[P4] Texture upload batch took 6.46ms for 128 images
+[P4] Texture upload batch took 7.162ms for 128 images
+[P4] Texture upload batch took 7.274ms for 128 images
+[P4] Texture upload batch took 6.374ms for 128 images
+[P4] Texture upload batch took 7.025ms for 128 images
+[P4] Texture upload batch took 6.966ms for 128 images
+[P4] Texture upload batch took 6.163ms for 128 images
+[P4] Texture upload batch took 6.882ms for 128 images
+[P4] Texture upload batch took 6.548ms for 128 images
+[P4] Texture upload batch took 6.735ms for 128 images
+[P4] Texture upload batch took 6.637ms for 128 images
+[P4] Texture upload batch took 6.27ms for 128 images
+[P4] Texture upload batch took 6.589ms for 128 images
+[P4] Texture upload batch took 6.15ms for 128 images
+[P4] Texture upload batch took 6.857ms for 128 images
+[P4] Texture upload batch took 6.534ms for 128 images
+[P4] Texture upload batch took 6.441ms for 128 images
+[P4] Texture upload batch took 6.488ms for 128 images
+[P4] Texture upload batch took 6.316ms for 128 images
+[P4] Texture upload batch took 7.036ms for 128 images
+[P4] Texture upload batch took 5.817ms for 128 images
+[P4] Texture upload batch took 10.378ms for 128 images
+[P4] Texture upload batch took 8.203ms for 128 images
+[P4] Texture upload batch took 5.181ms for 128 images
+[P4] Texture upload batch took 9.839ms for 128 images
+[P4] Texture upload batch took 6.214ms for 128 images
+[P4] Texture upload batch took 6.989ms for 128 images
+[P4] Texture upload batch took 9.356ms for 128 images
+[P4] Texture upload batch took 6.603ms for 128 images
+[P4] Texture upload batch took 8.49ms for 128 images
+[P4] Texture upload batch took 5.253ms for 128 images
+[P4] Texture upload batch took 6.152ms for 128 images
+[P4] Texture upload batch took 10.458ms for 128 images
+[P4] Texture upload batch took 10.553ms for 128 images
+[P4] Texture upload batch took 10.45ms for 128 images
+[P4] Texture upload batch took 5.976ms for 128 images
+[P4] Texture upload batch took 5.462ms for 128 images
+[P4] Texture upload batch took 9.31ms for 128 images
+[P4] Texture upload batch took 9.52ms for 128 images
+[P4] Texture upload batch took 7.153ms for 128 images
+[P4] Texture upload batch took 9.825ms for 128 images
+[P4] Texture upload batch took 8.746ms for 128 images
+[P4] Texture upload batch took 6.964ms for 128 images
+[P4] Texture upload batch took 8.786ms for 128 images
+[P4] Texture upload batch took 10.75ms for 128 images
+[P4] Texture upload batch took 7.03ms for 128 images
+[P4] Texture upload batch took 7.334ms for 128 images
+[P4] Texture upload batch took 6.265ms for 128 images
+[P4] Texture upload batch took 7.228ms for 128 images
+[P4] Texture upload batch took 6.171ms for 128 images
+[P4] Texture upload batch took 7.368ms for 128 images
+[P4] Texture upload batch took 5.873ms for 128 images
+[P4] Texture upload batch took 5.863ms for 128 images
+[Phase0] frame 600 instances=5806 tiers(PD/SS/BT/FD)=0/0/5806/0 textures(flat/bindless/atlas)=0/0/5806 individual=5806 pixelCluster=0 statistical=0 avgScreenR=10.5181 maxScreenR=10.5181 avgRadius=10.5181 assembleMs=169.439
+Players left: 5806 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 720 instances=5806 tiers(PD/SS/BT/FD)=0/0/5806/0 textures(flat/bindless/atlas)=0/0/5806 individual=5806 pixelCluster=0 statistical=0 avgScreenR=10.5181 maxScreenR=10.5181 avgRadius=10.5181 assembleMs=163.109
+Players left: 5806 | Files loaded: 6883 success, 0 failed
+[P4] Texture upload batch took 5.661ms for 128 images
+Players left: 5805 | Files loaded: 6883 success, 0 failed
+Players left: 5804 | Files loaded: 6883 success, 0 failed
+Players left: 5803 | Files loaded: 6883 success, 0 failed
+Players left: 5802 | Files loaded: 6883 success, 0 failed
+Players left: 5800 | Files loaded: 6883 success, 0 failed
+Players left: 5799 | Files loaded: 6883 success, 0 failed
+Players left: 5798 | Files loaded: 6883 success, 0 failed
+Players left: 5796 | Files loaded: 6883 success, 0 failed
+Players left: 5795 | Files loaded: 6883 success, 0 failed
+Players left: 5794 | Files loaded: 6883 success, 0 failed
+Players left: 5792 | Files loaded: 6883 success, 0 failed
+Players left: 5791 | Files loaded: 6883 success, 0 failed
+Players left: 5790 | Files loaded: 6883 success, 0 failed
+Players left: 5789 | Files loaded: 6883 success, 0 failed
+Players left: 5788 | Files loaded: 6883 success, 0 failed
+Players left: 5785 | Files loaded: 6883 success, 0 failed
+Players left: 5780 | Files loaded: 6883 success, 0 failed
+Players left: 5776 | Files loaded: 6883 success, 0 failed
+Players left: 5774 | Files loaded: 6883 success, 0 failed
+Players left: 5772 | Files loaded: 6883 success, 0 failed
+Players left: 5770 | Files loaded: 6883 success, 0 failed
+Players left: 5769 | Files loaded: 6883 success, 0 failed
+Players left: 5764 | Files loaded: 6883 success, 0 failed
+[P4] Texture upload batch took 10.542ms for 128 images
+[P4] Texture upload batch took 5.986ms for 128 images
+Players left: 5762 | Files loaded: 6883 success, 0 failed
+[P4] Texture upload batch took 5.205ms for 128 images
+[P4] Texture upload batch took 5.127ms for 128 images
+[P4] Texture upload batch took 6.921ms for 128 images
+Players left: 5760 | Files loaded: 6883 success, 0 failed
+Players left: 5758 | Files loaded: 6883 success, 0 failed
+Players left: 5755 | Files loaded: 6883 success, 0 failed
+Players left: 5752 | Files loaded: 6883 success, 0 failed
+Players left: 5751 | Files loaded: 6883 success, 0 failed
+Players left: 5749 | Files loaded: 6883 success, 0 failed
+Players left: 5742 | Files loaded: 6883 success, 0 failed
+Players left: 5737 | Files loaded: 6883 success, 0 failed
+Players left: 5736 | Files loaded: 6883 success, 0 failed
+Players left: 5735 | Files loaded: 6883 success, 0 failed
+Players left: 5729 | Files loaded: 6883 success, 0 failed
+Players left: 5726 | Files loaded: 6883 success, 0 failed
+Players left: 5723 | Files loaded: 6883 success, 0 failed
+Players left: 5721 | Files loaded: 6883 success, 0 failed
+Players left: 5718 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 840 instances=5714 tiers(PD/SS/BT/FD)=0/0/5714/0 textures(flat/bindless/atlas)=0/0/5714 individual=5714 pixelCluster=0 statistical=0 avgScreenR=10.5181 maxScreenR=10.5181 avgRadius=10.5181 assembleMs=167.668
+Players left: 5714 | Files loaded: 6883 success, 0 failed
+Players left: 5713 | Files loaded: 6883 success, 0 failed
+Players left: 5706 | Files loaded: 6883 success, 0 failed
+Players left: 5701 | Files loaded: 6883 success, 0 failed
+Players left: 5696 | Files loaded: 6883 success, 0 failed
+Players left: 5690 | Files loaded: 6883 success, 0 failed
+Players left: 5686 | Files loaded: 6883 success, 0 failed
+Players left: 5681 | Files loaded: 6883 success, 0 failed
+Players left: 5676 | Files loaded: 6883 success, 0 failed
+Players left: 5673 | Files loaded: 6883 success, 0 failed
+Players left: 5667 | Files loaded: 6883 success, 0 failed
+Players left: 5663 | Files loaded: 6883 success, 0 failed
+Players left: 5658 | Files loaded: 6883 success, 0 failed
+Players left: 5654 | Files loaded: 6883 success, 0 failed
+Players left: 5650 | Files loaded: 6883 success, 0 failed
+Players left: 5645 | Files loaded: 6883 success, 0 failed
+Players left: 5637 | Files loaded: 6883 success, 0 failed
+Players left: 5627 | Files loaded: 6883 success, 0 failed
+Players left: 5619 | Files loaded: 6883 success, 0 failed
+Players left: 5609 | Files loaded: 6883 success, 0 failed
+Players left: 5603 | Files loaded: 6883 success, 0 failed
+Players left: 5597 | Files loaded: 6883 success, 0 failed
+Players left: 5591 | Files loaded: 6883 success, 0 failed
+Players left: 5583 | Files loaded: 6883 success, 0 failed
+Players left: 5570 | Files loaded: 6883 success, 0 failed
+Players left: 5558 | Files loaded: 6883 success, 0 failed
+Players left: 5546 | Files loaded: 6883 success, 0 failed
+Players left: 5538 | Files loaded: 6883 success, 0 failed
+Players left: 5527 | Files loaded: 6883 success, 0 failed
+Players left: 5515 | Files loaded: 6883 success, 0 failed
+Players left: 5508 | Files loaded: 6883 success, 0 failed
+Players left: 5493 | Files loaded: 6883 success, 0 failed
+Players left: 5482 | Files loaded: 6883 success, 0 failed
+Players left: 5465 | Files loaded: 6883 success, 0 failed
+Players left: 5451 | Files loaded: 6883 success, 0 failed
+Players left: 5430 | Files loaded: 6883 success, 0 failed
+Players left: 5419 | Files loaded: 6883 success, 0 failed
+Players left: 5399 | Files loaded: 6883 success, 0 failed
+Players left: 5376 | Files loaded: 6883 success, 0 failed
+Players left: 5356 | Files loaded: 6883 success, 0 failed
+Players left: 5339 | Files loaded: 6883 success, 0 failed
+Players left: 5323 | Files loaded: 6883 success, 0 failed
+Players left: 5306 | Files loaded: 6883 success, 0 failed
+Players left: 5291 | Files loaded: 6883 success, 0 failed
+Players left: 5277 | Files loaded: 6883 success, 0 failed
+Players left: 5256 | Files loaded: 6883 success, 0 failed
+Players left: 5238 | Files loaded: 6883 success, 0 failed
+Players left: 5220 | Files loaded: 6883 success, 0 failed
+Players left: 5197 | Files loaded: 6883 success, 0 failed
+Players left: 5180 | Files loaded: 6883 success, 0 failed
+Players left: 5164 | Files loaded: 6883 success, 0 failed
+Players left: 5133 | Files loaded: 6883 success, 0 failed
+Players left: 5114 | Files loaded: 6883 success, 0 failed
+Players left: 5089 | Files loaded: 6883 success, 0 failed
+Players left: 5072 | Files loaded: 6883 success, 0 failed
+Players left: 5055 | Files loaded: 6883 success, 0 failed
+Players left: 5024 | Files loaded: 6883 success, 0 failed
+Players left: 4998 | Files loaded: 6883 success, 0 failed
+Players left: 4965 | Files loaded: 6883 success, 0 failed
+Players left: 4934 | Files loaded: 6883 success, 0 failed
+Players left: 4914 | Files loaded: 6883 success, 0 failed
+Players left: 4889 | Files loaded: 6883 success, 0 failed
+Players left: 4858 | Files loaded: 6883 success, 0 failed
+Players left: 4827 | Files loaded: 6883 success, 0 failed
+Players left: 4791 | Files loaded: 6883 success, 0 failed
+Players left: 4759 | Files loaded: 6883 success, 0 failed
+Players left: 4735 | Files loaded: 6883 success, 0 failed
+Players left: 4697 | Files loaded: 6883 success, 0 failed
+Players left: 4654 | Files loaded: 6883 success, 0 failed
+Players left: 4620 | Files loaded: 6883 success, 0 failed
+Players left: 4584 | Files loaded: 6883 success, 0 failed
+Players left: 4545 | Files loaded: 6883 success, 0 failed
+Players left: 4502 | Files loaded: 6883 success, 0 failed
+Players left: 4455 | Files loaded: 6883 success, 0 failed
+Players left: 4426 | Files loaded: 6883 success, 0 failed
+Players left: 4386 | Files loaded: 6883 success, 0 failed
+Players left: 4342 | Files loaded: 6883 success, 0 failed
+Players left: 4301 | Files loaded: 6883 success, 0 failed
+Players left: 4254 | Files loaded: 6883 success, 0 failed
+Players left: 4216 | Files loaded: 6883 success, 0 failed
+Players left: 4180 | Files loaded: 6883 success, 0 failed
+Players left: 4135 | Files loaded: 6883 success, 0 failed
+Players left: 4097 | Files loaded: 6883 success, 0 failed
+Players left: 4060 | Files loaded: 6883 success, 0 failed
+Players left: 4022 | Files loaded: 6883 success, 0 failed
+Players left: 3963 | Files loaded: 6883 success, 0 failed
+Players left: 3921 | Files loaded: 6883 success, 0 failed
+Players left: 3869 | Files loaded: 6883 success, 0 failed
+Players left: 3824 | Files loaded: 6883 success, 0 failed
+Players left: 3772 | Files loaded: 6883 success, 0 failed
+Players left: 3722 | Files loaded: 6883 success, 0 failed
+Players left: 3659 | Files loaded: 6883 success, 0 failed
+Players left: 3607 | Files loaded: 6883 success, 0 failed
+Players left: 3559 | Files loaded: 6883 success, 0 failed
+Players left: 3520 | Files loaded: 6883 success, 0 failed
+Players left: 3475 | Files loaded: 6883 success, 0 failed
+Players left: 3437 | Files loaded: 6883 success, 0 failed
+Players left: 3394 | Files loaded: 6883 success, 0 failed
+Players left: 3343 | Files loaded: 6883 success, 0 failed
+Players left: 3301 | Files loaded: 6883 success, 0 failed
+Players left: 3244 | Files loaded: 6883 success, 0 failed
+Players left: 3206 | Files loaded: 6883 success, 0 failed
+Players left: 3154 | Files loaded: 6883 success, 0 failed
+Players left: 3109 | Files loaded: 6883 success, 0 failed
+Players left: 3061 | Files loaded: 6883 success, 0 failed
+Players left: 3005 | Files loaded: 6883 success, 0 failed
+Players left: 2954 | Files loaded: 6883 success, 0 failed
+Players left: 2915 | Files loaded: 6883 success, 0 failed
+Players left: 2858 | Files loaded: 6883 success, 0 failed
+Players left: 2817 | Files loaded: 6883 success, 0 failed
+Players left: 2779 | Files loaded: 6883 success, 0 failed
+Players left: 2726 | Files loaded: 6883 success, 0 failed
+Players left: 2683 | Files loaded: 6883 success, 0 failed
+Players left: 2634 | Files loaded: 6883 success, 0 failed
+Players left: 2586 | Files loaded: 6883 success, 0 failed
+Players left: 2546 | Files loaded: 6883 success, 0 failed
+Players left: 2485 | Files loaded: 6883 success, 0 failed
+Players left: 2448 | Files loaded: 6883 success, 0 failed
+Players left: 2405 | Files loaded: 6883 success, 0 failed
+Players left: 2361 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 960 instances=2322 tiers(PD/SS/BT/FD)=0/0/2322/0 textures(flat/bindless/atlas)=0/0/2322 individual=2322 pixelCluster=0 statistical=0 avgScreenR=13.2287 maxScreenR=13.2287 avgRadius=13.2287 assembleMs=67.823
+Players left: 2322 | Files loaded: 6883 success, 0 failed
+Players left: 2283 | Files loaded: 6883 success, 0 failed
+Players left: 2243 | Files loaded: 6883 success, 0 failed
+Players left: 2191 | Files loaded: 6883 success, 0 failed
+Players left: 2158 | Files loaded: 6883 success, 0 failed
+Players left: 2128 | Files loaded: 6883 success, 0 failed
+Players left: 2089 | Files loaded: 6883 success, 0 failed
+Players left: 2053 | Files loaded: 6883 success, 0 failed
+Players left: 2006 | Files loaded: 6883 success, 0 failed
+Players left: 1970 | Files loaded: 6883 success, 0 failed
+Players left: 1936 | Files loaded: 6883 success, 0 failed
+Players left: 1907 | Files loaded: 6883 success, 0 failed
+Players left: 1874 | Files loaded: 6883 success, 0 failed
+Players left: 1844 | Files loaded: 6883 success, 0 failed
+Players left: 1822 | Files loaded: 6883 success, 0 failed
+Players left: 1789 | Files loaded: 6883 success, 0 failed
+Players left: 1753 | Files loaded: 6883 success, 0 failed
+Players left: 1726 | Files loaded: 6883 success, 0 failed
+Players left: 1703 | Files loaded: 6883 success, 0 failed
+Players left: 1678 | Files loaded: 6883 success, 0 failed
+Players left: 1643 | Files loaded: 6883 success, 0 failed
+Players left: 1613 | Files loaded: 6883 success, 0 failed
+Players left: 1576 | Files loaded: 6883 success, 0 failed
+Players left: 1552 | Files loaded: 6883 success, 0 failed
+Players left: 1527 | Files loaded: 6883 success, 0 failed
+Players left: 1508 | Files loaded: 6883 success, 0 failed
+Players left: 1491 | Files loaded: 6883 success, 0 failed
+Players left: 1468 | Files loaded: 6883 success, 0 failed
+Players left: 1447 | Files loaded: 6883 success, 0 failed
+Players left: 1427 | Files loaded: 6883 success, 0 failed
+Players left: 1401 | Files loaded: 6883 success, 0 failed
+Players left: 1382 | Files loaded: 6883 success, 0 failed
+Players left: 1359 | Files loaded: 6883 success, 0 failed
+Players left: 1336 | Files loaded: 6883 success, 0 failed
+Players left: 1315 | Files loaded: 6883 success, 0 failed
+Players left: 1294 | Files loaded: 6883 success, 0 failed
+Players left: 1267 | Files loaded: 6883 success, 0 failed
+Players left: 1247 | Files loaded: 6883 success, 0 failed
+Players left: 1220 | Files loaded: 6883 success, 0 failed
+Players left: 1202 | Files loaded: 6883 success, 0 failed
+Players left: 1176 | Files loaded: 6883 success, 0 failed
+[PERF_Apple (MoltenVK)] Avg Compute: 0.00349994ms | Avg Compaction: 0ms | Fallbacks: 1000/1000
+Players left: 1161 | Files loaded: 6883 success, 0 failed
+Players left: 1138 | Files loaded: 6883 success, 0 failed
+Players left: 1122 | Files loaded: 6883 success, 0 failed
+Players left: 1101 | Files loaded: 6883 success, 0 failed
+Players left: 1083 | Files loaded: 6883 success, 0 failed
+Players left: 1067 | Files loaded: 6883 success, 0 failed
+Players left: 1045 | Files loaded: 6883 success, 0 failed
+Players left: 1031 | Files loaded: 6883 success, 0 failed
+Players left: 1021 | Files loaded: 6883 success, 0 failed
+Players left: 1004 | Files loaded: 6883 success, 0 failed
+Players left: 994 | Files loaded: 6883 success, 0 failed
+Players left: 983 | Files loaded: 6883 success, 0 failed
+Players left: 964 | Files loaded: 6883 success, 0 failed
+Players left: 954 | Files loaded: 6883 success, 0 failed
+Players left: 941 | Files loaded: 6883 success, 0 failed
+Players left: 922 | Files loaded: 6883 success, 0 failed
+Players left: 907 | Files loaded: 6883 success, 0 failed
+Players left: 886 | Files loaded: 6883 success, 0 failed
+Players left: 867 | Files loaded: 6883 success, 0 failed
+Players left: 853 | Files loaded: 6883 success, 0 failed
+Players left: 847 | Files loaded: 6883 success, 0 failed
+Players left: 840 | Files loaded: 6883 success, 0 failed
+Players left: 829 | Files loaded: 6883 success, 0 failed
+Players left: 818 | Files loaded: 6883 success, 0 failed
+Players left: 803 | Files loaded: 6883 success, 0 failed
+Players left: 793 | Files loaded: 6883 success, 0 failed
+Players left: 785 | Files loaded: 6883 success, 0 failed
+Players left: 778 | Files loaded: 6883 success, 0 failed
+Players left: 764 | Files loaded: 6883 success, 0 failed
+Players left: 756 | Files loaded: 6883 success, 0 failed
+Players left: 747 | Files loaded: 6883 success, 0 failed
+Players left: 740 | Files loaded: 6883 success, 0 failed
+Players left: 725 | Files loaded: 6883 success, 0 failed
+Players left: 719 | Files loaded: 6883 success, 0 failed
+Players left: 709 | Files loaded: 6883 success, 0 failed
+Players left: 702 | Files loaded: 6883 success, 0 failed
+Players left: 694 | Files loaded: 6883 success, 0 failed
+Players left: 689 | Files loaded: 6883 success, 0 failed
+Players left: 680 | Files loaded: 6883 success, 0 failed
+Players left: 674 | Files loaded: 6883 success, 0 failed
+Players left: 670 | Files loaded: 6883 success, 0 failed
+Players left: 660 | Files loaded: 6883 success, 0 failed
+Players left: 653 | Files loaded: 6883 success, 0 failed
+Players left: 648 | Files loaded: 6883 success, 0 failed
+Players left: 639 | Files loaded: 6883 success, 0 failed
+Players left: 633 | Files loaded: 6883 success, 0 failed
+Players left: 625 | Files loaded: 6883 success, 0 failed
+Players left: 617 | Files loaded: 6883 success, 0 failed
+Players left: 611 | Files loaded: 6883 success, 0 failed
+Players left: 607 | Files loaded: 6883 success, 0 failed
+Players left: 597 | Files loaded: 6883 success, 0 failed
+Players left: 593 | Files loaded: 6883 success, 0 failed
+Players left: 589 | Files loaded: 6883 success, 0 failed
+Players left: 586 | Files loaded: 6883 success, 0 failed
+Players left: 580 | Files loaded: 6883 success, 0 failed
+Players left: 578 | Files loaded: 6883 success, 0 failed
+Players left: 572 | Files loaded: 6883 success, 0 failed
+Players left: 565 | Files loaded: 6883 success, 0 failed
+Players left: 559 | Files loaded: 6883 success, 0 failed
+Players left: 552 | Files loaded: 6883 success, 0 failed
+Players left: 549 | Files loaded: 6883 success, 0 failed
+Players left: 545 | Files loaded: 6883 success, 0 failed
+Players left: 538 | Files loaded: 6883 success, 0 failed
+Players left: 529 | Files loaded: 6883 success, 0 failed
+Players left: 520 | Files loaded: 6883 success, 0 failed
+Players left: 517 | Files loaded: 6883 success, 0 failed
+Players left: 507 | Files loaded: 6883 success, 0 failed
+Players left: 503 | Files loaded: 6883 success, 0 failed
+Players left: 498 | Files loaded: 6883 success, 0 failed
+Players left: 497 | Files loaded: 6883 success, 0 failed
+Players left: 496 | Files loaded: 6883 success, 0 failed
+Players left: 492 | Files loaded: 6883 success, 0 failed
+Players left: 486 | Files loaded: 6883 success, 0 failed
+Players left: 485 | Files loaded: 6883 success, 0 failed
+Players left: 482 | Files loaded: 6883 success, 0 failed
+Players left: 475 | Files loaded: 6883 success, 0 failed
+Players left: 471 | Files loaded: 6883 success, 0 failed
+Players left: 464 | Files loaded: 6883 success, 0 failed
+Players left: 457 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1080 instances=454 tiers(PD/SS/BT/FD)=0/0/0/454 textures(flat/bindless/atlas)=0/0/454 individual=454 pixelCluster=0 statistical=0 avgScreenR=19.383 maxScreenR=19.383 avgRadius=19.383 assembleMs=0.465
+Players left: 454 | Files loaded: 6883 success, 0 failed
+Players left: 453 | Files loaded: 6883 success, 0 failed
+Players left: 449 | Files loaded: 6883 success, 0 failed
+Players left: 448 | Files loaded: 6883 success, 0 failed
+Players left: 446 | Files loaded: 6883 success, 0 failed
+Players left: 442 | Files loaded: 6883 success, 0 failed
+Players left: 440 | Files loaded: 6883 success, 0 failed
+Players left: 434 | Files loaded: 6883 success, 0 failed
+Players left: 433 | Files loaded: 6883 success, 0 failed
+Players left: 431 | Files loaded: 6883 success, 0 failed
+Players left: 425 | Files loaded: 6883 success, 0 failed
+Players left: 423 | Files loaded: 6883 success, 0 failed
+Players left: 418 | Files loaded: 6883 success, 0 failed
+Players left: 411 | Files loaded: 6883 success, 0 failed
+Players left: 406 | Files loaded: 6883 success, 0 failed
+Players left: 403 | Files loaded: 6883 success, 0 failed
+Players left: 400 | Files loaded: 6883 success, 0 failed
+Players left: 396 | Files loaded: 6883 success, 0 failed
+Players left: 394 | Files loaded: 6883 success, 0 failed
+Players left: 392 | Files loaded: 6883 success, 0 failed
+Players left: 388 | Files loaded: 6883 success, 0 failed
+Players left: 386 | Files loaded: 6883 success, 0 failed
+Players left: 383 | Files loaded: 6883 success, 0 failed
+Players left: 382 | Files loaded: 6883 success, 0 failed
+Players left: 379 | Files loaded: 6883 success, 0 failed
+Players left: 377 | Files loaded: 6883 success, 0 failed
+Players left: 372 | Files loaded: 6883 success, 0 failed
+Players left: 371 | Files loaded: 6883 success, 0 failed
+Players left: 366 | Files loaded: 6883 success, 0 failed
+Players left: 363 | Files loaded: 6883 success, 0 failed
+Players left: 358 | Files loaded: 6883 success, 0 failed
+Players left: 357 | Files loaded: 6883 success, 0 failed
+Players left: 356 | Files loaded: 6883 success, 0 failed
+Players left: 353 | Files loaded: 6883 success, 0 failed
+Players left: 351 | Files loaded: 6883 success, 0 failed
+Players left: 348 | Files loaded: 6883 success, 0 failed
+Players left: 345 | Files loaded: 6883 success, 0 failed
+Players left: 341 | Files loaded: 6883 success, 0 failed
+Players left: 338 | Files loaded: 6883 success, 0 failed
+Players left: 336 | Files loaded: 6883 success, 0 failed
+Players left: 335 | Files loaded: 6883 success, 0 failed
+Players left: 334 | Files loaded: 6883 success, 0 failed
+Players left: 332 | Files loaded: 6883 success, 0 failed
+Players left: 331 | Files loaded: 6883 success, 0 failed
+Players left: 329 | Files loaded: 6883 success, 0 failed
+Players left: 327 | Files loaded: 6883 success, 0 failed
+Players left: 322 | Files loaded: 6883 success, 0 failed
+Players left: 321 | Files loaded: 6883 success, 0 failed
+Players left: 319 | Files loaded: 6883 success, 0 failed
+Players left: 314 | Files loaded: 6883 success, 0 failed
+Players left: 313 | Files loaded: 6883 success, 0 failed
+Players left: 308 | Files loaded: 6883 success, 0 failed
+Players left: 307 | Files loaded: 6883 success, 0 failed
+Players left: 304 | Files loaded: 6883 success, 0 failed
+Players left: 301 | Files loaded: 6883 success, 0 failed
+Players left: 298 | Files loaded: 6883 success, 0 failed
+Players left: 297 | Files loaded: 6883 success, 0 failed
+Players left: 290 | Files loaded: 6883 success, 0 failed
+Players left: 287 | Files loaded: 6883 success, 0 failed
+Players left: 279 | Files loaded: 6883 success, 0 failed
+Players left: 278 | Files loaded: 6883 success, 0 failed
+Players left: 276 | Files loaded: 6883 success, 0 failed
+Players left: 274 | Files loaded: 6883 success, 0 failed
+Players left: 272 | Files loaded: 6883 success, 0 failed
+Players left: 267 | Files loaded: 6883 success, 0 failed
+Players left: 262 | Files loaded: 6883 success, 0 failed
+Players left: 259 | Files loaded: 6883 success, 0 failed
+Players left: 258 | Files loaded: 6883 success, 0 failed
+Players left: 256 | Files loaded: 6883 success, 0 failed
+Players left: 255 | Files loaded: 6883 success, 0 failed
+Players left: 250 | Files loaded: 6883 success, 0 failed
+Players left: 248 | Files loaded: 6883 success, 0 failed
+Players left: 247 | Files loaded: 6883 success, 0 failed
+Players left: 244 | Files loaded: 6883 success, 0 failed
+Players left: 241 | Files loaded: 6883 success, 0 failed
+Players left: 239 | Files loaded: 6883 success, 0 failed
+Players left: 237 | Files loaded: 6883 success, 0 failed
+Players left: 232 | Files loaded: 6883 success, 0 failed
+Players left: 229 | Files loaded: 6883 success, 0 failed
+Players left: 228 | Files loaded: 6883 success, 0 failed
+Players left: 225 | Files loaded: 6883 success, 0 failed
+Players left: 223 | Files loaded: 6883 success, 0 failed
+Players left: 222 | Files loaded: 6883 success, 0 failed
+Players left: 221 | Files loaded: 6883 success, 0 failed
+Players left: 220 | Files loaded: 6883 success, 0 failed
+Players left: 218 | Files loaded: 6883 success, 0 failed
+Players left: 217 | Files loaded: 6883 success, 0 failed
+Players left: 212 | Files loaded: 6883 success, 0 failed
+Players left: 210 | Files loaded: 6883 success, 0 failed
+Players left: 209 | Files loaded: 6883 success, 0 failed
+Players left: 206 | Files loaded: 6883 success, 0 failed
+Players left: 204 | Files loaded: 6883 success, 0 failed
+Players left: 201 | Files loaded: 6883 success, 0 failed
+Players left: 200 | Files loaded: 6883 success, 0 failed
+Players left: 198 | Files loaded: 6883 success, 0 failed
+Players left: 197 | Files loaded: 6883 success, 0 failed
+Players left: 195 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1200 instances=195 tiers(PD/SS/BT/FD)=0/0/0/195 textures(flat/bindless/atlas)=0/0/195 individual=195 pixelCluster=0 statistical=0 avgScreenR=21.267 maxScreenR=21.267 avgRadius=21.267 assembleMs=0.055
+Players left: 195 | Files loaded: 6883 success, 0 failed
+Players left: 193 | Files loaded: 6883 success, 0 failed
+Players left: 192 | Files loaded: 6883 success, 0 failed
+Players left: 191 | Files loaded: 6883 success, 0 failed
+Players left: 188 | Files loaded: 6883 success, 0 failed
+Players left: 187 | Files loaded: 6883 success, 0 failed
+Players left: 186 | Files loaded: 6883 success, 0 failed
+Players left: 184 | Files loaded: 6883 success, 0 failed
+Players left: 182 | Files loaded: 6883 success, 0 failed
+Players left: 181 | Files loaded: 6883 success, 0 failed
+Players left: 180 | Files loaded: 6883 success, 0 failed
+Players left: 179 | Files loaded: 6883 success, 0 failed
+Players left: 177 | Files loaded: 6883 success, 0 failed
+Players left: 172 | Files loaded: 6883 success, 0 failed
+Players left: 170 | Files loaded: 6883 success, 0 failed
+Players left: 168 | Files loaded: 6883 success, 0 failed
+Players left: 167 | Files loaded: 6883 success, 0 failed
+Players left: 166 | Files loaded: 6883 success, 0 failed
+Players left: 165 | Files loaded: 6883 success, 0 failed
+Players left: 163 | Files loaded: 6883 success, 0 failed
+Players left: 160 | Files loaded: 6883 success, 0 failed
+Players left: 158 | Files loaded: 6883 success, 0 failed
+Players left: 157 | Files loaded: 6883 success, 0 failed
+Players left: 156 | Files loaded: 6883 success, 0 failed
+Players left: 155 | Files loaded: 6883 success, 0 failed
+Players left: 154 | Files loaded: 6883 success, 0 failed
+Players left: 153 | Files loaded: 6883 success, 0 failed
+Players left: 150 | Files loaded: 6883 success, 0 failed
+Players left: 148 | Files loaded: 6883 success, 0 failed
+Players left: 147 | Files loaded: 6883 success, 0 failed
+Players left: 145 | Files loaded: 6883 success, 0 failed
+Players left: 144 | Files loaded: 6883 success, 0 failed
+Players left: 140 | Files loaded: 6883 success, 0 failed
+Players left: 138 | Files loaded: 6883 success, 0 failed
+Players left: 136 | Files loaded: 6883 success, 0 failed
+Players left: 134 | Files loaded: 6883 success, 0 failed
+Players left: 133 | Files loaded: 6883 success, 0 failed
+Players left: 131 | Files loaded: 6883 success, 0 failed
+Players left: 128 | Files loaded: 6883 success, 0 failed
+Players left: 127 | Files loaded: 6883 success, 0 failed
+Players left: 126 | Files loaded: 6883 success, 0 failed
+Players left: 124 | Files loaded: 6883 success, 0 failed
+Players left: 121 | Files loaded: 6883 success, 0 failed
+Players left: 120 | Files loaded: 6883 success, 0 failed
+Players left: 119 | Files loaded: 6883 success, 0 failed
+Players left: 116 | Files loaded: 6883 success, 0 failed
+Players left: 114 | Files loaded: 6883 success, 0 failed
+Players left: 113 | Files loaded: 6883 success, 0 failed
+Players left: 112 | Files loaded: 6883 success, 0 failed
+Players left: 111 | Files loaded: 6883 success, 0 failed
+Players left: 110 | Files loaded: 6883 success, 0 failed
+Players left: 109 | Files loaded: 6883 success, 0 failed
+Players left: 105 | Files loaded: 6883 success, 0 failed
+Players left: 103 | Files loaded: 6883 success, 0 failed
+Players left: 101 | Files loaded: 6883 success, 0 failed
+Players left: 100 | Files loaded: 6883 success, 0 failed
+Players left: 96 | Files loaded: 6883 success, 0 failed
+Players left: 94 | Files loaded: 6883 success, 0 failed
+Players left: 91 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1320 instances=90 tiers(PD/SS/BT/FD)=0/0/0/90 textures(flat/bindless/atlas)=0/0/90 individual=90 pixelCluster=0 statistical=0 avgScreenR=31.1478 maxScreenR=31.1478 avgRadius=31.1478 assembleMs=0.189
+Players left: 90 | Files loaded: 6883 success, 0 failed
+Players left: 89 | Files loaded: 6883 success, 0 failed
+Players left: 87 | Files loaded: 6883 success, 0 failed
+Players left: 86 | Files loaded: 6883 success, 0 failed
+Players left: 84 | Files loaded: 6883 success, 0 failed
+Players left: 83 | Files loaded: 6883 success, 0 failed
+Players left: 81 | Files loaded: 6883 success, 0 failed
+Players left: 80 | Files loaded: 6883 success, 0 failed
+Players left: 78 | Files loaded: 6883 success, 0 failed
+Players left: 76 | Files loaded: 6883 success, 0 failed
+Players left: 75 | Files loaded: 6883 success, 0 failed
+Players left: 73 | Files loaded: 6883 success, 0 failed
+Players left: 71 | Files loaded: 6883 success, 0 failed
+Players left: 69 | Files loaded: 6883 success, 0 failed
+Players left: 67 | Files loaded: 6883 success, 0 failed
+Players left: 66 | Files loaded: 6883 success, 0 failed
+Players left: 65 | Files loaded: 6883 success, 0 failed
+Players left: 63 | Files loaded: 6883 success, 0 failed
+Players left: 62 | Files loaded: 6883 success, 0 failed
+Players left: 59 | Files loaded: 6883 success, 0 failed
+Players left: 57 | Files loaded: 6883 success, 0 failed
+Players left: 56 | Files loaded: 6883 success, 0 failed
+Players left: 54 | Files loaded: 6883 success, 0 failed
+Players left: 53 | Files loaded: 6883 success, 0 failed
+Players left: 52 | Files loaded: 6883 success, 0 failed
+Players left: 51 | Files loaded: 6883 success, 0 failed
+Players left: 50 | Files loaded: 6883 success, 0 failed
+Players left: 48 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1440 instances=48 tiers(PD/SS/BT/FD)=0/0/0/48 textures(flat/bindless/atlas)=0/0/48 individual=48 pixelCluster=0 statistical=0 avgScreenR=40.9289 maxScreenR=40.9289 avgRadius=40.9289 assembleMs=0.055
+Players left: 48 | Files loaded: 6883 success, 0 failed
+Players left: 47 | Files loaded: 6883 success, 0 failed
+Players left: 46 | Files loaded: 6883 success, 0 failed
+Players left: 45 | Files loaded: 6883 success, 0 failed
+Players left: 44 | Files loaded: 6883 success, 0 failed
+Players left: 43 | Files loaded: 6883 success, 0 failed
+Players left: 41 | Files loaded: 6883 success, 0 failed
+Players left: 40 | Files loaded: 6883 success, 0 failed
+Players left: 39 | Files loaded: 6883 success, 0 failed
+Players left: 38 | Files loaded: 6883 success, 0 failed
+Players left: 37 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1560 instances=37 tiers(PD/SS/BT/FD)=0/0/0/37 textures(flat/bindless/atlas)=0/0/37 individual=37 pixelCluster=0 statistical=0 avgScreenR=50.9717 maxScreenR=50.9717 avgRadius=50.9717 assembleMs=0.118
+Players left: 37 | Files loaded: 6883 success, 0 failed
+Players left: 36 | Files loaded: 6883 success, 0 failed
+Players left: 35 | Files loaded: 6883 success, 0 failed
+Players left: 34 | Files loaded: 6883 success, 0 failed
+Players left: 33 | Files loaded: 6883 success, 0 failed
+Players left: 32 | Files loaded: 6883 success, 0 failed
+Players left: 31 | Files loaded: 6883 success, 0 failed
+Players left: 30 | Files loaded: 6883 success, 0 failed
+Players left: 28 | Files loaded: 6883 success, 0 failed
+Players left: 26 | Files loaded: 6883 success, 0 failed
+Players left: 25 | Files loaded: 6883 success, 0 failed
+Players left: 23 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1680 instances=23 tiers(PD/SS/BT/FD)=0/0/0/23 textures(flat/bindless/atlas)=0/0/23 individual=23 pixelCluster=0 statistical=0 avgScreenR=56.6085 maxScreenR=56.6085 avgRadius=56.6085 assembleMs=0.055
+Players left: 23 | Files loaded: 6883 success, 0 failed
+Players left: 22 | Files loaded: 6883 success, 0 failed
+Players left: 21 | Files loaded: 6883 success, 0 failed
+Players left: 19 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1800 instances=19 tiers(PD/SS/BT/FD)=0/0/0/19 textures(flat/bindless/atlas)=0/0/19 individual=19 pixelCluster=0 statistical=0 avgScreenR=62.1998 maxScreenR=62.1998 avgRadius=62.1998 assembleMs=0.05
+Players left: 19 | Files loaded: 6883 success, 0 failed
+Players left: 18 | Files loaded: 6883 success, 0 failed
+Players left: 17 | Files loaded: 6883 success, 0 failed
+Players left: 16 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 1920 instances=16 tiers(PD/SS/BT/FD)=0/0/0/16 textures(flat/bindless/atlas)=0/0/16 individual=16 pixelCluster=0 statistical=0 avgScreenR=62.896 maxScreenR=62.896 avgRadius=62.896 assembleMs=0.058
+Players left: 16 | Files loaded: 6883 success, 0 failed
+[PERF_Apple (MoltenVK)] Avg Compute: 0.00546488ms | Avg Compaction: 0ms | Fallbacks: 2000/2000
+Players left: 15 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2040 instances=15 tiers(PD/SS/BT/FD)=0/0/0/15 textures(flat/bindless/atlas)=0/0/15 individual=15 pixelCluster=0 statistical=0 avgScreenR=63.0588 maxScreenR=63.0588 avgRadius=63.0588 assembleMs=0.061
+Players left: 15 | Files loaded: 6883 success, 0 failed
+Players left: 14 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2160 instances=14 tiers(PD/SS/BT/FD)=0/0/0/14 textures(flat/bindless/atlas)=0/0/14 individual=14 pixelCluster=0 statistical=0 avgScreenR=63.0588 maxScreenR=63.0588 avgRadius=63.0588 assembleMs=0.056
+Players left: 14 | Files loaded: 6883 success, 0 failed
+Players left: 13 | Files loaded: 6883 success, 0 failed
+Players left: 12 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2280 instances=12 tiers(PD/SS/BT/FD)=0/0/0/12 textures(flat/bindless/atlas)=0/0/12 individual=12 pixelCluster=0 statistical=0 avgScreenR=63.0588 maxScreenR=63.0588 avgRadius=63.0588 assembleMs=0.055
+Players left: 12 | Files loaded: 6883 success, 0 failed
+Players left: 11 | Files loaded: 6883 success, 0 failed
+Players left: 10 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2400 instances=10 tiers(PD/SS/BT/FD)=0/0/0/10 textures(flat/bindless/atlas)=0/0/10 individual=10 pixelCluster=0 statistical=0 avgScreenR=63.0588 maxScreenR=63.0588 avgRadius=63.0588 assembleMs=0.043
+Players left: 10 | Files loaded: 6883 success, 0 failed
+Players left: 8 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2520 instances=8 tiers(PD/SS/BT/FD)=0/0/0/8 textures(flat/bindless/atlas)=0/0/8 individual=8 pixelCluster=0 statistical=0 avgScreenR=170.825 maxScreenR=170.825 avgRadius=170.825 assembleMs=0.042
+Players left: 8 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2640 instances=8 tiers(PD/SS/BT/FD)=0/0/0/8 textures(flat/bindless/atlas)=0/0/8 individual=8 pixelCluster=0 statistical=0 avgScreenR=196.117 maxScreenR=196.117 avgRadius=196.117 assembleMs=0.028
+Players left: 8 | Files loaded: 6883 success, 0 failed
+Players left: 7 | Files loaded: 6883 success, 0 failed
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2760 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.474 maxScreenR=199.474 avgRadius=199.474 assembleMs=0.02
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 2880 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.887 maxScreenR=199.887 avgRadius=199.887 assembleMs=0.05
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3000 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.044
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[PERF_Apple (MoltenVK)] Avg Compute: 0.00626448ms | Avg Compaction: 0ms | Fallbacks: 3000/3000
+[Phase0] frame 3120 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.046
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3240 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.039
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3360 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.043
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3480 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.035
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3600 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.039
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3720 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.035
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3840 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.037
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 3960 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.037
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[PERF_Apple (MoltenVK)] Avg Compute: 0.00671012ms | Avg Compaction: 0ms | Fallbacks: 4000/4000
+[Phase0] frame 4080 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.043
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 4200 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.046
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 4320 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.048
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 4440 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.037
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 4560 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.062
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 4680 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.035
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 4800 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.015
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 4920 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.033
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[PERF_Apple (MoltenVK)] Avg Compute: 0.00684016ms | Avg Compaction: 0ms | Fallbacks: 5000/5000
+[Phase0] frame 5040 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.046
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 5160 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.037
+Players left: 6 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 5280 instances=6 tiers(PD/SS/BT/FD)=0/0/0/6 textures(flat/bindless/atlas)=0/0/6 individual=6 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.07
+Players left: 6 | Files loaded: 6883 success, 0 failed
+Players left: 5 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 5400 instances=5 tiers(PD/SS/BT/FD)=0/0/0/5 textures(flat/bindless/atlas)=0/0/5 individual=5 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.039
+Players left: 5 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 5520 instances=5 tiers(PD/SS/BT/FD)=0/0/0/5 textures(flat/bindless/atlas)=0/0/5 individual=5 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.049
+Players left: 5 | Files loaded: 6883 success, 0 failed
+Players left: 4 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 5640 instances=4 tiers(PD/SS/BT/FD)=0/0/0/4 textures(flat/bindless/atlas)=0/0/4 individual=4 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.017
+Players left: 4 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 5760 instances=4 tiers(PD/SS/BT/FD)=0/0/0/4 textures(flat/bindless/atlas)=0/0/4 individual=4 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.364
+Players left: 4 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 5880 instances=4 tiers(PD/SS/BT/FD)=0/0/0/4 textures(flat/bindless/atlas)=0/0/4 individual=4 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.035
+Players left: 4 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6000 instances=4 tiers(PD/SS/BT/FD)=0/0/0/4 textures(flat/bindless/atlas)=0/0/4 individual=4 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.039
+Players left: 4 | Files loaded: 6883 success, 0 failed
+[PERF_Apple (MoltenVK)] Avg Compute: 0.00701952ms | Avg Compaction: 0ms | Fallbacks: 6000/6000
+[Phase0] frame 6120 instances=4 tiers(PD/SS/BT/FD)=0/0/0/4 textures(flat/bindless/atlas)=0/0/4 individual=4 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.033
+Players left: 4 | Files loaded: 6883 success, 0 failed
+Players left: 3 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6240 instances=3 tiers(PD/SS/BT/FD)=0/0/0/3 textures(flat/bindless/atlas)=0/0/3 individual=3 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.125
+Players left: 3 | Files loaded: 6883 success, 0 failed
+Players left: 2 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6360 instances=2 tiers(PD/SS/BT/FD)=0/0/0/2 textures(flat/bindless/atlas)=0/0/2 individual=2 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.105
+Players left: 2 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6480 instances=2 tiers(PD/SS/BT/FD)=0/0/0/2 textures(flat/bindless/atlas)=0/0/2 individual=2 pixelCluster=0 statistical=0 avgScreenR=199.999 maxScreenR=199.999 avgRadius=199.999 assembleMs=0.033
+Players left: 2 | Files loaded: 6883 success, 0 failed
+Players left: 1 | WINNER: thanhtu3663 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6600 instances=1 tiers(PD/SS/BT/FD)=0/0/0/1 textures(flat/bindless/atlas)=0/0/1 individual=1 pixelCluster=0 statistical=0 avgScreenR=224.229 maxScreenR=224.229 avgRadius=224.229 assembleMs=0.131
+Players left: 1 | WINNER: thanhtu3663 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6720 instances=1 tiers(PD/SS/BT/FD)=0/0/0/1 textures(flat/bindless/atlas)=0/0/1 individual=1 pixelCluster=0 statistical=0 avgScreenR=237.442 maxScreenR=237.442 avgRadius=237.442 assembleMs=0.013
+Players left: 1 | WINNER: thanhtu3663 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6840 instances=1 tiers(PD/SS/BT/FD)=0/0/0/1 textures(flat/bindless/atlas)=0/0/1 individual=1 pixelCluster=0 statistical=0 avgScreenR=239.988 maxScreenR=239.988 avgRadius=239.988 assembleMs=0.032
+Players left: 1 | WINNER: thanhtu3663 | Files loaded: 6883 success, 0 failed
+[Phase0] frame 6960 instances=1 tiers(PD/SS/BT/FD)=0/0/0/1 textures(flat/bindless/atlas)=0/0/1 individual=1 pixelCluster=0 statistical=0 avgScreenR=240 maxScreenR=240 avgRadius=240 assembleMs=0.03
+Players left: 1 | WINNER: thanhtu3663 | Files loaded: 6883 success, 0 failed
+[PERF_Apple (MoltenVK)] Avg Compute: 0.00726675ms | Avg Compaction: 0ms | Fallbacks: 7000/7000

@@ -331,6 +331,132 @@ enum class CircleRenderTier : uint32_t {
 	FULL_DETAIL = 3
 };
 
+enum class Phase0InstanceKind : uint32_t {
+	Individual = 0,
+	PixelCluster = 1,
+	StatisticalCluster = 2
+};
+
+static constexpr size_t kPhase0InstanceKindCount = 3;
+
+struct Phase0Telemetry {
+	bool enabled = false;
+	uint64_t frameIndex = 0;
+	std::array<uint32_t, 4> tierCounts{};
+	std::array<uint32_t, kPhase0InstanceKindCount> instanceCounts{};
+	std::array<uint32_t, kPhase0InstanceKindCount> instanceEntities{};
+	uint32_t bindlessInstances = 0;
+	uint32_t atlasInstances = 0;
+	uint32_t flatInstances = 0;
+	double sumApparentRadius = 0.0;
+	double sumPhysicalRadius = 0.0;
+	float maxApparentRadius = 0.0f;
+	float maxPhysicalRadius = 0.0f;
+	uint32_t sampleCount = 0;
+	uint64_t lastReportFrame = 0;
+	std::chrono::steady_clock::time_point frameStart{};
+	float assemblyMs = 0.0f;
+
+	Phase0Telemetry() {
+		const char* env = std::getenv("BR5_PHASE0_TELEMETRY");
+		if (env && std::atoi(env) != 0) {
+			enabled = true;
+			std::cout << "[Phase0] Telemetry enabled via BR5_PHASE0_TELEMETRY" << std::endl;
+		}
+	}
+
+	bool isEnabled() const { return enabled; }
+
+	static size_t toIndex(Phase0InstanceKind kind) {
+		return static_cast<size_t>(kind);
+	}
+
+	void beginFrame(uint64_t frameIdx) {
+		if (!enabled) return;
+		frameIndex = frameIdx;
+		frameStart = std::chrono::steady_clock::now();
+		tierCounts.fill(0);
+		instanceCounts.fill(0);
+		instanceEntities.fill(0);
+		bindlessInstances = 0;
+		atlasInstances = 0;
+		flatInstances = 0;
+		sumApparentRadius = 0.0;
+		sumPhysicalRadius = 0.0;
+		maxApparentRadius = 0.0f;
+		maxPhysicalRadius = 0.0f;
+		sampleCount = 0;
+		assemblyMs = 0.0f;
+	}
+
+	void recordCircle(CircleRenderTier tier,
+		float apparentRadius,
+		float physicalRadius,
+		uint32_t textureIndex,
+		Phase0InstanceKind kind,
+		uint32_t entityCount) {
+		if (!enabled) return;
+		size_t tierIdx = static_cast<size_t>(tier);
+		if (tierIdx < tierCounts.size()) {
+			tierCounts[tierIdx]++;
+		}
+		size_t kindIdx = toIndex(kind);
+		if (kindIdx < instanceCounts.size()) {
+			instanceCounts[kindIdx]++;
+			instanceEntities[kindIdx] += entityCount;
+		}
+		if (textureIndex == BindlessTextureSystem::INVALID_TEXTURE_INDEX) {
+			flatInstances++;
+		} else if (textureIndex & 0x80000000u) {
+			atlasInstances++;
+		} else {
+			bindlessInstances++;
+		}
+		maxApparentRadius = std::max(maxApparentRadius, apparentRadius);
+		maxPhysicalRadius = std::max(maxPhysicalRadius, physicalRadius);
+		sumApparentRadius += apparentRadius;
+		sumPhysicalRadius += physicalRadius;
+		sampleCount++;
+	}
+
+	void finalizeFrame() {
+		if (!enabled) return;
+		assemblyMs = static_cast<float>(std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now() - frameStart).count() / 1000.0);
+		if (sampleCount == 0) {
+			return;
+		}
+		if ((frameIndex % 120) != 0 || frameIndex == lastReportFrame) {
+			return;
+		}
+		lastReportFrame = frameIndex;
+		float avgApparent = static_cast<float>(sumApparentRadius / static_cast<double>(sampleCount));
+		float avgPhysical = static_cast<float>(sumPhysicalRadius / static_cast<double>(sampleCount));
+		constexpr const char* kindLabels[kPhase0InstanceKindCount] = {
+			"individual",
+			"pixelCluster",
+			"statistical"
+		};
+		std::cout << "[Phase0] frame " << frameIndex
+		          << " instances=" << sampleCount
+		          << " tiers(PD/SS/BT/FD)="
+		          << tierCounts[0] << '/' << tierCounts[1] << '/' << tierCounts[2] << '/' << tierCounts[3]
+		          << " textures(flat/bindless/atlas)="
+		          << flatInstances << '/' << bindlessInstances << '/' << atlasInstances;
+		for (size_t i = 0; i < kPhase0InstanceKindCount; ++i) {
+			std::cout << ' ' << kindLabels[i] << '=' << instanceCounts[i];
+			if (instanceEntities[i] > instanceCounts[i]) {
+				std::cout << "(" << instanceEntities[i] << " entities)";
+			}
+		}
+		std::cout << " avgScreenR=" << avgApparent
+		          << " maxScreenR=" << maxApparentRadius
+		          << " avgRadius=" << avgPhysical
+		          << " assembleMs=" << assemblyMs
+		          << std::endl;
+	}
+};
+
 struct TextVertex {
 	float position[2];
 	float uv[2];
@@ -837,6 +963,8 @@ struct Simulation {
 	// Image manager
 	ImageManager* imageManager = nullptr;
 
+	mutable Phase0Telemetry phase0Telemetry;
+
 	// Temp
 	std::mt19937 rng{std::random_device{}()};
 
@@ -903,6 +1031,14 @@ struct Simulation {
 					  << ". Using default BATTLE_ROYALE preset.\n";
 			globalDamageCurve.loadPreset(CurvePreset::BATTLE_ROYALE);
 		}
+	}
+
+	void beginPhase0TelemetryFrame(uint64_t frameIndex) const {
+		phase0Telemetry.beginFrame(frameIndex);
+	}
+
+	void finalizePhase0TelemetryFrame() const {
+		phase0Telemetry.finalizeFrame();
 	}
 
 	void initializeFromAssets(const std::string& assetsDir, uint32_t targetCount) {
@@ -2613,6 +2749,15 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.color[2] = pixelCluster.aggregatedColor.z * pixelCluster.intensity;
 		inst.color[3] = std::min(1.0f, 0.6f + pixelCluster.entityCount * 0.1f); // More opacity with more entities
 
+		float aggregatedApparentRadius = adaptiveSim.calculateApparentRadius(inst.radius, zoomFactor);
+		phase0Telemetry.recordCircle(
+			CircleRenderTier::PIXEL_DUST,
+			aggregatedApparentRadius,
+			inst.radius,
+			inst.textureIndex,
+			Phase0InstanceKind::PixelCluster,
+			pixelCluster.entityCount);
+
 		out.push_back(inst);
 	}
 
@@ -2684,6 +2829,14 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 			inst.color[0] = 1.0f; inst.color[1] = 1.0f; inst.color[2] = 1.0f; inst.color[3] = 1.0f;
 		}
 
+		phase0Telemetry.recordCircle(
+			tier,
+			apparentRadius,
+			inst.radius,
+			inst.textureIndex,
+			Phase0InstanceKind::Individual,
+			1);
+
 		out.push_back(inst);
 	}
 
@@ -2704,6 +2857,15 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.color[1] = cluster.dominantColor.y * intensity;
 		inst.color[2] = cluster.dominantColor.z * intensity;
 		inst.color[3] = 0.8f; // Slightly transparent to show it's a cluster
+
+		float clusterApparentRadius = adaptiveSim.calculateApparentRadius(inst.radius, zoomFactor);
+		phase0Telemetry.recordCircle(
+			CircleRenderTier::PIXEL_DUST,
+			clusterApparentRadius,
+			inst.radius,
+			inst.textureIndex,
+			Phase0InstanceKind::StatisticalCluster,
+			cluster.aliveCount);
 
 		out.push_back(inst);
 	}
@@ -8239,7 +8401,9 @@ int main(int argc, char** argv) {
 		updateLoaderPriorityCache(imageManager, sim, adaptiveSim, loaderFrameIndex, false);
 
 	// Use LOD-based rendering system with fixed zoom factor
+	sim.beginPhase0TelemetryFrame(metrics.totalFrames);
 	sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, 1.0f); // Fixed zoom factor
+	sim.finalizePhase0TelemetryFrame();
 	sim.buildHealthBarInstances(healthBarInstances, 1.0f);
 	cullingMetrics.totalInstances = static_cast<uint32_t>(cpuInstances.size());
 	if (!cullingBuffers.enabled || !indirectBuffers.enabled) {
