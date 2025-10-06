@@ -8217,13 +8217,15 @@ int main(int argc, char** argv) {
 		adaptiveSim.setFrameTime(metrics.rollingAverage);
 		adaptiveSim.updateSimulationTiers(sim, 1.0f); // Fixed zoom factor for now
 
+		// Always update image tiers to show textures as they load, even when paused
+		sim.updateImageTiers(); // Update image loading tiers based on radius
+		if (imageManager.priorityMergeInterval != 0 && (frameCount % imageManager.priorityMergeInterval) == 0) {
+			requestPriorityRefresh(imageManager);
+		}
+
 		// Only update simulation physics if not paused
 		if (!isPaused) {
 			sim.step(dt);
-			sim.updateImageTiers(); // Update image loading tiers based on radius
-			if (imageManager.priorityMergeInterval != 0 && (frameCount % imageManager.priorityMergeInterval) == 0) {
-				requestPriorityRefresh(imageManager);
-			}
 
 			// Process optimized collision detection for clustered vs individual entities
 			adaptiveSim.processClusterCollisions(dt, sim);
