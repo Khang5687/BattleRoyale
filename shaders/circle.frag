@@ -1,6 +1,13 @@
 // Fragment shader rendering SDF circle with screen-space aware texture sampling
 #version 450
 
+#ifdef GL_EXT_shader_demote_to_helper_invocation
+#extension GL_EXT_shader_demote_to_helper_invocation : enable
+#endif
+
+layout(constant_id = 0) const float uLodRadiusScale = 1.0;
+layout(constant_id = 1) const bool uUseHelperDemote = false;
+
 layout(location = 0) in vec2 vPos;
 layout(location = 1) in vec4 vColor;
 layout(location = 2) in flat uint vTextureIndex;
@@ -31,6 +38,12 @@ vec4 sampleAtlasColorLod(vec3 texCoord, float lod) {
 void main() {
     float d = length(vPos);
     if (d > 1.0) {
+#if defined(GL_EXT_shader_demote_to_helper_invocation)
+        if (uUseHelperDemote) {
+            demoteToHelperInvocationEXT();
+            return;
+        }
+#endif
         discard; // outside circle
     }
 
@@ -40,15 +53,18 @@ void main() {
 
     vec4 finalColor = vColor;
     float screenRadius = max(vScreenRadius, MIN_SAMPLE_RADIUS);
+    float lodScale = max(uLodRadiusScale, MIN_SAMPLE_RADIUS);
+    float dustCutoff = PIXEL_DUST_SCREEN_RADIUS * lodScale;
+    float mipCutoff = MIP_SAMPLE_THRESHOLD * lodScale;
     bool canSampleAtlas = hasAtlasTexture();
 
-    if (canSampleAtlas && screenRadius > PIXEL_DUST_SCREEN_RADIUS) {
+    if (canSampleAtlas && screenRadius > dustCutoff) {
         uint atlasLayer = vTextureIndex & 0x7FFFFFFFu;
         vec3 texCoord = vec3(vTexCoord, float(atlasLayer));
         vec4 texColor;
 
-        if (screenRadius < MIP_SAMPLE_THRESHOLD) {
-            float lod = clamp(log2(MIP_SAMPLE_THRESHOLD / screenRadius), 0.0, MAX_ATLAS_LOD);
+        if (screenRadius < mipCutoff) {
+            float lod = clamp(log2(mipCutoff / screenRadius), 0.0, MAX_ATLAS_LOD);
             texColor = sampleAtlasColorLod(texCoord, lod);
         } else {
             texColor = sampleAtlasColor(texCoord);

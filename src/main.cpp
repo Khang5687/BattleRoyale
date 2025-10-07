@@ -66,11 +66,21 @@
 #ifndef VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME
 #define VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME "VK_KHR_draw_indirect_count"
 #endif
+#ifndef VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME
+#define VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME "VK_EXT_shader_demote_to_helper_invocation"
+#endif
 
 // Global damage curve instance for dynamic damage scaling
 static DamageCurve globalDamageCurve;
 static bool gDisableGpuStream = false;
 static bool gDisableGpuCulling = false;
+static float gPhase1LodScale = 1.0f;
+static bool gEnableHelperDemote = false;
+
+static float normalizeScreenRadius(float radius) {
+	const float safeScale = std::max(gPhase1LodScale, 1e-3f);
+	return radius / safeScale;
+}
 
 static void glfwErrorCallback(int code, const char* desc) {
 	std::fprintf(stderr, "GLFW error %d: %s\n", code, desc);
@@ -94,6 +104,11 @@ struct PipelineObjects {
 	VkPipelineLayout layout = VK_NULL_HANDLE;
 	VkPipeline pipeline = VK_NULL_HANDLE;
 	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+};
+
+struct CircleFragSpecializationData {
+	float lodRadiusScale = 1.0f;
+	VkBool32 useHelperDemote = VK_FALSE;
 };
 
 struct GeometryBuffers {
@@ -367,8 +382,13 @@ struct Phase0Telemetry {
 	uint32_t pixelDustCandidates = 0;
 	uint32_t mipSampleCandidates = 0;
 	uint32_t fullResCandidates = 0;
-	static constexpr float PIXEL_DUST_THRESHOLD = 0.75f;
-	static constexpr float MIP_SAMPLE_THRESHOLD = 2.0f;
+	float minApparentRadius = std::numeric_limits<float>::max();
+	float minPhysicalRadius = std::numeric_limits<float>::max();
+	float reportedZoomFactor = 1.0f;
+	static constexpr std::array<float, 5> RADIUS_BUCKET_EDGES = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+	std::array<uint32_t, RADIUS_BUCKET_EDGES.size() + 1> radiusHistogram{};
+	static constexpr float BASE_PIXEL_DUST_THRESHOLD = 0.75f;
+	static constexpr float BASE_MIP_SAMPLE_THRESHOLD = 2.0f;
 
 	Phase0Telemetry() {
 		const char* env = std::getenv("BR5_PHASE0_TELEMETRY");
@@ -403,6 +423,10 @@ struct Phase0Telemetry {
 		pixelDustCandidates = 0;
 		mipSampleCandidates = 0;
 		fullResCandidates = 0;
+		minApparentRadius = std::numeric_limits<float>::max();
+		minPhysicalRadius = std::numeric_limits<float>::max();
+		radiusHistogram.fill(0);
+		reportedZoomFactor = 1.0f;
 	}
 
 	void recordCircle(CircleRenderTier tier,
@@ -430,16 +454,32 @@ struct Phase0Telemetry {
 		}
 		maxApparentRadius = std::max(maxApparentRadius, apparentRadius);
 		maxPhysicalRadius = std::max(maxPhysicalRadius, physicalRadius);
+		minApparentRadius = std::min(minApparentRadius, apparentRadius);
+		minPhysicalRadius = std::min(minPhysicalRadius, physicalRadius);
 		sumApparentRadius += apparentRadius;
 		sumPhysicalRadius += physicalRadius;
 		sampleCount++;
-		if (apparentRadius <= PIXEL_DUST_THRESHOLD) {
+		const float normalizedRadius = normalizeScreenRadius(apparentRadius);
+		if (normalizedRadius <= BASE_PIXEL_DUST_THRESHOLD) {
 			pixelDustCandidates++;
-		} else if (apparentRadius < MIP_SAMPLE_THRESHOLD) {
+		} else if (normalizedRadius < BASE_MIP_SAMPLE_THRESHOLD) {
 			mipSampleCandidates++;
 		} else {
 			fullResCandidates++;
 		}
+		float histogramRadius = normalizedRadius;
+		for (size_t i = 0; i < RADIUS_BUCKET_EDGES.size(); ++i) {
+			if (histogramRadius < RADIUS_BUCKET_EDGES[i]) {
+				radiusHistogram[i]++;
+				return;
+			}
+		}
+		radiusHistogram.back()++;
+	}
+
+	void recordZoomFactor(float zoomFactor) {
+		if (!enabled) return;
+		reportedZoomFactor = zoomFactor;
 	}
 
 	void finalizeFrame() {
@@ -455,6 +495,11 @@ struct Phase0Telemetry {
 		lastReportFrame = frameIndex;
 		float avgApparent = static_cast<float>(sumApparentRadius / static_cast<double>(sampleCount));
 		float avgPhysical = static_cast<float>(sumPhysicalRadius / static_cast<double>(sampleCount));
+		float minApparent = (minApparentRadius == std::numeric_limits<float>::max()) ? 0.0f : minApparentRadius;
+		float minPhysical = (minPhysicalRadius == std::numeric_limits<float>::max()) ? 0.0f : minPhysicalRadius;
+		float normalizedMin = normalizeScreenRadius(minApparent);
+		float scaledDustThreshold = BASE_PIXEL_DUST_THRESHOLD * gPhase1LodScale;
+		float scaledMipThreshold = BASE_MIP_SAMPLE_THRESHOLD * gPhase1LodScale;
 		constexpr const char* kindLabels[kPhase0InstanceKindCount] = {
 			"individual",
 			"pixelCluster",
@@ -473,9 +518,18 @@ struct Phase0Telemetry {
 			}
 		}
 		std::cout << " avgScreenR=" << avgApparent
+		          << " minScreenR=" << minApparent
+		          << " normalizedMinR=" << normalizedMin
 		          << " maxScreenR=" << maxApparentRadius
 		          << " avgRadius=" << avgPhysical
+		          << " minRadius=" << minPhysical
+		          << " zoom=" << reportedZoomFactor
+		          << " lodScale=" << gPhase1LodScale
+		          << " thresholds(pixelDust=" << scaledDustThreshold << ",mip=" << scaledMipThreshold << ')'
 		          << " screenLOD(dust/mip/full)=" << pixelDustCandidates << '/' << mipSampleCandidates << '/' << fullResCandidates
+		          << " screenBucketsNorm(<0.5/<1/<2/<4/<8/>=8)="
+		          << radiusHistogram[0] << '/' << radiusHistogram[1] << '/' << radiusHistogram[2] << '/'
+		          << radiusHistogram[3] << '/' << radiusHistogram[4] << '/' << radiusHistogram[5]
 		          << " assembleMs=" << assemblyMs
 		          << std::endl;
 	}
@@ -2744,6 +2798,7 @@ static void updateLoaderPriorityCache(ImageManager& mgr, const Simulation& sim, 
 void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, const AdaptiveCircleSimulation& adaptiveSim, float zoomFactor) const {
 	out.clear();
 	out.reserve(posX.size() + adaptiveSim.dustClusters.size());
+	phase0Telemetry.recordZoomFactor(zoomFactor);
 
 	// Pixel-cluster aggregation for overlapping circles optimization
 	auto pixelClusters = adaptiveSim.aggregateOverlappingPixels(*this, zoomFactor);
@@ -3638,6 +3693,22 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 
 	VkPipelineShaderStageCreateInfo vs{}; vs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vs.stage = VK_SHADER_STAGE_VERTEX_BIT; vs.module = vert; vs.pName = "main";
 	VkPipelineShaderStageCreateInfo fs{}; fs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fs.module = frag; fs.pName = "main";
+	CircleFragSpecializationData fragSpecData{};
+	fragSpecData.lodRadiusScale = gPhase1LodScale;
+	fragSpecData.useHelperDemote = gEnableHelperDemote ? VK_TRUE : VK_FALSE;
+	VkSpecializationMapEntry fragSpecEntries[2]{};
+	fragSpecEntries[0].constantID = 0;
+	fragSpecEntries[0].offset = static_cast<uint32_t>(offsetof(CircleFragSpecializationData, lodRadiusScale));
+	fragSpecEntries[0].size = sizeof(fragSpecData.lodRadiusScale);
+	fragSpecEntries[1].constantID = 1;
+	fragSpecEntries[1].offset = static_cast<uint32_t>(offsetof(CircleFragSpecializationData, useHelperDemote));
+	fragSpecEntries[1].size = sizeof(fragSpecData.useHelperDemote);
+	VkSpecializationInfo fragSpecInfo{};
+	fragSpecInfo.mapEntryCount = 2;
+	fragSpecInfo.pMapEntries = fragSpecEntries;
+	fragSpecInfo.dataSize = sizeof(fragSpecData);
+	fragSpecInfo.pData = &fragSpecData;
+	fs.pSpecializationInfo = &fragSpecInfo;
 	VkPipelineShaderStageCreateInfo stages[] = { vs, fs };
 
 	// Vertex bindings: 0 = quad vertices (vec2), 1 = instance data (center vec2, radius float, color vec4, imageLayer float)
@@ -7494,6 +7565,17 @@ int main(int argc, char** argv) {
 	if (gDisableGpuCulling) {
 		std::cout << "[P3] GPU culling disabled via CLI flag" << std::endl;
 	}
+	if (const char* lodScaleEnv = std::getenv("BR5_LOD_RADIUS_SCALE")) {
+		char* endPtr = nullptr;
+		float parsed = std::strtof(lodScaleEnv, &endPtr);
+		if (endPtr != lodScaleEnv && std::isfinite(parsed) && parsed > 0.0f) {
+			gPhase1LodScale = parsed;
+			std::cout << "[Phase1] Screen-space LOD radius scale override set to " << gPhase1LodScale
+			          << " (via BR5_LOD_RADIUS_SCALE)" << std::endl;
+		} else {
+			std::cout << "[Phase1] Ignoring BR5_LOD_RADIUS_SCALE='" << lodScaleEnv << "' (invalid float)" << std::endl;
+		}
+	}
 	glfwSetErrorCallback(glfwErrorCallback);
 	if (!glfwInit()) {
 		std::fprintf(stderr, "Failed to init GLFW\n");
@@ -7770,9 +7852,23 @@ int main(int argc, char** argv) {
 		std::cout << "[GPU_DRIVEN] VK_KHR_draw_indirect_count extension not supported, GPU-driven rendering will use fallback" << std::endl;
 	}
 
+	bool supportsHelperDemoteExt = hasDeviceExtension(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+	if (supportsHelperDemoteExt) {
+		std::cout << "[Phase1] VK_EXT_shader_demote_to_helper_invocation reported by device" << std::endl;
+	} else {
+		std::cout << "[Phase1] Shader demote-to-helper invocation extension unavailable; falling back to discard-based clipping" << std::endl;
+	}
+
 	// Query descriptor indexing features and properties
 	VkPhysicalDeviceDescriptorIndexingFeatures availableIndexingFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+	VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT availableDemoteFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT};
+	availableDemoteFeatures.pNext = nullptr;
 	VkPhysicalDeviceFeatures2 availableFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+	if (supportsHelperDemoteExt) {
+		availableIndexingFeatures.pNext = &availableDemoteFeatures;
+	} else {
+		availableIndexingFeatures.pNext = nullptr;
+	}
 	availableFeatures2.pNext = &availableIndexingFeatures;
 	vkGetPhysicalDeviceFeatures2(physical, &availableFeatures2);
 
@@ -7800,7 +7896,26 @@ int main(int argc, char** argv) {
 	indexingFeatures.descriptorBindingUpdateUnusedWhilePending = hasDescriptorIndexing ? VK_TRUE : VK_FALSE;
 	indexingFeatures.runtimeDescriptorArray = hasDescriptorIndexing ? VK_TRUE : VK_FALSE;
 
+	VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT demoteFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT};
+	demoteFeatures.pNext = nullptr;
+	if (supportsHelperDemoteExt && availableDemoteFeatures.shaderDemoteToHelperInvocation == VK_TRUE) {
+		deviceExts.push_back(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+		demoteFeatures.shaderDemoteToHelperInvocation = VK_TRUE;
+		gEnableHelperDemote = true;
+		std::cout << "[Phase1] Enabling shader demote-to-helper invocation feature" << std::endl;
+	} else {
+		demoteFeatures.shaderDemoteToHelperInvocation = VK_FALSE;
+		if (supportsHelperDemoteExt) {
+			std::cout << "[Phase1] Shader demote feature unavailable despite extension; using fragment discard fallback" << std::endl;
+		}
+	}
+
 	VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+	if (gEnableHelperDemote) {
+		indexingFeatures.pNext = &demoteFeatures;
+	} else {
+		indexingFeatures.pNext = nullptr;
+	}
 	features2.pNext = &indexingFeatures;
 
 	VkDeviceCreateInfo dci{};
