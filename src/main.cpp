@@ -314,7 +314,9 @@ struct InstanceLayoutCPU {
 	float lodTier;
 	float color[4];
 	uint32_t textureIndex; // Bindless texture index, INVALID_TEXTURE_INDEX for flat color
-	float pad2[3];         // Alignment padding
+	float screenPixelRadius;
+	uint32_t instanceFlags;
+	float reserved;       // Alignment padding / future use (atlas mip bias)
 };
 
 struct HealthBarInstance {
@@ -339,6 +341,12 @@ enum class Phase0InstanceKind : uint32_t {
 
 static constexpr size_t kPhase0InstanceKindCount = 3;
 
+enum InstanceFlagBits : uint32_t {
+	INSTANCE_FLAG_NONE = 0u,
+	INSTANCE_FLAG_PIXEL_CLUSTER = 1u << 0,
+	INSTANCE_FLAG_STATISTICAL_CLUSTER = 1u << 1
+};
+
 struct Phase0Telemetry {
 	bool enabled = false;
 	uint64_t frameIndex = 0;
@@ -356,6 +364,11 @@ struct Phase0Telemetry {
 	uint64_t lastReportFrame = 0;
 	std::chrono::steady_clock::time_point frameStart{};
 	float assemblyMs = 0.0f;
+	uint32_t pixelDustCandidates = 0;
+	uint32_t mipSampleCandidates = 0;
+	uint32_t fullResCandidates = 0;
+	static constexpr float PIXEL_DUST_THRESHOLD = 0.75f;
+	static constexpr float MIP_SAMPLE_THRESHOLD = 2.0f;
 
 	Phase0Telemetry() {
 		const char* env = std::getenv("BR5_PHASE0_TELEMETRY");
@@ -387,6 +400,9 @@ struct Phase0Telemetry {
 		maxPhysicalRadius = 0.0f;
 		sampleCount = 0;
 		assemblyMs = 0.0f;
+		pixelDustCandidates = 0;
+		mipSampleCandidates = 0;
+		fullResCandidates = 0;
 	}
 
 	void recordCircle(CircleRenderTier tier,
@@ -417,6 +433,13 @@ struct Phase0Telemetry {
 		sumApparentRadius += apparentRadius;
 		sumPhysicalRadius += physicalRadius;
 		sampleCount++;
+		if (apparentRadius <= PIXEL_DUST_THRESHOLD) {
+			pixelDustCandidates++;
+		} else if (apparentRadius < MIP_SAMPLE_THRESHOLD) {
+			mipSampleCandidates++;
+		} else {
+			fullResCandidates++;
+		}
 	}
 
 	void finalizeFrame() {
@@ -452,6 +475,7 @@ struct Phase0Telemetry {
 		std::cout << " avgScreenR=" << avgApparent
 		          << " maxScreenR=" << maxApparentRadius
 		          << " avgRadius=" << avgPhysical
+		          << " screenLOD(dust/mip/full)=" << pixelDustCandidates << '/' << mipSampleCandidates << '/' << fullResCandidates
 		          << " assembleMs=" << assemblyMs
 		          << std::endl;
 	}
@@ -2742,6 +2766,8 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.radius = std::max(1.0f, static_cast<float>(pixelCluster.entityCount) * 0.5f); // Scale with entity count
 		inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 		inst.lodTier = static_cast<float>(static_cast<uint32_t>(CircleRenderTier::PIXEL_DUST));
+		inst.instanceFlags = INSTANCE_FLAG_PIXEL_CLUSTER;
+		inst.reserved = 0.0f;
 
 		// Use aggregated color with intensity
 		inst.color[0] = pixelCluster.aggregatedColor.x * pixelCluster.intensity;
@@ -2750,6 +2776,7 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.color[3] = std::min(1.0f, 0.6f + pixelCluster.entityCount * 0.1f); // More opacity with more entities
 
 		float aggregatedApparentRadius = adaptiveSim.calculateApparentRadius(inst.radius, zoomFactor);
+		inst.screenPixelRadius = aggregatedApparentRadius;
 		phase0Telemetry.recordCircle(
 			CircleRenderTier::PIXEL_DUST,
 			aggregatedApparentRadius,
@@ -2783,6 +2810,9 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		float h = std::clamp(health[idx], 0.0f, 1.0f);
 		inst.radius = radius[idx];
 		inst.lodTier = static_cast<float>(static_cast<uint32_t>(tier));
+		inst.screenPixelRadius = apparentRadius;
+		inst.instanceFlags = INSTANCE_FLAG_NONE;
+		inst.reserved = 0.0f;
 
 			if (imageTier[idx] == 0 || imageId[idx] == UINT32_MAX) {
 				inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
@@ -2850,6 +2880,8 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.radius = cluster.effectiveRadius;
 		inst.textureIndex = BindlessTextureSystem::INVALID_TEXTURE_INDEX;
 		inst.lodTier = static_cast<float>(static_cast<uint32_t>(CircleRenderTier::PIXEL_DUST));
+		inst.instanceFlags = INSTANCE_FLAG_STATISTICAL_CLUSTER;
+		inst.reserved = 0.0f;
 
 		// Cluster color based on dominant color and alive count
 		float intensity = std::min(1.0f, static_cast<float>(cluster.aliveCount) / 100.0f);
@@ -2859,6 +2891,7 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 		inst.color[3] = 0.8f; // Slightly transparent to show it's a cluster
 
 		float clusterApparentRadius = adaptiveSim.calculateApparentRadius(inst.radius, zoomFactor);
+		inst.screenPixelRadius = clusterApparentRadius;
 		phase0Telemetry.recordCircle(
 			CircleRenderTier::PIXEL_DUST,
 			clusterApparentRadius,
@@ -3612,16 +3645,17 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	vertexBindings[0].binding = 0; vertexBindings[0].stride = sizeof(float) * 2; vertexBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 	vertexBindings[1].binding = 1; vertexBindings[1].stride = sizeof(InstanceLayoutCPU); vertexBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-	VkVertexInputAttributeDescription attrs[5]{};
+	VkVertexInputAttributeDescription attrs[6]{};
 	attrs[0].location = 0; attrs[0].binding = 0; attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0; // inPos
 	attrs[1].location = 1; attrs[1].binding = 1; attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = offsetof(InstanceLayoutCPU, center); // inCenter
 	attrs[2].location = 2; attrs[2].binding = 1; attrs[2].format = VK_FORMAT_R32_SFLOAT; attrs[2].offset = offsetof(InstanceLayoutCPU, radius); // inRadius
 	attrs[3].location = 3; attrs[3].binding = 1; attrs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; attrs[3].offset = offsetof(InstanceLayoutCPU, color); // inColor
 	attrs[4].location = 4; attrs[4].binding = 1; attrs[4].format = VK_FORMAT_R32_UINT; attrs[4].offset = offsetof(InstanceLayoutCPU, textureIndex); // inTextureIndex
+	attrs[5].location = 5; attrs[5].binding = 1; attrs[5].format = VK_FORMAT_R32_SFLOAT; attrs[5].offset = offsetof(InstanceLayoutCPU, screenPixelRadius); // inScreenRadius
 
 	VkPipelineVertexInputStateCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vi.vertexBindingDescriptionCount = 2; vi.pVertexBindingDescriptions = vertexBindings;
-	vi.vertexAttributeDescriptionCount = 5; vi.pVertexAttributeDescriptions = attrs;
+	vi.vertexAttributeDescriptionCount = 6; vi.pVertexAttributeDescriptions = attrs;
 
 	VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 

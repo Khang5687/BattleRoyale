@@ -47,4 +47,6 @@ backup/
 
 vcpkg_installed/
 build/
+build-xcode/
 *.zip
+*.log
