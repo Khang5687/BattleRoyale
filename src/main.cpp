@@ -74,13 +74,7 @@
 static DamageCurve globalDamageCurve;
 static bool gDisableGpuStream = false;
 static bool gDisableGpuCulling = false;
-static float gPhase1LodScale = 1.0f;
 static bool gEnableHelperDemote = false;
-
-static float normalizeScreenRadius(float radius) {
-	const float safeScale = std::max(gPhase1LodScale, 1e-3f);
-	return radius / safeScale;
-}
 
 static void glfwErrorCallback(int code, const char* desc) {
 	std::fprintf(stderr, "GLFW error %d: %s\n", code, desc);
@@ -107,8 +101,13 @@ struct PipelineObjects {
 };
 
 struct CircleFragSpecializationData {
-	float lodRadiusScale = 1.0f;
 	VkBool32 useHelperDemote = VK_FALSE;
+};
+
+struct CirclePushConstants {
+	float viewport[2];
+	float pixelDustThreshold;
+	float mipSampleThreshold;
 };
 
 struct GeometryBuffers {
@@ -385,10 +384,11 @@ struct Phase0Telemetry {
 	float minApparentRadius = std::numeric_limits<float>::max();
 	float minPhysicalRadius = std::numeric_limits<float>::max();
 	float reportedZoomFactor = 1.0f;
-	static constexpr std::array<float, 5> RADIUS_BUCKET_EDGES = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
-	std::array<uint32_t, RADIUS_BUCKET_EDGES.size() + 1> radiusHistogram{};
-	static constexpr float BASE_PIXEL_DUST_THRESHOLD = 0.75f;
-	static constexpr float BASE_MIP_SAMPLE_THRESHOLD = 2.0f;
+	static constexpr std::array<float, 5> DEFAULT_BUCKET_EDGES = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+	std::array<float, DEFAULT_BUCKET_EDGES.size()> activeBucketEdges{};
+	std::array<uint32_t, DEFAULT_BUCKET_EDGES.size() + 1> radiusHistogram{};
+	float lodPixelDustThreshold = 0.0f;
+	float lodMipSampleThreshold = 0.0f;
 
 	Phase0Telemetry() {
 		const char* env = std::getenv("BR5_PHASE0_TELEMETRY");
@@ -429,6 +429,23 @@ struct Phase0Telemetry {
 		reportedZoomFactor = 1.0f;
 	}
 
+	void setLodThresholds(float pixelDust, float mipSample) {
+		lodPixelDustThreshold = pixelDust;
+		lodMipSampleThreshold = mipSample;
+		for (size_t i = 0; i < activeBucketEdges.size(); ++i) {
+			if (i == 0) {
+				activeBucketEdges[i] = (pixelDust > 0.0f) ? pixelDust : DEFAULT_BUCKET_EDGES[i];
+			} else if (i == 1) {
+				float base = (mipSample > 0.0f) ? mipSample : DEFAULT_BUCKET_EDGES[i];
+				activeBucketEdges[i] = std::max(base, activeBucketEdges[i - 1] + 0.5f);
+			} else {
+				float target = activeBucketEdges[i - 1] * 2.0f;
+				float minStep = activeBucketEdges[i - 1] + 4.0f;
+				activeBucketEdges[i] = std::max({target, minStep, DEFAULT_BUCKET_EDGES[i]});
+			}
+		}
+	}
+
 	void recordCircle(CircleRenderTier tier,
 		float apparentRadius,
 		float physicalRadius,
@@ -459,17 +476,16 @@ struct Phase0Telemetry {
 		sumApparentRadius += apparentRadius;
 		sumPhysicalRadius += physicalRadius;
 		sampleCount++;
-		const float normalizedRadius = normalizeScreenRadius(apparentRadius);
-		if (normalizedRadius <= BASE_PIXEL_DUST_THRESHOLD) {
+		if (lodPixelDustThreshold > 0.0f && apparentRadius <= lodPixelDustThreshold) {
 			pixelDustCandidates++;
-		} else if (normalizedRadius < BASE_MIP_SAMPLE_THRESHOLD) {
+		} else if (lodMipSampleThreshold > 0.0f && apparentRadius < lodMipSampleThreshold) {
 			mipSampleCandidates++;
 		} else {
 			fullResCandidates++;
 		}
-		float histogramRadius = normalizedRadius;
-		for (size_t i = 0; i < RADIUS_BUCKET_EDGES.size(); ++i) {
-			if (histogramRadius < RADIUS_BUCKET_EDGES[i]) {
+		for (size_t i = 0; i < activeBucketEdges.size(); ++i) {
+			float edge = (activeBucketEdges[i] > 0.0f) ? activeBucketEdges[i] : DEFAULT_BUCKET_EDGES[i];
+			if (apparentRadius < edge) {
 				radiusHistogram[i]++;
 				return;
 			}
@@ -497,9 +513,8 @@ struct Phase0Telemetry {
 		float avgPhysical = static_cast<float>(sumPhysicalRadius / static_cast<double>(sampleCount));
 		float minApparent = (minApparentRadius == std::numeric_limits<float>::max()) ? 0.0f : minApparentRadius;
 		float minPhysical = (minPhysicalRadius == std::numeric_limits<float>::max()) ? 0.0f : minPhysicalRadius;
-		float normalizedMin = normalizeScreenRadius(minApparent);
-		float scaledDustThreshold = BASE_PIXEL_DUST_THRESHOLD * gPhase1LodScale;
-		float scaledMipThreshold = BASE_MIP_SAMPLE_THRESHOLD * gPhase1LodScale;
+		float minDustRatio = (lodPixelDustThreshold > 0.0f && minApparent > 0.0f)
+			? (minApparent / lodPixelDustThreshold) : 0.0f;
 		constexpr const char* kindLabels[kPhase0InstanceKindCount] = {
 			"individual",
 			"pixelCluster",
@@ -519,15 +534,19 @@ struct Phase0Telemetry {
 		}
 		std::cout << " avgScreenR=" << avgApparent
 		          << " minScreenR=" << minApparent
-		          << " normalizedMinR=" << normalizedMin
+		          << " minDustRatio=" << minDustRatio
 		          << " maxScreenR=" << maxApparentRadius
 		          << " avgRadius=" << avgPhysical
 		          << " minRadius=" << minPhysical
 		          << " zoom=" << reportedZoomFactor
-		          << " lodScale=" << gPhase1LodScale
-		          << " thresholds(pixelDust=" << scaledDustThreshold << ",mip=" << scaledMipThreshold << ')'
+		          << " thresholds(pixelDust=" << lodPixelDustThreshold << ",mip=" << lodMipSampleThreshold << ')'
 		          << " screenLOD(dust/mip/full)=" << pixelDustCandidates << '/' << mipSampleCandidates << '/' << fullResCandidates
-		          << " screenBucketsNorm(<0.5/<1/<2/<4/<8/>=8)="
+		          << " screenBuckets(px<"
+		          << (activeBucketEdges[0] > 0.0f ? activeBucketEdges[0] : DEFAULT_BUCKET_EDGES[0]) << '/'
+		          << (activeBucketEdges[1] > 0.0f ? activeBucketEdges[1] : DEFAULT_BUCKET_EDGES[1]) << '/'
+		          << (activeBucketEdges[2] > 0.0f ? activeBucketEdges[2] : DEFAULT_BUCKET_EDGES[2]) << '/'
+		          << (activeBucketEdges[3] > 0.0f ? activeBucketEdges[3] : DEFAULT_BUCKET_EDGES[3]) << '/'
+		          << (activeBucketEdges[4] > 0.0f ? activeBucketEdges[4] : DEFAULT_BUCKET_EDGES[4]) << "/>)="
 		          << radiusHistogram[0] << '/' << radiusHistogram[1] << '/' << radiusHistogram[2] << '/'
 		          << radiusHistogram[3] << '/' << radiusHistogram[4] << '/' << radiusHistogram[5]
 		          << " assembleMs=" << assemblyMs
@@ -952,9 +971,10 @@ struct Simulation {
 	static constexpr float GRID_CELL_MIN = 32.0f;
 	static constexpr float GRID_CELL_MAX = 2048.0f;
 	static constexpr float PI = 3.14159265358979323846f;
-	static constexpr float PIXEL_DUST_THRESHOLD = 1.2f;
-	static constexpr float SIMPLE_SHAPE_THRESHOLD = 5.0f;
-	static constexpr float BASIC_TEXTURE_THRESHOLD = 16.0f;
+	float pixelDustThreshold = 1.2f;
+	float simpleShapeThreshold = 5.0f;
+	float basicTextureThreshold = 16.0f;
+	float fullDetailThreshold = 32.0f;
 	static constexpr float TEXTURE_LOAD_THRESHOLD = 5.0f;
 	static constexpr float DETAIL_THRESHOLD = 16.0f;
 	static constexpr float HEALTH_BAR_VISIBILITY_THRESHOLD = 1.25f;
@@ -1112,6 +1132,7 @@ struct Simulation {
 	}
 
 	void beginPhase0TelemetryFrame(uint64_t frameIndex) const {
+		phase0Telemetry.setLodThresholds(pixelDustThreshold, simpleShapeThreshold);
 		phase0Telemetry.beginFrame(frameIndex);
 	}
 
@@ -1276,14 +1297,26 @@ struct Simulation {
 		uint32_t c = 0; for (auto a : alive) if (a) ++c; return c;
 	}
 
+	void updateLodThresholdsFromViewport(uint32_t viewportWidth, uint32_t viewportHeight) {
+		uint32_t minSide = std::max(1u, std::min(viewportWidth, viewportHeight));
+		float minSideF = static_cast<float>(minSide);
+		float dust = std::clamp(minSideF * 0.0015f, 2.0f, 8.0f);
+		float pixelated = std::max(dust + 1.0f, minSideF * 0.0045f);
+		float textured = std::max(pixelated + 4.0f, minSideF * 0.012f);
+		pixelDustThreshold = dust;
+		simpleShapeThreshold = pixelated;
+		basicTextureThreshold = textured;
+		fullDetailThreshold = std::max(textured + 8.0f, minSideF * 0.03f);
+	}
+
 	CircleRenderTier classifyRenderTier(float apparentRadius) const {
-		if (apparentRadius < PIXEL_DUST_THRESHOLD) {
+		if (apparentRadius < pixelDustThreshold) {
 			return CircleRenderTier::PIXEL_DUST;
 		}
-		if (apparentRadius < SIMPLE_SHAPE_THRESHOLD) {
+		if (apparentRadius < simpleShapeThreshold) {
 			return CircleRenderTier::SIMPLE_SHAPE;
 		}
-		if (apparentRadius < BASIC_TEXTURE_THRESHOLD) {
+		if (apparentRadius < basicTextureThreshold) {
 			return CircleRenderTier::BASIC_TEXTURE;
 		}
 		return CircleRenderTier::FULL_DETAIL;
@@ -2251,6 +2284,7 @@ public:
 		vec3 aggregatedColor{0.0f, 0.0f, 0.0f};
 		float intensity = 0.0f;
 		uint32_t entityCount = 0;
+		std::vector<uint32_t> memberIndices;
 	};
 
 	std::vector<PixelCluster> aggregateOverlappingPixels(const Simulation& sim, float zoomFactor) const {
@@ -2287,6 +2321,7 @@ public:
 				cluster.aggregatedColor = {1.0f - h, h, 0.2f}; // Health-based color
 				cluster.intensity = 1.0f;
 				cluster.entityCount = 1;
+				cluster.memberIndices.push_back(idx);
 				pixelGrid[cellKey] = cluster;
 			} else {
 				// Aggregate into existing pixel cluster
@@ -2306,6 +2341,7 @@ public:
 
 				cluster.intensity = std::min(2.0f, cluster.intensity + 0.3f); // Increase intensity with more entities
 				cluster.entityCount++;
+				cluster.memberIndices.push_back(idx);
 			}
 		}
 
@@ -2647,27 +2683,21 @@ struct AdaptiveGPUBuffers {
 		float avgRadius = sim.globalCurrentRadius;
 		float apparentRadius = avgRadius * zoomFactor;
 
-		// Constants for tier thresholds (matching existing classifyRenderTier logic)
-		static constexpr float PIXEL_DUST_THRESHOLD = 0.5f;
-		static constexpr float SIMPLE_SHAPE_THRESHOLD = 2.0f;
-		static constexpr float BASIC_TEXTURE_THRESHOLD = 10.0f;
-		static constexpr float FULL_DETAIL_THRESHOLD = 12.0f;
-
 		// Use tier classification to estimate visible count
 		uint32_t individualCount = adaptiveSim.individualCircles.size();
 		uint32_t clusteredCount = adaptiveSim.mediumClusters.size();
 		uint32_t statisticalCount = static_cast<uint32_t>(adaptiveSim.dustClusters.size() * 0.2f); // 20% of dust clusters are visible
 
 		// For pixel dust tier (< 0.5px), most entities are invisible/statistical
-		if (apparentRadius < PIXEL_DUST_THRESHOLD) {
+		if (apparentRadius < sim.pixelDustThreshold) {
 			return std::min(statisticalCount + (individualCount + clusteredCount) / 10, sim.maxPlayers);
 		}
 		// For simple shapes (0.5-2px), include some individual entities
-		else if (apparentRadius < SIMPLE_SHAPE_THRESHOLD) {
+		else if (apparentRadius < sim.simpleShapeThreshold) {
 			return std::min(individualCount / 2 + clusteredCount + statisticalCount, sim.maxPlayers);
 		}
 		// For basic textures (2-12px), include most individual entities
-		else if (apparentRadius < FULL_DETAIL_THRESHOLD) {
+		else if (apparentRadius < sim.fullDetailThreshold) {
 			return std::min(individualCount + clusteredCount + statisticalCount / 2, sim.maxPlayers);
 		}
 		// For full detail (>12px), include all individual and clustered entities
@@ -2804,17 +2834,14 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 	auto pixelClusters = adaptiveSim.aggregateOverlappingPixels(*this, zoomFactor);
 	std::unordered_set<uint32_t> aggregatedEntities;
 
-	// First, collect entities that were aggregated into pixel clusters
-	for (uint32_t idx : adaptiveSim.individualCircles) {
-		if (idx >= posX.size() || !alive[idx]) continue;
-		float apparentRadius = adaptiveSim.calculateApparentRadius(radius[idx], zoomFactor);
-		if (classifyRenderTier(apparentRadius) == CircleRenderTier::PIXEL_DUST) {
-			aggregatedEntities.insert(idx);
-		}
-	}
-
 	// Render pixel clusters (aggregated overlapping circles)
 	for (const auto& pixelCluster : pixelClusters) {
+		if (pixelCluster.entityCount <= 1) {
+			continue;
+		}
+		for (uint32_t member : pixelCluster.memberIndices) {
+			aggregatedEntities.insert(member);
+		}
 		InstanceLayoutCPU inst{};
 		inst.center[0] = pixelCluster.position.x;
 		inst.center[1] = pixelCluster.position.y;
@@ -2854,10 +2881,6 @@ void Simulation::writeInstancesWithLOD(std::vector<InstanceLayoutCPU>& out, cons
 
 		float apparentRadius = adaptiveSim.calculateApparentRadius(radius[idx], zoomFactor);
 		CircleRenderTier tier = classifyRenderTier(apparentRadius);
-
-		if (tier == CircleRenderTier::PIXEL_DUST) {
-			continue; // Already aggregated
-		}
 
 		InstanceLayoutCPU inst{};
 		inst.center[0] = posX[idx];
@@ -3694,17 +3717,13 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	VkPipelineShaderStageCreateInfo vs{}; vs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; vs.stage = VK_SHADER_STAGE_VERTEX_BIT; vs.module = vert; vs.pName = "main";
 	VkPipelineShaderStageCreateInfo fs{}; fs.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fs.module = frag; fs.pName = "main";
 	CircleFragSpecializationData fragSpecData{};
-	fragSpecData.lodRadiusScale = gPhase1LodScale;
 	fragSpecData.useHelperDemote = gEnableHelperDemote ? VK_TRUE : VK_FALSE;
-	VkSpecializationMapEntry fragSpecEntries[2]{};
+	VkSpecializationMapEntry fragSpecEntries[1]{};
 	fragSpecEntries[0].constantID = 0;
-	fragSpecEntries[0].offset = static_cast<uint32_t>(offsetof(CircleFragSpecializationData, lodRadiusScale));
-	fragSpecEntries[0].size = sizeof(fragSpecData.lodRadiusScale);
-	fragSpecEntries[1].constantID = 1;
-	fragSpecEntries[1].offset = static_cast<uint32_t>(offsetof(CircleFragSpecializationData, useHelperDemote));
-	fragSpecEntries[1].size = sizeof(fragSpecData.useHelperDemote);
+	fragSpecEntries[0].offset = static_cast<uint32_t>(offsetof(CircleFragSpecializationData, useHelperDemote));
+	fragSpecEntries[0].size = sizeof(fragSpecData.useHelperDemote);
 	VkSpecializationInfo fragSpecInfo{};
-	fragSpecInfo.mapEntryCount = 2;
+	fragSpecInfo.mapEntryCount = 1;
 	fragSpecInfo.pMapEntries = fragSpecEntries;
 	fragSpecInfo.dataSize = sizeof(fragSpecData);
 	fragSpecInfo.pData = &fragSpecData;
@@ -3746,7 +3765,7 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	VkPipelineDynamicStateCreateInfo dyn{}; dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynamics;
 
 	// Push constants: vec2 viewport in vertex stage
-	VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; pcr.offset = 0; pcr.size = sizeof(float) * 2;
+	VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcr.offset = 0; pcr.size = sizeof(CirclePushConstants);
 
 	// Create descriptor set layout for bindless textures or texture atlas
 	VkDescriptorSetLayoutBinding descriptorBindings[3]{};
@@ -7565,17 +7584,6 @@ int main(int argc, char** argv) {
 	if (gDisableGpuCulling) {
 		std::cout << "[P3] GPU culling disabled via CLI flag" << std::endl;
 	}
-	if (const char* lodScaleEnv = std::getenv("BR5_LOD_RADIUS_SCALE")) {
-		char* endPtr = nullptr;
-		float parsed = std::strtof(lodScaleEnv, &endPtr);
-		if (endPtr != lodScaleEnv && std::isfinite(parsed) && parsed > 0.0f) {
-			gPhase1LodScale = parsed;
-			std::cout << "[Phase1] Screen-space LOD radius scale override set to " << gPhase1LodScale
-			          << " (via BR5_LOD_RADIUS_SCALE)" << std::endl;
-		} else {
-			std::cout << "[Phase1] Ignoring BR5_LOD_RADIUS_SCALE='" << lodScaleEnv << "' (invalid float)" << std::endl;
-		}
-	}
 	glfwSetErrorCallback(glfwErrorCallback);
 	if (!glfwInit()) {
 		std::fprintf(stderr, "Failed to init GLFW\n");
@@ -8549,6 +8557,9 @@ int main(int argc, char** argv) {
 		uint64_t loaderFrameIndex = metrics.totalFrames;
 		updateLoaderPriorityCache(imageManager, sim, adaptiveSim, loaderFrameIndex, false);
 
+	// Update LOD thresholds based on current framebuffer size
+	sim.updateLodThresholdsFromViewport(sc.extent.width, sc.extent.height);
+
 	// Use LOD-based rendering system with fixed zoom factor
 	sim.beginPhase0TelemetryFrame(metrics.totalFrames);
 	sim.writeInstancesWithLOD(cpuInstances, adaptiveSim, 1.0f); // Fixed zoom factor
@@ -8953,8 +8964,14 @@ int main(int argc, char** argv) {
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.pipeline);
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
-	float circleViewport[2] = { static_cast<float>(sc.extent.width), static_cast<float>(sc.extent.height) };
-	vkCmdPushConstants(cmd, circlePipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(circleViewport), circleViewport);
+			CirclePushConstants circlePc{};
+			circlePc.viewport[0] = static_cast<float>(sc.extent.width);
+			circlePc.viewport[1] = static_cast<float>(sc.extent.height);
+			circlePc.pixelDustThreshold = sim.pixelDustThreshold;
+			circlePc.mipSampleThreshold = sim.simpleShapeThreshold;
+			vkCmdPushConstants(cmd, circlePipeline.layout,
+				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+				0, sizeof(CirclePushConstants), &circlePc);
 
 	geom.instanceCount = static_cast<uint32_t>(cpuInstances.size());
 		VkDeviceSize ibSize = sizeof(InstanceLayoutCPU) * cpuInstances.size();

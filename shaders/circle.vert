@@ -10,6 +10,8 @@ layout(location = 5) in float inScreenRadius; // Screen-space radius in pixels
 
 layout(push_constant) uniform Push {
     vec2 viewport; // effective viewport size (framebuffer size / zoom factor)
+    float lodPixelDust;
+    float lodMip;
 } pc;
 
 layout(location = 0) out vec2 vPos;         // pass the local quad pos for SDF
@@ -34,7 +36,6 @@ void main() {
     vTexCoord = inPos * 0.5 + 0.5;
     vScreenRadius = inScreenRadius;
 }
-
 
 
 

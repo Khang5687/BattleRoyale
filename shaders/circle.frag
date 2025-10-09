@@ -5,8 +5,13 @@
 #extension GL_EXT_shader_demote_to_helper_invocation : enable
 #endif
 
-layout(constant_id = 0) const float uLodRadiusScale = 1.0;
-layout(constant_id = 1) const bool uUseHelperDemote = false;
+layout(constant_id = 0) const bool uUseHelperDemote = false;
+
+layout(push_constant) uniform Push {
+    vec2 viewport;
+    float lodPixelDust;
+    float lodMip;
+} pc;
 
 layout(location = 0) in vec2 vPos;
 layout(location = 1) in vec4 vColor;
@@ -18,8 +23,6 @@ layout(location = 0) out vec4 outColor;
 // Texture atlas - using atlas approach for now, will upgrade to bindless later
 layout(set = 0, binding = 0) uniform sampler2DArray uTextureAtlas;
 
-const float PIXEL_DUST_SCREEN_RADIUS = 0.75;
-const float MIP_SAMPLE_THRESHOLD = 2.0;
 const float MIN_SAMPLE_RADIUS = 1e-3;
 const float MAX_ATLAS_LOD = 8.0;
 
@@ -53,9 +56,8 @@ void main() {
 
     vec4 finalColor = vColor;
     float screenRadius = max(vScreenRadius, MIN_SAMPLE_RADIUS);
-    float lodScale = max(uLodRadiusScale, MIN_SAMPLE_RADIUS);
-    float dustCutoff = PIXEL_DUST_SCREEN_RADIUS * lodScale;
-    float mipCutoff = MIP_SAMPLE_THRESHOLD * lodScale;
+    float dustCutoff = max(pc.lodPixelDust, MIN_SAMPLE_RADIUS);
+    float mipCutoff = max(pc.lodMip, dustCutoff + MIN_SAMPLE_RADIUS);
     bool canSampleAtlas = hasAtlasTexture();
 
     if (canSampleAtlas && screenRadius > dustCutoff) {
