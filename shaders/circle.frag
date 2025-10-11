@@ -22,6 +22,9 @@ layout(location = 0) out vec4 outColor;
 
 // Texture atlas - using atlas approach for now, will upgrade to bindless later
 layout(set = 0, binding = 0) uniform sampler2DArray uTextureAtlas;
+layout(set = 0, binding = 3) readonly buffer AtlasThumbnails {
+    vec4 colors[];
+} uAtlasThumbnails;
 
 const float MIN_SAMPLE_RADIUS = 1e-3;
 const float MAX_ATLAS_LOD = 8.0;
@@ -60,8 +63,16 @@ void main() {
     float mipCutoff = max(pc.lodMip, dustCutoff + MIN_SAMPLE_RADIUS);
     bool canSampleAtlas = hasAtlasTexture();
 
-    if (canSampleAtlas && screenRadius > dustCutoff) {
+    if (canSampleAtlas) {
         uint atlasLayer = vTextureIndex & 0x7FFFFFFFu;
+        vec4 thumbColor = uAtlasThumbnails.colors[atlasLayer];
+
+        if (screenRadius <= dustCutoff) {
+            vec4 blended = mix(thumbColor, vColor, 0.3);
+            outColor = vec4(blended.rgb, blended.a * alpha);
+            return;
+        }
+
         vec3 texCoord = vec3(vTexCoord, float(atlasLayer));
         vec4 texColor;
 
@@ -72,7 +83,6 @@ void main() {
             texColor = sampleAtlasColor(texCoord);
         }
 
-        // Blend with health color for visual feedback
         finalColor = mix(texColor, vColor, 0.3);
     }
 

@@ -110,6 +110,13 @@ struct CirclePushConstants {
 	float mipSampleThreshold;
 };
 
+struct AtlasThumbnailColor {
+	float r;
+	float g;
+	float b;
+	float a;
+};
+
 struct GeometryBuffers {
 	BufferWithMemory quadVertexBuffer;
 	BufferWithMemory instanceBuffer;
@@ -653,6 +660,11 @@ struct TextureAtlas {
 	VkDeviceSize imageLayerLookupRange = sizeof(int32_t);
 	std::vector<int32_t> imageLayerLookupCPU;
 	bool lookupDirty = false;
+	BufferWithMemory layerThumbnailBuffer;
+	VkDeviceSize layerThumbnailCapacity = 0;
+	VkDeviceSize layerThumbnailRange = 0;
+	std::vector<AtlasThumbnailColor> layerAverageColors;
+	bool thumbnailsDirty = false;
 
 	// LRU management
 	std::unordered_map<uint32_t, uint32_t> imageIdToLayer; // imageId -> layer index
@@ -1300,8 +1312,8 @@ struct Simulation {
 	void updateLodThresholdsFromViewport(uint32_t viewportWidth, uint32_t viewportHeight) {
 		uint32_t minSide = std::max(1u, std::min(viewportWidth, viewportHeight));
 		float minSideF = static_cast<float>(minSide);
-		float dust = std::clamp(minSideF * 0.0015f, 2.0f, 8.0f);
-		float pixelated = std::max(dust + 1.0f, minSideF * 0.0045f);
+		float dust = std::clamp(minSideF * 0.0015f, 20.0f, 48.0f);
+		float pixelated = std::max(dust + 6.0f, minSideF * 0.025f);
 		float textured = std::max(pixelated + 4.0f, minSideF * 0.012f);
 		pixelDustThreshold = dust;
 		simpleShapeThreshold = pixelated;
@@ -3768,7 +3780,7 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcr.offset = 0; pcr.size = sizeof(CirclePushConstants);
 
 	// Create descriptor set layout for bindless textures or texture atlas
-	VkDescriptorSetLayoutBinding descriptorBindings[3]{};
+	VkDescriptorSetLayoutBinding descriptorBindings[4]{};
 	descriptorBindings[0].binding = 0;
 	descriptorBindings[0].descriptorCount = 1;
 	descriptorBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -3785,24 +3797,30 @@ static PipelineObjects createCirclePipeline(VkDevice device, VkFormat colorForma
 	descriptorBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	descriptorBindings[2].pImmutableSamplers = nullptr;
 	descriptorBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	descriptorBindings[3].binding = 3;
+	descriptorBindings[3].descriptorCount = 1;
+	descriptorBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	descriptorBindings[3].pImmutableSamplers = nullptr;
+	descriptorBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
 	// Set binding flags for bindless array
-	VkDescriptorBindingFlags bindingFlags[3] = {0, 0,
+	VkDescriptorBindingFlags bindingFlags[4] = {0, 0,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
 		VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |
-		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+		0
 	};
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCreateInfo{};
 	bindingFlagsCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	bindingFlagsCreateInfo.bindingCount = 3;
+	bindingFlagsCreateInfo.bindingCount = 4;
 	bindingFlagsCreateInfo.pBindingFlags = bindingFlags;
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 	layoutInfo.pNext = &bindingFlagsCreateInfo;
 	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-	layoutInfo.bindingCount = 3;
+	layoutInfo.bindingCount = 4;
 	layoutInfo.pBindings = descriptorBindings;
 
 	PipelineObjects po{};
@@ -5952,6 +5970,10 @@ static void ensureAtlasLayerCapacity(ImageManager& mgr, size_t desiredFreeLayers
 		if (layer < mgr.atlas.layerLayouts.size()) {
 			mgr.atlas.layerLayouts[layer] = VK_IMAGE_LAYOUT_UNDEFINED;
 		}
+		if (layer < mgr.atlas.layerAverageColors.size()) {
+			mgr.atlas.layerAverageColors[layer] = AtlasThumbnailColor{0.0f, 0.0f, 0.0f, 0.0f};
+			mgr.atlas.thumbnailsDirty = true;
+		}
 		mgr.atlas.freeLayers.push(layer);
 		if (needed > 0) {
 			--needed;
@@ -6032,6 +6054,41 @@ static void updateLoaderMetricsOnUpload(ImageManager& mgr, size_t imageCount, fl
 	if (batchMs > 5.0f) {
 		std::cout << "[P4] Texture upload batch took " << batchMs << "ms for " << imageCount << " images" << std::endl;
 	}
+}
+
+static AtlasThumbnailColor computeAverageColor(const LoadedTexture& texture) {
+	if (texture.mipDimensions.empty()) {
+		return AtlasThumbnailColor{1.0f, 1.0f, 1.0f, 1.0f};
+	}
+	const auto [width, height] = texture.mipDimensions[0];
+	if (width == 0 || height == 0) {
+		return AtlasThumbnailColor{1.0f, 1.0f, 1.0f, 1.0f};
+	}
+	const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+	if (pixelCount == 0) {
+		return AtlasThumbnailColor{1.0f, 1.0f, 1.0f, 1.0f};
+	}
+	const size_t offset = texture.mipOffsets.empty() ? 0 : static_cast<size_t>(texture.mipOffsets[0]);
+	if (offset >= texture.data.size()) {
+		return AtlasThumbnailColor{1.0f, 1.0f, 1.0f, 1.0f};
+	}
+	const uint8_t* src = texture.data.data() + offset;
+	uint64_t sumR = 0;
+	uint64_t sumG = 0;
+	uint64_t sumB = 0;
+	uint64_t sumA = 0;
+	for (size_t i = 0; i < pixelCount; ++i) {
+		sumR += src[i * 4 + 0];
+		sumG += src[i * 4 + 1];
+		sumB += src[i * 4 + 2];
+		sumA += src[i * 4 + 3];
+	}
+	const float inv = 1.0f / static_cast<float>(pixelCount * 255.0);
+	return AtlasThumbnailColor{
+		static_cast<float>(sumR) * inv,
+		static_cast<float>(sumG) * inv,
+		static_cast<float>(sumB) * inv,
+		static_cast<float>(sumA) * inv};
 }
 
 static bool dequeueNextImageRequest(ImageManager& mgr, uint32_t& imageId, LoadPriority& priority, float& score) {
@@ -6129,6 +6186,82 @@ static void ensureAtlasLookupBuffer(ImageManager& mgr, size_t entryCount) {
 	updateAtlasLookupDescriptor(mgr);
 }
 
+static void destroyAtlasThumbnailBuffer(ImageManager& mgr) {
+	if (mgr.atlas.layerThumbnailBuffer.buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(mgr.device, mgr.atlas.layerThumbnailBuffer.buffer, nullptr);
+		mgr.atlas.layerThumbnailBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (mgr.atlas.layerThumbnailBuffer.memory != VK_NULL_HANDLE) {
+		vkFreeMemory(mgr.device, mgr.atlas.layerThumbnailBuffer.memory, nullptr);
+		mgr.atlas.layerThumbnailBuffer.memory = VK_NULL_HANDLE;
+	}
+	mgr.atlas.layerThumbnailCapacity = 0;
+	mgr.atlas.layerThumbnailRange = 0;
+}
+
+static void updateAtlasThumbnailDescriptor(ImageManager& mgr) {
+    if (mgr.atlas.descriptorSet == VK_NULL_HANDLE) {
+        return;
+    }
+    if (mgr.atlas.layerThumbnailBuffer.buffer == VK_NULL_HANDLE) {
+        return;
+    }
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = mgr.atlas.layerThumbnailBuffer.buffer;
+    bufferInfo.offset = 0;
+    bufferInfo.range = mgr.atlas.layerThumbnailRange;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = mgr.atlas.descriptorSet;
+    write.dstBinding = 3;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(mgr.device, 1, &write, 0, nullptr);
+}
+
+static void ensureAtlasThumbnailBuffer(ImageManager& mgr, size_t layerCount) {
+    size_t clampedLayers = std::max(layerCount, static_cast<size_t>(1));
+    VkDeviceSize requiredSize = static_cast<VkDeviceSize>(sizeof(AtlasThumbnailColor) * clampedLayers);
+    if (requiredSize > mgr.atlas.layerThumbnailCapacity) {
+        destroyAtlasThumbnailBuffer(mgr);
+        createBuffer(
+            mgr.physicalDevice,
+            mgr.device,
+            requiredSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            mgr.atlas.layerThumbnailBuffer);
+        mgr.atlas.layerThumbnailCapacity = requiredSize;
+    }
+    if (mgr.atlas.layerAverageColors.size() < clampedLayers) {
+        mgr.atlas.layerAverageColors.resize(clampedLayers, AtlasThumbnailColor{0.0f, 0.0f, 0.0f, 0.0f});
+    }
+    mgr.atlas.layerThumbnailRange = sizeof(AtlasThumbnailColor) * clampedLayers;
+    mgr.atlas.thumbnailsDirty = true;
+    if (mgr.atlas.descriptorSet != VK_NULL_HANDLE) {
+        updateAtlasThumbnailDescriptor(mgr);
+    }
+}
+
+static void syncAtlasThumbnailBuffer(ImageManager& mgr) {
+    if (!mgr.atlas.thumbnailsDirty) {
+        return;
+    }
+    if (mgr.atlas.layerThumbnailBuffer.buffer == VK_NULL_HANDLE || mgr.atlas.layerThumbnailRange == 0) {
+        return;
+    }
+    void* data = mapMemory(mgr.device, mgr.atlas.layerThumbnailBuffer.memory, mgr.atlas.layerThumbnailRange);
+    size_t copyCount = std::min(
+        static_cast<size_t>(mgr.atlas.layerThumbnailRange / sizeof(AtlasThumbnailColor)),
+        mgr.atlas.layerAverageColors.size());
+    std::memcpy(data, mgr.atlas.layerAverageColors.data(), copyCount * sizeof(AtlasThumbnailColor));
+    unmapMemory(mgr.device, mgr.atlas.layerThumbnailBuffer.memory);
+    mgr.atlas.thumbnailsDirty = false;
+}
+
 static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkDescriptorPool descriptorPool, bool enableGpuStream) {
 	mgr.physicalDevice = physicalDevice;
 	mgr.device = device;
@@ -6189,13 +6322,15 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 			  << budgetMB << " MB)." << std::endl;
 	} else {
 		std::cout << "[P4] VRAM budget: device-local ~" << std::fixed << std::setprecision(1)
-			  << totalMB << " MB, reserving " << budgetMB << " MB for texture atlas ("
-			  << mgr.atlas.layerBudget << " layers)." << std::endl;
+		      << totalMB << " MB, reserving " << budgetMB << " MB for texture atlas ("
+		      << mgr.atlas.layerBudget << " layers)." << std::endl;
 	}
 	std::cout.unsetf(std::ios::floatfield);
 	std::cout << std::setprecision(6);
 
 	ensureAtlasLookupBuffer(mgr, 0);
+	ensureAtlasThumbnailBuffer(mgr, TextureAtlas::MAX_LAYERS);
+	syncAtlasThumbnailBuffer(mgr);
 
 	// Create placeholder texture (4x4 magenta)
 	createImage(physicalDevice, device, 4, 4, 1, VK_FORMAT_R8G8B8A8_UNORM,
@@ -6995,6 +7130,10 @@ static bool addTextureToBatch(ImageManager& mgr, uint32_t imageId, uint32_t laye
 	mgr.currentBatch.push_back(upload);
 
 	mgr.stagingOffset += imageSize;
+	if (layer < mgr.atlas.layerAverageColors.size()) {
+		mgr.atlas.layerAverageColors[layer] = computeAverageColor(texture);
+		mgr.atlas.thumbnailsDirty = true;
+	}
 	return true;
 }
 
@@ -7178,6 +7317,11 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 
 	vkDestroyBuffer(mgr.device, stagingBuffer.buffer, nullptr);
 	vkFreeMemory(mgr.device, stagingBuffer.memory, nullptr);
+
+	if (layer < mgr.atlas.layerAverageColors.size()) {
+		mgr.atlas.layerAverageColors[layer] = computeAverageColor(texture);
+		mgr.atlas.thumbnailsDirty = true;
+	}
 }
 
 static void recordGpuStreamUploads(VkCommandBuffer cmd, ImageManager& mgr) {
@@ -7464,6 +7608,9 @@ static void finalizeImageManagerUpdate(ImageManager& mgr) {
 	if (mgr.atlas.lookupDirty) {
 		syncAtlasLookupBuffer(mgr);
 	}
+	if (mgr.atlas.thumbnailsDirty) {
+		syncAtlasThumbnailBuffer(mgr);
+	}
 }
 
 static void destroyGpuStreamResources(ImageManager& mgr) {
@@ -7567,6 +7714,7 @@ static void destroyImageManager(ImageManager& mgr) {
 	}
 
 	destroyAtlasLookupBuffer(mgr);
+	destroyAtlasThumbnailBuffer(mgr);
 }
 
 int main(int argc, char** argv) {
@@ -8214,7 +8362,12 @@ int main(int argc, char** argv) {
 	bufferInfo.offset = 0;
 	bufferInfo.range = imageManager.atlas.imageLayerLookupRange;
 
-	VkWriteDescriptorSet writes[2]{};
+	VkDescriptorBufferInfo thumbnailInfo{};
+	thumbnailInfo.buffer = imageManager.atlas.layerThumbnailBuffer.buffer;
+	thumbnailInfo.offset = 0;
+	thumbnailInfo.range = imageManager.atlas.layerThumbnailRange;
+
+	VkWriteDescriptorSet writes[3]{};
 	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	writes[0].dstSet = imageManager.atlas.descriptorSet;
 	writes[0].dstBinding = 0;
@@ -8231,7 +8384,18 @@ int main(int argc, char** argv) {
 	writes[1].descriptorCount = 1;
 	writes[1].pBufferInfo = &bufferInfo;
 
-	vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+	if (thumbnailInfo.buffer != VK_NULL_HANDLE && thumbnailInfo.range > 0) {
+		writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[2].dstSet = imageManager.atlas.descriptorSet;
+		writes[2].dstBinding = 3;
+		writes[2].dstArrayElement = 0;
+		writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[2].descriptorCount = 1;
+		writes[2].pBufferInfo = &thumbnailInfo;
+	}
+
+	uint32_t writeCount = (thumbnailInfo.buffer != VK_NULL_HANDLE && thumbnailInfo.range > 0) ? 3u : 2u;
+	vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
 
 	if (hudFont.ready) {
 		VkDescriptorSet hudDescriptor = VK_NULL_HANDLE;
