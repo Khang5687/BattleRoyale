@@ -684,6 +684,9 @@ struct TextureAtlas {
 
 	uint32_t nextFreeLayer = 0;
 	int64_t frameCounter = 0;
+	
+	// Eviction protection: track when each layer was last uploaded
+	std::vector<uint64_t> layerUploadFrame;
 };
 
 struct VRAMBudget {
@@ -5954,16 +5957,35 @@ static void ensureAtlasLayerCapacity(ImageManager& mgr, size_t desiredFreeLayers
 		return;
 	}
 
+	// Eviction protection: don't evict textures uploaded in last ~2 seconds (120 frames at 60fps)
+	const uint64_t EVICTION_PROTECTION_FRAMES = 120;
+	uint64_t currentFrame = static_cast<uint64_t>(mgr.atlas.frameCounter);
+
 	size_t needed = desiredFreeLayers - mgr.atlas.freeLayers.size();
 	size_t guard = mgr.atlas.lruOrder.size();
 	while (needed > 0 && guard-- > 0 && !mgr.atlas.lruOrder.empty()) {
 		uint32_t layer = mgr.atlas.lruOrder.back();
+		
+		// Skip if in-flight (already in the code)
 		if (isLayerInFlight(mgr, layer)) {
 			mgr.atlas.lruOrder.pop_back();
 			mgr.atlas.lruOrder.push_front(layer);
 			mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
 			continue;
 		}
+		
+		// NEW: Skip if uploaded recently (eviction protection)
+		if (layer < mgr.atlas.layerUploadFrame.size()) {
+			uint64_t uploadFrame = mgr.atlas.layerUploadFrame[layer];
+			if (currentFrame >= uploadFrame && (currentFrame - uploadFrame) < EVICTION_PROTECTION_FRAMES) {
+				// Move to front of LRU, try next layer
+				mgr.atlas.lruOrder.pop_back();
+				mgr.atlas.lruOrder.push_front(layer);
+				mgr.atlas.layerToLruIter[layer] = mgr.atlas.lruOrder.begin();
+				continue;
+			}
+		}
+		
 		mgr.atlas.lruOrder.pop_back();
 		mgr.atlas.layerToLruIter.erase(layer);
 		uint32_t evictedImageId = mgr.atlas.layerToImageId[layer];
@@ -6312,6 +6334,7 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 	// Initialize LRU structures
 	mgr.atlas.layerToImageId.resize(TextureAtlas::MAX_LAYERS, UINT32_MAX);
 	mgr.atlas.layerLayouts.resize(TextureAtlas::MAX_LAYERS, VK_IMAGE_LAYOUT_UNDEFINED);
+	mgr.atlas.layerUploadFrame.resize(TextureAtlas::MAX_LAYERS, 0);
 	{
 		std::queue<uint32_t> empty;
 		std::swap(mgr.atlas.freeLayers, empty);
@@ -7299,6 +7322,14 @@ static void flushBatchedUploads(ImageManager& mgr) {
 	auto end = std::chrono::steady_clock::now();
 	float elapsedMs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0f;
 	updateLoaderMetricsOnUpload(mgr, batchCount, elapsedMs);
+
+	// Record upload frame for eviction protection
+	uint64_t currentFrame = static_cast<uint64_t>(mgr.atlas.frameCounter);
+	for (const auto& upload : mgr.currentBatch) {
+		if (upload.layer < mgr.atlas.layerUploadFrame.size()) {
+			mgr.atlas.layerUploadFrame[upload.layer] = currentFrame;
+		}
+	}
 
 	// Clear batch and reset staging offset
 	mgr.currentBatch.clear();
