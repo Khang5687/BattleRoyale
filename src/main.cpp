@@ -7172,11 +7172,14 @@ static void updatePreloading(ImageManager& mgr, const class Simulation& sim) {
 			if (currentLoaded >= 2048 || progress >= 0.95f) {
 				phaseComplete = true;
 				mgr.currentPreloadPhase = ImageManager::PreloadPhase::PHASE_3_ALL;
-				mgr.preloadTarget = mgr.atlas.imageFiles.size();
-				std::cout << "Starting preload phase 3: loading remaining " << (mgr.preloadTarget.load() - currentLoaded) << " images..." << std::endl;
+				// FIX #2: Cap preload at atlas capacity (2048) + 512 margin to prevent thrashing
+				// Attempting to load 5,806 images into a 2,048-layer atlas causes constant eviction/reload cycles
+				size_t maxPreload = TextureAtlas::MAX_LAYERS + 512; // 2,560 images max
+				mgr.preloadTarget = std::min(maxPreload, mgr.atlas.imageFiles.size());
+				std::cout << "Starting preload phase 3: loading remaining " << (mgr.preloadTarget.load() - currentLoaded) << " images (capped at " << mgr.preloadTarget.load() << " to prevent atlas thrashing)..." << std::endl;
 
-				// Request remaining images
-				for (uint32_t imageId = 2048; imageId < mgr.atlas.imageFiles.size(); ++imageId) {
+				// Request remaining images up to cap
+				for (uint32_t imageId = 2048; imageId < mgr.preloadTarget.load() && imageId < mgr.atlas.imageFiles.size(); ++imageId) {
 					LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
 					requestImageLoad(mgr, imageId, priority);
 				}
@@ -7579,6 +7582,8 @@ static void flushBatchedUploadsAsync(ImageManager& mgr) {
 
 // Poll async upload completions - call this every frame
 static void pollUploadCompletions(ImageManager& mgr) {
+	uint64_t currentFrame = mgr.atlas.frameCounter;
+	
 	for (auto& ctx : mgr.asyncUploads) {
 		if (!ctx.inFlight) {
 			continue; // Not in use
@@ -7604,6 +7609,33 @@ static void pollUploadCompletions(ImageManager& mgr) {
 			mgr.metricsAsyncUploadsInFlight--;
 
 			// Note: We keep commandBuffer and fence allocated for reuse
+		} else if (currentFrame > ctx.frameSubmitted && (currentFrame - ctx.frameSubmitted) > 180) {
+			// FIX #3: Upload stuck for 3+ seconds at 60fps - force completion to prevent permanent deadlock
+			std::cerr << "[Warning] Async upload timeout: stuck for " << (currentFrame - ctx.frameSubmitted) 
+			          << " frames (images: ";
+			for (size_t i = 0; i < ctx.uploadedImageIds.size(); ++i) {
+				std::cerr << ctx.uploadedImageIds[i];
+				if (i < ctx.uploadedImageIds.size() - 1) std::cerr << ", ";
+			}
+			std::cerr << ") - forcing completion" << std::endl;
+			
+			// Force wait for fence and reset
+			vkWaitForFences(mgr.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX);
+			vkResetFences(mgr.device, 1, &ctx.fence);
+			
+			// Mark textures as ready (best effort)
+			for (size_t i = 0; i < ctx.uploadedImageIds.size(); ++i) {
+				uint32_t imageId = ctx.uploadedImageIds[i];
+				if (imageId < mgr.textureReady.size()) {
+					mgr.textureReady[imageId] = true;
+				}
+			}
+			
+			// Free the slot
+			ctx.inFlight = false;
+			ctx.uploadedImageIds.clear();
+			ctx.uploadedLayers.clear();
+			mgr.metricsAsyncUploadsInFlight--;
 		}
 		// If result is VK_NOT_READY, upload is still in progress - check again next frame
 	}
@@ -7950,6 +7982,30 @@ static void updateImageManager(ImageManager& mgr) {
 		std::lock_guard<std::mutex> lock(mgr.uploadMutex);
 		while (!mgr.pendingUploads.empty()) {
 			auto& [imageId, texture] = mgr.pendingUploads.front();
+			
+			// FIX #1: Implement LRU eviction for textureCache to prevent unbounded growth
+			if (mgr.atlas.textureCache.size() >= ImageManager::MAX_CACHE_SIZE) {
+				// Find least recently used texture (not currently in atlas)
+				uint32_t lruImageId = UINT32_MAX;
+				uint64_t oldestFrame = UINT64_MAX;
+				
+				for (const auto& [cachedImageId, cachedTexture] : mgr.atlas.textureCache) {
+					// Don't evict if currently in atlas
+					if (mgr.atlas.imageIdToLayer.find(cachedImageId) != mgr.atlas.imageIdToLayer.end()) {
+						continue;
+					}
+					if (cachedTexture.lastUsed < oldestFrame) {
+						oldestFrame = cachedTexture.lastUsed;
+						lruImageId = cachedImageId;
+					}
+				}
+				
+				if (lruImageId != UINT32_MAX) {
+					mgr.atlas.textureCache.erase(lruImageId);
+					// std::cout << "[Cache Eviction] Evicted image " << lruImageId << " from textureCache (lastUsed: " << oldestFrame << ")" << std::endl;
+				}
+			}
+			
 			mgr.atlas.textureCache[imageId] = std::move(texture);
 			mgr.pendingUploads.pop();
 		}
