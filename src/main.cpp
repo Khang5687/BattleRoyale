@@ -842,7 +842,7 @@ struct ImageManager {
 	static constexpr float IMAGE_PROXIMITY_CULLING_RADIUS = IMAGE_LOAD_THRESHOLD_RADIUS * 2.0f; // Load within 2x visibility radius
 	static constexpr uint32_t MAX_LOADS_PER_FRAME = 16; // Frame budget to prevent hitches
 	static constexpr uint32_t MAX_CACHE_SIZE = 4096;
-	static constexpr uint32_t MAX_ASYNC_UPLOADS = 16; // Maximum concurrent async upload operations (increased from 4)
+	static constexpr uint32_t MAX_ASYNC_UPLOADS = 64; // Maximum concurrent async upload operations (increased from 16 to handle high circle counts)
 
 	TextureAtlas atlas;
 	BindlessTextureSystem bindless;
@@ -883,7 +883,7 @@ struct ImageManager {
 	std::queue<std::pair<uint32_t, LoadedTexture>> pendingUploads;
 
 	// Batched GPU upload system
-	static constexpr size_t BATCH_SIZE = 128;
+	static constexpr size_t BATCH_SIZE = 16; // Reduced from 128 for faster upload completion
 	static constexpr VkDeviceSize STAGING_BUFFER_SIZE = 256 * 1024 * 1024; // 256MB
 	BufferWithMemory persistentStagingBuffer;
 	void* mappedStagingMemory = nullptr;
@@ -932,6 +932,12 @@ struct ImageManager {
 	float metricsVRAMUsagePercent = 0.0f;
 	float metricsLastBatchMs = 0.0f;
 	uint32_t metricsLastBatchCount = 0;
+	
+	// Async upload metrics
+	std::atomic<uint32_t> metricsAsyncUploadsInFlight{0};
+	std::atomic<uint32_t> metricsAsyncUploadsPeakUsage{0};
+	std::atomic<uint64_t> metricsAsyncUploadsTotal{0};
+	std::atomic<uint32_t> metricsSyncFallbackCount{0};
 
 	// Frame budget system for preventing hitches
 	uint32_t frameLoadCount = 0; // Number of loads requested this frame
@@ -957,6 +963,7 @@ struct Simulation;
 class AdaptiveCircleSimulation;
 static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, VkDescriptorPool descriptorPool, bool enableGpuStream);
 static void pollGpuStreamCompletions(ImageManager& mgr);
+static void pollUploadCompletions(ImageManager& mgr);
 static bool queueGpuStreamUpload(ImageManager& mgr, uint32_t imageId, uint32_t layer, LoadedTexture& texture);
 static void recordGpuStreamUploads(VkCommandBuffer cmd, ImageManager& mgr);
 static void destroyGpuStreamResources(ImageManager& mgr);
@@ -7359,18 +7366,39 @@ static void flushBatchedUploadsAsync(ImageManager& mgr) {
 	}
 	auto start = std::chrono::steady_clock::now();
 
-	// Find an available async upload slot
+	// Poll for completed uploads FIRST to potentially free up slots
+	pollUploadCompletions(mgr);
+
+	// Find an available async upload slot, retry a few times
 	AsyncUploadContext* ctx = nullptr;
-	for (auto& upload : mgr.asyncUploads) {
-		if (!upload.inFlight) {
-			ctx = &upload;
-			break;
+	constexpr int MAX_RETRIES = 3;
+	for (int retry = 0; retry < MAX_RETRIES; ++retry) {
+		for (auto& upload : mgr.asyncUploads) {
+			if (!upload.inFlight) {
+				ctx = &upload;
+				break;
+			}
+		}
+		
+		if (ctx != nullptr) {
+			break; // Found a slot
+		}
+		
+		// No slot available - wait a tiny bit and poll again
+		if (retry < MAX_RETRIES - 1) {
+			std::this_thread::sleep_for(std::chrono::microseconds(100)); // 0.1ms wait
+			pollUploadCompletions(mgr);
 		}
 	}
 
-	// If no slots available, fall back to sync (this should rarely happen)
+	// If still no slots available after retries, fall back to sync (rare)
 	if (ctx == nullptr) {
-		std::cout << "[Warning] All async upload slots busy, falling back to sync upload" << std::endl;
+		mgr.metricsSyncFallbackCount++;
+		if (mgr.metricsSyncFallbackCount % 10 == 1) { // Only print every 10th fallback to reduce spam
+			std::cout << "[Warning] All " << ImageManager::MAX_ASYNC_UPLOADS 
+			          << " async upload slots busy after retries, falling back to sync upload (count: " 
+			          << mgr.metricsSyncFallbackCount.load() << ")" << std::endl;
+		}
 		flushBatchedUploads(mgr);
 		return;
 	}
@@ -7515,6 +7543,18 @@ static void flushBatchedUploadsAsync(ImageManager& mgr) {
 	// Mark context as in-flight
 	ctx->inFlight = true;
 	ctx->frameSubmitted = static_cast<uint64_t>(mgr.atlas.frameCounter);
+	
+	// Update metrics
+	uint32_t inFlightCount = ++mgr.metricsAsyncUploadsInFlight;
+	mgr.metricsAsyncUploadsTotal++;
+	
+	// Track peak usage
+	uint32_t currentPeak = mgr.metricsAsyncUploadsPeakUsage.load();
+	while (inFlightCount > currentPeak) {
+		if (mgr.metricsAsyncUploadsPeakUsage.compare_exchange_weak(currentPeak, inFlightCount)) {
+			break;
+		}
+	}
 
 	auto end = std::chrono::steady_clock::now();
 	float elapsedMs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0f;
@@ -7559,6 +7599,9 @@ static void pollUploadCompletions(ImageManager& mgr) {
 			ctx.inFlight = false;
 			ctx.uploadedImageIds.clear();
 			ctx.uploadedLayers.clear();
+			
+			// Update metrics
+			mgr.metricsAsyncUploadsInFlight--;
 
 			// Note: We keep commandBuffer and fence allocated for reuse
 		}
@@ -9281,6 +9324,18 @@ int main(int argc, char** argv) {
 									  " textures in " + batchInfo.str() + "ms";
 				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, batchText, diagTextSize, diagShadow);
 				appendHudText(hudFont, hudVertices, 24.0f, yOffset, batchText, diagTextSize, diagColor);
+				yOffset += 35.0f;
+
+				// Async upload metrics
+				uint32_t asyncInFlight = imageManager.metricsAsyncUploadsInFlight.load();
+				uint32_t asyncPeak = imageManager.metricsAsyncUploadsPeakUsage.load();
+				uint32_t asyncFallbacks = imageManager.metricsSyncFallbackCount.load();
+				std::string asyncText = "Async slots: " + std::to_string(asyncInFlight) + "/" + 
+				                        std::to_string(ImageManager::MAX_ASYNC_UPLOADS) + 
+				                        " (peak: " + std::to_string(asyncPeak) + ", fallbacks: " + 
+				                        std::to_string(asyncFallbacks) + ")";
+				appendHudText(hudFont, hudVertices, 24.0f + 1.5f, yOffset + 1.5f, asyncText, diagTextSize, diagShadow);
+				appendHudText(hudFont, hudVertices, 24.0f, yOffset, asyncText, diagTextSize, diagColor);
 				yOffset += 35.0f;
 
 				// Preload progress (when active)
