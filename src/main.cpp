@@ -646,6 +646,7 @@ struct LoadedTexture {
 	uint32_t mipLevels = 1;
 	std::vector<VkDeviceSize> mipOffsets; // Byte offset of each mip level in data
 	std::vector<std::pair<uint32_t, uint32_t>> mipDimensions; // Width and height of each mip
+	uint8_t loadedAtTier = 0; // Track what tier this texture was loaded at (1=64x64, 2=256x256)
 };
 
 struct TextureAtlas {
@@ -711,6 +712,7 @@ struct LoadPriority {
 	uint64_t lastAccessFrame = 0;
 	uint64_t lastRequestFrame = 0;
 	uint64_t currentFrame = 0;
+	uint8_t requestedTier = 0; // 0=no texture, 1=low-res (64x64), 2=full-res (256x256)
 
 	float computeScore() const {
 		// Enhanced lazy loading priority calculation
@@ -1788,32 +1790,36 @@ struct Simulation {
 		}
 	}
 
-	void updateImageTiers() {
+	void updateImageTiers(float zoomFactor = 1.0f) {
 		if (!imageManager) return;
 
 		for (size_t i = 0; i < posX.size(); ++i) {
 			if (!alive[i] || imageId[i] == UINT32_MAX) continue;
 
-			float apparentRadius = radius[i];
+			// Use screen-space radius for proper tier classification
+			float apparentRadius = radius[i] * zoomFactor;
 			CircleRenderTier tier = classifyRenderTier(apparentRadius);
+
+			// Always ensure at least tier 1 for circles with images
+			// Prevent downgrading to tier 0 once loaded
+			uint8_t targetTier = 1;
 
 			switch (tier) {
 				case CircleRenderTier::PIXEL_DUST:
 				case CircleRenderTier::SIMPLE_SHAPE:
-					if (imageTier[i] == 0) {
-						imageTier[i] = 1;
-					}
+					targetTier = 1;
 					break;
 				case CircleRenderTier::BASIC_TEXTURE:
-					if (imageTier[i] < 1) {
-						imageTier[i] = 1;
-					}
+					targetTier = 1;
 					break;
 				case CircleRenderTier::FULL_DETAIL:
-					if (imageTier[i] < 2) {
-						imageTier[i] = 2;
-					}
+					targetTier = 2;
 					break;
+			}
+
+			// Only upgrade tier, never downgrade (prevents flickering)
+			if (imageTier[i] < targetTier) {
+				imageTier[i] = targetTier;
 			}
 		}
 	}
@@ -2801,6 +2807,7 @@ static void updateLoaderPriorityCache(ImageManager& mgr, const Simulation& sim, 
 		priority.distanceToPlayer = std::hypot(sim.posX[idx], sim.posY[idx]) / zoomFactor;
 		priority.circleRadius = sim.radius[idx];
 		priority.currentFrame = frameIndex;
+		priority.requestedTier = (idx < sim.imageTier.size()) ? sim.imageTier[idx] : 0;
 		if (imageId < mgr.imageLastAccessFrame.size()) {
 			priority.lastAccessFrame = mgr.imageLastAccessFrame[imageId];
 		}
@@ -6559,33 +6566,62 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 					continue;
 				}
 
+			// Determine target resolution based on tier (0=skip, 1=64x64, 2=256x256)
+			uint8_t tier = priority.requestedTier;
+			if (tier == 0) {
+				// Skip loading for tier 0 (flat color only)
+				std::lock_guard<std::mutex> lock(mgr.requestMutex);
+				mgr.decodeInFlight.erase(imageId);
+				continue;
+			}
+
+			uint32_t intermediateSize = (tier >= 2) ? TextureAtlas::ATLAS_SIZE : 64;
+
 			std::string path = mgr.atlas.imageFiles[imageId].string();
 			int width = 0, height = 0, channels = 0;
 			unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
 			bool success = false;
 			if (data) {
 				LoadedTexture tex;
-				const uint8_t* resizedData = nullptr;
-				
-				// First, resize to ATLAS_SIZE if needed
-				if (width != TextureAtlas::ATLAS_SIZE || height != TextureAtlas::ATLAS_SIZE) {
+				const uint8_t* finalData = nullptr;
+
+				// First resize to intermediate size (64x64 for tier 1, 256x256 for tier 2)
+				// This saves decode time and intermediate memory for distant circles
+				if (width != intermediateSize || height != intermediateSize) {
 					unsigned char* result = stbir_resize_uint8_linear(
 						data, width, height, 0,
-						buffer.data.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
+						buffer.data.data(), intermediateSize, intermediateSize, 0,
 						STBIR_RGBA);
 					if (result != nullptr) {
-						resizedData = buffer.data.data();
+						finalData = buffer.data.data();
 						success = true;
 					}
 				} else {
-					resizedData = data;
+					finalData = data;
 					success = true;
 				}
 
-				// Now generate mipmaps offline for the atlas-sized texture
-				if (success && resizedData != nullptr) {
-					TextureWithMipmaps mipmapped = generateMipmaps(resizedData, TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 4);
-					
+				// For tier 1, upscale to atlas size for compatibility
+				// This still saves decode time but maintains atlas format
+				if (success && tier < 2 && intermediateSize != TextureAtlas::ATLAS_SIZE) {
+					// Allocate secondary buffer for upscaling
+					std::vector<uint8_t>& secondaryBuffer = mgr.decodeBuffers[(threadIndex + 1) % mgr.decodeBuffers.size()].data;
+					secondaryBuffer.resize(TextureAtlas::ATLAS_SIZE * TextureAtlas::ATLAS_SIZE * 4);
+
+					unsigned char* upscaled = stbir_resize_uint8_linear(
+						finalData, intermediateSize, intermediateSize, 0,
+						secondaryBuffer.data(), TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 0,
+						STBIR_RGBA);
+
+					if (upscaled != nullptr) {
+						finalData = secondaryBuffer.data();
+					}
+				}
+
+				// Generate mipmaps for the atlas-sized texture
+				if (success && finalData != nullptr) {
+					TextureWithMipmaps mipmapped = generateMipmaps(finalData, TextureAtlas::ATLAS_SIZE, TextureAtlas::ATLAS_SIZE, 4);
+
 					tex.width = mipmapped.width;
 					tex.height = mipmapped.height;
 					tex.mipLevels = mipmapped.mipLevels;
@@ -6593,7 +6629,8 @@ static void initImageManager(ImageManager& mgr, VkPhysicalDevice physicalDevice,
 					tex.mipOffsets = std::move(mipmapped.mipOffsets);
 					tex.mipDimensions = std::move(mipmapped.mipDimensions);
 					tex.refCount = 1;
-					tex.lastUsed = mgr.atlas.frameCounter;						{
+					tex.lastUsed = mgr.atlas.frameCounter;
+					tex.loadedAtTier = tier;						{
 							std::lock_guard<std::mutex> lock(mgr.uploadMutex);
 							mgr.pendingUploads.emplace(imageId, std::move(tex));
 						}
@@ -6628,8 +6665,14 @@ static void requestImageLoad(ImageManager& mgr, uint32_t imageId, const LoadPrio
 	}
 	{
 		std::lock_guard<std::mutex> lock(mgr.requestMutex);
-		if (mgr.atlas.textureCache.find(imageId) != mgr.atlas.textureCache.end()) {
-			return; // already resident
+		auto cachedIt = mgr.atlas.textureCache.find(imageId);
+		if (cachedIt != mgr.atlas.textureCache.end()) {
+			// Check if we need to upgrade the texture tier
+			if (cachedIt->second.loadedAtTier >= priority.requestedTier) {
+				return; // already resident at sufficient quality
+			}
+			// Tier upgrade needed - keep the old texture visible while loading new one
+			// Don't erase here; let the new upload replace it to avoid flicker
 		}
 		if (mgr.decodeInFlight.find(imageId) != mgr.decodeInFlight.end()) {
 			if (imageId < mgr.imageLastRequestFrame.size()) {
@@ -7009,6 +7052,12 @@ static void startPreloading(ImageManager& mgr, const class Simulation& sim) {
 			priority.distanceToPlayer = dist;
 			priority.circleRadius = sim.radius[i];
 			priority.currentFrame = static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter));
+			// Ensure preloading uses at least tier 1 if no tier is set
+			if (priority.requestedTier == 0 && i < sim.imageTier.size()) {
+				priority.requestedTier = std::max<uint8_t>(1, sim.imageTier[i]);
+			} else if (priority.requestedTier == 0) {
+				priority.requestedTier = 1; // Default to low-res for preloading
+			}
 			float score = priority.computeScore();
 			candidates.push_back(PreloadCandidate{score, sim.imageId[i], priority});
 		}
@@ -7035,6 +7084,9 @@ static void startPreloading(ImageManager& mgr, const class Simulation& sim) {
 	for (uint32_t imageId = 0; imageId < mgr.atlas.imageFiles.size() && requestedIds.size() < targetCount; ++imageId) {
 		if (requestedIds.insert(imageId).second) {
 			LoadPriority priority = resolvePriorityForImage(mgr, imageId, static_cast<uint64_t>(std::max<int64_t>(0, mgr.atlas.frameCounter)));
+			if (priority.requestedTier == 0) {
+				priority.requestedTier = 1; // Default to low-res for sequential preloading
+			}
 			requestImageLoad(mgr, imageId, priority);
 		}
 	}
@@ -8701,7 +8753,7 @@ int main(int argc, char** argv) {
 		adaptiveSim.updateSimulationTiers(sim, 1.0f); // Fixed zoom factor for now
 
 		// Always update image tiers to show textures as they load, even when paused
-		sim.updateImageTiers(); // Update image loading tiers based on radius
+		sim.updateImageTiers(1.0f); // Update image loading tiers based on screen-space radius
 		if (imageManager.priorityMergeInterval != 0 && (frameCount % imageManager.priorityMergeInterval) == 0) {
 			requestPriorityRefresh(imageManager);
 		}
