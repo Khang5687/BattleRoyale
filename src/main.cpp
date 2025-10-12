@@ -107,7 +107,8 @@ struct CircleFragSpecializationData {
 struct CirclePushConstants {
 	float viewport[2];
 	float pixelDustThreshold;
-	float mipSampleThreshold;
+	float simpleShapeThreshold;
+	float basicTextureThreshold;
 };
 
 struct AtlasThumbnailColor {
@@ -9178,13 +9179,14 @@ int main(int argc, char** argv) {
 	vkCmdSetViewport(cmd, 0, 1, &viewport);
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.pipeline);
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.pipeline);
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, circlePipeline.layout, 0, 1, &imageManager.atlas.descriptorSet, 0, nullptr);
 			CirclePushConstants circlePc{};
 			circlePc.viewport[0] = static_cast<float>(sc.extent.width);
 			circlePc.viewport[1] = static_cast<float>(sc.extent.height);
 			circlePc.pixelDustThreshold = sim.pixelDustThreshold;
-			circlePc.mipSampleThreshold = sim.simpleShapeThreshold;
+			circlePc.simpleShapeThreshold = sim.simpleShapeThreshold;
+			circlePc.basicTextureThreshold = sim.basicTextureThreshold;
 			vkCmdPushConstants(cmd, circlePipeline.layout,
 				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 				0, sizeof(CirclePushConstants), &circlePc);
