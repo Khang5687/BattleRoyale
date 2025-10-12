@@ -827,11 +827,22 @@ struct GpuStreamContext {
 	std::array<GpuStreamSlot, SLOT_COUNT> slots{};
 };
 
+// Async upload context for non-blocking texture uploads
+struct AsyncUploadContext {
+	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+	VkFence fence = VK_NULL_HANDLE;
+	std::vector<uint32_t> uploadedImageIds;
+	std::vector<uint32_t> uploadedLayers;
+	uint64_t frameSubmitted = 0;
+	bool inFlight = false;
+};
+
 struct ImageManager {
 	static constexpr float IMAGE_LOAD_THRESHOLD_RADIUS = 20.0f;
 	static constexpr float IMAGE_PROXIMITY_CULLING_RADIUS = IMAGE_LOAD_THRESHOLD_RADIUS * 2.0f; // Load within 2x visibility radius
 	static constexpr uint32_t MAX_LOADS_PER_FRAME = 16; // Frame budget to prevent hitches
 	static constexpr uint32_t MAX_CACHE_SIZE = 4096;
+	static constexpr uint32_t MAX_ASYNC_UPLOADS = 16; // Maximum concurrent async upload operations (increased from 4)
 
 	TextureAtlas atlas;
 	BindlessTextureSystem bindless;
@@ -889,6 +900,10 @@ struct ImageManager {
 		std::vector<std::pair<uint32_t, uint32_t>> mipDimensions;
 	};
 	std::vector<BatchedUpload> currentBatch;
+
+	// Async upload system (replaces synchronous vkQueueWaitIdle approach)
+	std::array<AsyncUploadContext, MAX_ASYNC_UPLOADS> asyncUploads;
+	std::vector<bool> textureReady; // Track if texture upload is complete and ready for use
 
 	// Transfer queue support
 	VkQueue transferQueue = VK_NULL_HANDLE;
@@ -6022,6 +6037,7 @@ static void prepareImageManagerForImageCount(ImageManager& mgr, size_t imageCoun
 	mgr.cachedPriorities.resize(imageCount);
 	mgr.imageLastAccessFrame.resize(imageCount, 0);
 	mgr.imageLastRequestFrame.resize(imageCount, 0);
+	mgr.textureReady.resize(imageCount, false); // Track async upload completion status
 }
 
 static LoadPriority resolvePriorityForImage(ImageManager& mgr, uint32_t imageId, uint64_t currentFrame) {
@@ -7336,6 +7352,220 @@ static void flushBatchedUploads(ImageManager& mgr) {
 	mgr.stagingOffset = 0;
 }
 
+// Async version of flushBatchedUploads - does not block on vkQueueWaitIdle
+static void flushBatchedUploadsAsync(ImageManager& mgr) {
+	if (mgr.currentBatch.empty() || !mgr.mappedStagingMemory) {
+		return;
+	}
+	auto start = std::chrono::steady_clock::now();
+
+	// Find an available async upload slot
+	AsyncUploadContext* ctx = nullptr;
+	for (auto& upload : mgr.asyncUploads) {
+		if (!upload.inFlight) {
+			ctx = &upload;
+			break;
+		}
+	}
+
+	// If no slots available, fall back to sync (this should rarely happen)
+	if (ctx == nullptr) {
+		std::cout << "[Warning] All async upload slots busy, falling back to sync upload" << std::endl;
+		flushBatchedUploads(mgr);
+		return;
+	}
+
+	size_t batchCount = mgr.currentBatch.size();
+	VkCommandPool cmdPool = mgr.useTransferQueue ? mgr.transferCommandPool : mgr.commandPool;
+	VkQueue queue = mgr.useTransferQueue ? mgr.transferQueue : mgr.graphicsQueue;
+
+	// Allocate command buffer if needed
+	if (ctx->commandBuffer == VK_NULL_HANDLE) {
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = cmdPool;
+		allocInfo.commandBufferCount = 1;
+		vkAllocateCommandBuffers(mgr.device, &allocInfo, &ctx->commandBuffer);
+	}
+
+	// Create fence if needed
+	if (ctx->fence == VK_NULL_HANDLE) {
+		VkFenceCreateInfo fenceInfo{};
+		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		fenceInfo.flags = 0; // Start unsignaled
+		vkCreateFence(mgr.device, &fenceInfo, nullptr, &ctx->fence);
+	}
+
+	// Reset fence for reuse
+	vkResetFences(mgr.device, 1, &ctx->fence);
+
+	// Begin command buffer
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(ctx->commandBuffer, &beginInfo);
+
+	// Build barriers and copy regions (same as synchronous version)
+	std::vector<VkImageMemoryBarrier> preTransitions;
+	std::vector<VkBufferImageCopy> copyRegions;
+	std::vector<VkImageMemoryBarrier> postTransitions;
+
+	ctx->uploadedImageIds.clear();
+	ctx->uploadedLayers.clear();
+
+	for (const auto& upload : mgr.currentBatch) {
+		ctx->uploadedImageIds.push_back(upload.imageId);
+		ctx->uploadedLayers.push_back(upload.layer);
+
+		// Pre-transition: Undefined/Shader Read -> Transfer Dst
+		VkImageMemoryBarrier preBarrier{};
+		preBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		VkImageLayout oldLayout = mgr.atlas.layerLayouts[upload.layer];
+		preBarrier.oldLayout = oldLayout;
+		preBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		preBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		preBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		preBarrier.image = mgr.atlas.atlasArray.image;
+		preBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		preBarrier.subresourceRange.baseMipLevel = 0;
+		preBarrier.subresourceRange.levelCount = upload.mipLevels;
+		preBarrier.subresourceRange.baseArrayLayer = upload.layer;
+		preBarrier.subresourceRange.layerCount = 1;
+
+		if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+			preBarrier.srcAccessMask = 0;
+		} else {
+			preBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		}
+		preBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+		preTransitions.push_back(preBarrier);
+
+		// Copy regions for all mip levels
+		for (uint32_t mipLevel = 0; mipLevel < upload.mipLevels; ++mipLevel) {
+			VkBufferImageCopy region{};
+			region.bufferOffset = upload.bufferOffset + upload.mipOffsets[mipLevel];
+			region.bufferRowLength = 0;
+			region.bufferImageHeight = 0;
+			region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			region.imageSubresource.mipLevel = mipLevel;
+			region.imageSubresource.baseArrayLayer = upload.layer;
+			region.imageSubresource.layerCount = 1;
+			region.imageOffset = {0, 0, 0};
+			region.imageExtent = {upload.mipDimensions[mipLevel].first, upload.mipDimensions[mipLevel].second, 1};
+
+			copyRegions.push_back(region);
+		}
+
+		// Post-transition: Transfer Dst -> Shader Read Only
+		VkImageMemoryBarrier postBarrier{};
+		postBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		postBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		postBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		postBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		postBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		postBarrier.image = mgr.atlas.atlasArray.image;
+		postBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		postBarrier.subresourceRange.baseMipLevel = 0;
+		postBarrier.subresourceRange.levelCount = upload.mipLevels;
+		postBarrier.subresourceRange.baseArrayLayer = upload.layer;
+		postBarrier.subresourceRange.layerCount = 1;
+		postBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		postBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		postTransitions.push_back(postBarrier);
+		mgr.atlas.layerLayouts[upload.layer] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+
+	// Execute pre-transitions
+	if (!preTransitions.empty()) {
+		vkCmdPipelineBarrier(ctx->commandBuffer,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, nullptr, 0, nullptr,
+			static_cast<uint32_t>(preTransitions.size()), preTransitions.data());
+	}
+
+	// Execute batch copy
+	if (!copyRegions.empty()) {
+		vkCmdCopyBufferToImage(ctx->commandBuffer, mgr.persistentStagingBuffer.buffer,
+			mgr.atlas.atlasArray.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			static_cast<uint32_t>(copyRegions.size()), copyRegions.data());
+	}
+
+	// Execute post-transitions
+	if (!postTransitions.empty()) {
+		vkCmdPipelineBarrier(ctx->commandBuffer,
+			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0, 0, nullptr, 0, nullptr,
+			static_cast<uint32_t>(postTransitions.size()), postTransitions.data());
+	}
+
+	// End command buffer
+	vkEndCommandBuffer(ctx->commandBuffer);
+
+	// Submit WITHOUT waiting (key difference from synchronous version)
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &ctx->commandBuffer;
+
+	vkQueueSubmit(queue, 1, &submitInfo, ctx->fence); // Fence will signal when complete
+
+	// Mark context as in-flight
+	ctx->inFlight = true;
+	ctx->frameSubmitted = static_cast<uint64_t>(mgr.atlas.frameCounter);
+
+	auto end = std::chrono::steady_clock::now();
+	float elapsedMs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0f;
+	updateLoaderMetricsOnUpload(mgr, batchCount, elapsedMs);
+
+	// Record upload frame for eviction protection
+	uint64_t currentFrame = static_cast<uint64_t>(mgr.atlas.frameCounter);
+	for (const auto& upload : mgr.currentBatch) {
+		if (upload.layer < mgr.atlas.layerUploadFrame.size()) {
+			mgr.atlas.layerUploadFrame[upload.layer] = currentFrame;
+		}
+		// Mark texture as NOT ready yet (will be set to true when fence signals)
+		if (upload.imageId < mgr.textureReady.size()) {
+			mgr.textureReady[upload.imageId] = false;
+		}
+	}
+
+	// Clear batch and reset staging offset
+	mgr.currentBatch.clear();
+	mgr.stagingOffset = 0;
+}
+
+// Poll async upload completions - call this every frame
+static void pollUploadCompletions(ImageManager& mgr) {
+	for (auto& ctx : mgr.asyncUploads) {
+		if (!ctx.inFlight) {
+			continue; // Not in use
+		}
+
+		// Check if fence has been signaled (non-blocking check)
+		VkResult result = vkGetFenceStatus(mgr.device, ctx.fence);
+		if (result == VK_SUCCESS) {
+			// Upload complete! Mark all textures in this batch as ready
+			for (size_t i = 0; i < ctx.uploadedImageIds.size(); ++i) {
+				uint32_t imageId = ctx.uploadedImageIds[i];
+				if (imageId < mgr.textureReady.size()) {
+					mgr.textureReady[imageId] = true;
+				}
+			}
+
+			// Mark slot as available for reuse
+			ctx.inFlight = false;
+			ctx.uploadedImageIds.clear();
+			ctx.uploadedLayers.clear();
+
+			// Note: We keep commandBuffer and fence allocated for reuse
+		}
+		// If result is VK_NOT_READY, upload is still in progress - check again next frame
+	}
+}
+
 static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint32_t layer) {
 	auto texIt = mgr.atlas.textureCache.find(imageId);
 	if (texIt == mgr.atlas.textureCache.end()) {
@@ -7351,14 +7581,14 @@ static void uploadTextureToAtlasLayer(ImageManager& mgr, uint32_t imageId, uint3
 	if (addTextureToBatch(mgr, imageId, layer, texture)) {
 		// Check if batch is full or should be flushed
 		if (mgr.currentBatch.size() >= ImageManager::BATCH_SIZE) {
-			flushBatchedUploads(mgr);
+			flushBatchedUploadsAsync(mgr);
 		}
 		return;
 	}
 
 	// If batching failed (e.g., staging buffer full), flush and try again
 	if (!mgr.currentBatch.empty()) {
-		flushBatchedUploads(mgr);
+		flushBatchedUploadsAsync(mgr);
 		if (addTextureToBatch(mgr, imageId, layer, texture)) {
 			return;
 		}
@@ -7671,6 +7901,7 @@ static void pollGpuStreamCompletions(ImageManager& mgr) {
 
 static void updateImageManager(ImageManager& mgr) {
 	pollGpuStreamCompletions(mgr);
+	pollUploadCompletions(mgr); // Poll async upload fence status
 	// Process pending uploads
 	{
 		std::lock_guard<std::mutex> lock(mgr.uploadMutex);
@@ -7684,9 +7915,9 @@ static void updateImageManager(ImageManager& mgr) {
 }
 
 static void finalizeImageManagerUpdate(ImageManager& mgr) {
-	// Flush any pending batched uploads
+	// Flush any pending batched uploads (async - no blocking)
 	if (!mgr.currentBatch.empty()) {
-		flushBatchedUploads(mgr);
+		flushBatchedUploadsAsync(mgr);
 	}
 
 	if (mgr.atlas.lookupDirty) {
@@ -7751,6 +7982,23 @@ static void destroyImageManager(ImageManager& mgr) {
 	for (auto& thread : mgr.decoderThreads) {
 		if (thread.joinable()) {
 			thread.join();
+		}
+	}
+
+	// Clean up async upload resources
+	for (auto& ctx : mgr.asyncUploads) {
+		if (ctx.fence != VK_NULL_HANDLE) {
+			// Wait for any in-flight uploads to complete before destroying
+			if (ctx.inFlight) {
+				vkWaitForFences(mgr.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX);
+			}
+			vkDestroyFence(mgr.device, ctx.fence, nullptr);
+			ctx.fence = VK_NULL_HANDLE;
+		}
+		if (ctx.commandBuffer != VK_NULL_HANDLE) {
+			VkCommandPool pool = mgr.useTransferQueue ? mgr.transferCommandPool : mgr.commandPool;
+			vkFreeCommandBuffers(mgr.device, pool, 1, &ctx.commandBuffer);
+			ctx.commandBuffer = VK_NULL_HANDLE;
 		}
 	}
 
